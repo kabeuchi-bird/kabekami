@@ -1,0 +1,21 @@
+[package]
+name = "kabekami"
+version = "0.1.0"
+edition = "2021"
+description = "KDE Plasma wallpaper rotation tool with Variety-inspired BlurPad display mode"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+dirs = "6"
+image = "0.25"
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
