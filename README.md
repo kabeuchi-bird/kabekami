@@ -89,18 +89,46 @@ yay -S kabekami
 
 3. **自動起動を設定する（任意）**
 
-   KDE の「自動起動」（システム設定 → 自動起動）に `kabekami` を追加するか、
-   以下の systemd ユーザーユニットを作成します:
+   以下のいずれかの方法で設定できます。
+
+   **方法 A — KDE システム設定から設定する（推奨・GUI）**
+
+   1. **システム設定** を開く
+   2. 「**起動と終了**」→「**自動起動**」を選択
+   3. 「**アプリケーションを追加...**」をクリック
+   4. `kabekami` と入力して選択し、「OK」
+
+   または `.desktop` ファイルを直接配置する方法もあります:
+
+   ```bash
+   # ~/.config/autostart/ に .desktop ファイルを作成する
+   cat > ~/.config/autostart/kabekami.desktop <<'EOF'
+   [Desktop Entry]
+   Name=kabekami
+   GenericName=Wallpaper Rotator
+   Comment=KDE Plasma wallpaper rotation tool
+   Exec=kabekami
+   Type=Application
+   Categories=Utility;
+   X-KDE-autostart-phase=2
+   EOF
+   ```
+
+   > `X-KDE-autostart-phase=2` により、Plasma シェルの初期化が完了してから
+   > 起動するためトレイアイコンが確実に表示されます。
+
+   **方法 B — systemd ユーザーユニットで管理する**
 
    ```ini
    # ~/.config/systemd/user/kabekami.service
    [Unit]
    Description=kabekami wallpaper rotator
-   After=graphical-session.target
+   After=graphical-session.target plasma-plasmashell.service
 
    [Service]
    ExecStart=%h/.local/bin/kabekami
    Restart=on-failure
+   RestartSec=5
 
    [Install]
    WantedBy=graphical-session.target
@@ -108,7 +136,13 @@ yay -S kabekami
 
    ```bash
    systemctl --user enable --now kabekami.service
+   # ログを確認する場合
+   journalctl --user -u kabekami.service -f
    ```
+
+   > systemd 方式のほうがクラッシュ時の自動再起動（`Restart=on-failure`）や
+   > ログ管理が容易です。`plasma-plasmashell.service` を `After` に指定することで
+   > トレイの準備ができてから起動します。
 
 ## 設定ファイルリファレンス
 
