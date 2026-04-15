@@ -14,6 +14,7 @@ mod blur_pad;
 mod cache;
 mod config;
 mod display_mode;
+mod notify;
 mod plasma;
 mod prefetch;
 mod scanner;
@@ -82,6 +83,9 @@ async fn main() -> Result<()> {
             }
         };
 
+    // デスクトップ通知ハンドル
+    let mut notifier = notify::Notifier::new();
+
     // トレイを非同期に起動（D-Bus が使えない環境では None になる）
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TrayCmd>();
     let tray_handle = tray::spawn_tray(
@@ -96,7 +100,12 @@ async fn main() -> Result<()> {
         if let Some(path) = scheduler.next() {
             if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                 tracing::error!(error = %e, "initial wallpaper apply failed");
+                let msg = e.to_string();
+                notifier.error("壁紙の設定に失敗しました / Wallpaper apply failed", &msg).await;
+                update_tray_error(&tray_handle, msg).await;
             } else {
+                notifier.clear();
+                update_tray_clear_error(&tray_handle).await;
                 update_tray_current(&tray_handle, &path).await;
                 start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
             }
@@ -117,7 +126,12 @@ async fn main() -> Result<()> {
                 if let Some(path) = scheduler.next() {
                     if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                         tracing::error!(error = %e, "auto apply failed");
+                        let msg = e.to_string();
+                        notifier.error("壁紙の設定に失敗しました / Wallpaper apply failed", &msg).await;
+                        update_tray_error(&tray_handle, msg).await;
                     } else {
+                        notifier.clear();
+                        update_tray_clear_error(&tray_handle).await;
                         update_tray_current(&tray_handle, &path).await;
                         start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                     }
@@ -131,7 +145,12 @@ async fn main() -> Result<()> {
                         if let Some(path) = scheduler.next() {
                             if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                                 tracing::error!(error = %e, "tray Next failed");
+                                let msg = e.to_string();
+                                notifier.error("壁紙の設定に失敗しました / Wallpaper apply failed", &msg).await;
+                                update_tray_error(&tray_handle, msg).await;
                             } else {
+                                notifier.clear();
+                                update_tray_clear_error(&tray_handle).await;
                                 update_tray_current(&tray_handle, &path).await;
                                 start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                             }
@@ -143,7 +162,12 @@ async fn main() -> Result<()> {
                         if let Some(path) = scheduler.prev() {
                             if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                                 tracing::error!(error = %e, "tray Prev failed");
+                                let msg = e.to_string();
+                                notifier.error("壁紙の設定に失敗しました / Wallpaper apply failed", &msg).await;
+                                update_tray_error(&tray_handle, msg).await;
                             } else {
+                                notifier.clear();
+                                update_tray_clear_error(&tray_handle).await;
                                 update_tray_current(&tray_handle, &path).await;
                             }
                         }
@@ -170,6 +194,12 @@ async fn main() -> Result<()> {
                         if let Some(cur) = scheduler.current().cloned() {
                             if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache).await {
                                 tracing::error!(error = %e, "reapply after mode change failed");
+                                let msg = e.to_string();
+                                notifier.error("壁紙の設定に失敗しました / Wallpaper apply failed", &msg).await;
+                                update_tray_error(&tray_handle, msg).await;
+                            } else {
+                                notifier.clear();
+                                update_tray_clear_error(&tray_handle).await;
                             }
                             start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                         }
@@ -320,6 +350,23 @@ async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache:
     };
 
     plasma::set_wallpaper(&output).await
+}
+
+/// トレイアイコンに `last_error` をセットする。
+async fn update_tray_error(
+    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
+    msg: String,
+) {
+    if let Some(ref h) = tray_handle {
+        h.update(|t| t.last_error = Some(msg)).await;
+    }
+}
+
+/// トレイアイコンの `last_error` をクリアする。
+async fn update_tray_clear_error(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>) {
+    if let Some(ref h) = tray_handle {
+        h.update(|t| t.last_error = None).await;
+    }
 }
 
 /// トレイアイコンの `current_name` を更新する。

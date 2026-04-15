@@ -55,6 +55,8 @@ pub struct KabekamiTray {
     pub interval_secs: u64,
     /// 現在の壁紙のファイル名（トレイのツールチップに使う）
     pub current_name: String,
+    /// 直近のエラーメッセージ。`None` = 正常動作中。
+    pub last_error: Option<String>,
 }
 
 impl ksni::Tray for KabekamiTray {
@@ -63,7 +65,11 @@ impl ksni::Tray for KabekamiTray {
     }
 
     fn icon_name(&self) -> String {
-        "preferences-desktop-wallpaper".into()
+        if self.last_error.is_some() {
+            "dialog-error".into()
+        } else {
+            "preferences-desktop-wallpaper".into()
+        }
     }
 
     fn title(&self) -> String {
@@ -73,10 +79,10 @@ impl ksni::Tray for KabekamiTray {
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
             title: "kabekami".into(),
-            description: if self.current_name.is_empty() {
-                String::new()
-            } else {
-                format!("現在: {}", self.current_name)
+            description: match &self.last_error {
+                Some(e) => format!("エラー / Error: {}", e),
+                None if self.current_name.is_empty() => String::new(),
+                None => format!("現在: {}", self.current_name),
             },
             ..Default::default()
         }
@@ -234,6 +240,7 @@ pub async fn spawn_tray(
         mode,
         interval_secs,
         current_name: String::new(),
+        last_error: None,
     };
 
     // `assume_sni_available(true)` にすることで、デスクトップ環境の起動が
