@@ -43,44 +43,52 @@ pub fn detect() -> Option<(u32, u32)> {
 ///
 /// 出力行のトークンを直接スキャンするため、"Output:" 行のインライン記述と
 /// 後続行（modes: セクション）の両方に対応する。
+///
+/// `*current` マーカー付きの行（現在のアクティブモード）を最優先とし、
+/// それが存在しない場合はブロック内で最初に見つかった WxH を使う。
 fn parse_primary_resolution(text: &str) -> Option<(u32, u32)> {
     let mut in_enabled = false;
+    // enabled ブロック内で最初に見つかった候補（geometry 等）
+    let mut candidate: Option<(u32, u32)> = None;
 
     for line in text.lines() {
         let trimmed = line.trim();
 
         // 新しい Output ブロックの開始
         if trimmed.starts_with("Output:") {
+            // 前の enabled ブロックに *current がなかった場合は candidate を返す
+            if in_enabled {
+                if let Some(res) = candidate {
+                    return Some(res);
+                }
+            }
             in_enabled = trimmed.contains("enabled");
+            candidate = None;
         }
 
         if !in_enabled {
             continue;
         }
 
-        // *current マーカー付きの行（modes セクション）を優先
-        // 例: "    1: 1920x1080@60 *current"
-        let is_current = trimmed.contains("*current");
-
         // 行内の各トークンから "WxH" / "WxH@rate" パターンを探す。
         // カンマ区切りの座標 "0,0,2560x1440" も分解できるよう
         // ホワイトスペースとカンマの両方で分割する。
         for token in trimmed.split(|c: char| c.is_ascii_whitespace() || c == ',') {
-            // "@" 以降（レート部分）を除去して "WxH" だけにする
             let base = token.split('@').next().unwrap_or(token);
             if let Some(res) = parse_wxh(base) {
-                if is_current {
-                    // *current 行があれば即確定（最も信頼性が高い）
-                    return Some(res);
-                } else {
-                    // Output: 行や geometry: 行で初めて見つかったもの
+                if trimmed.contains("*current") {
+                    // *current 行は最も信頼性が高いので即確定
                     return Some(res);
                 }
+                // それ以外はブロック内の最初の候補として記録しておく
+                candidate.get_or_insert(res);
+                break;
             }
         }
     }
 
-    None
+    // 最後の enabled ブロックの候補を返す
+    if in_enabled { candidate } else { None }
 }
 
 /// "WxH" 文字列を `(width, height)` にパースする。
@@ -139,6 +147,16 @@ mod tests {
         let text = "Output: 1 DP-1 disabled disconnected\n\
                     Output: 2 HDMI-1 disabled disconnected\n";
         assert_eq!(parse_primary_resolution(text), None);
+    }
+
+    #[test]
+    fn current_mode_overrides_geometry_line() {
+        // geometry says 2560x1440 but the active mode (*current) is 1920x1080
+        let text = "Output: 1 DP-1 enabled connected geometry 0,0,2560x1440\n\
+                    \tmodes:\n\
+                    \t  1: 2560x1440@60\n\
+                    \t  2: 1920x1080@60 *current\n";
+        assert_eq!(parse_primary_resolution(text), Some((1920, 1080)));
     }
 
     #[test]

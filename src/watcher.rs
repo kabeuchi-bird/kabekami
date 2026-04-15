@@ -15,7 +15,7 @@
 //! }
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use notify::{
     event::{ModifyKind, RenameMode},
@@ -56,7 +56,7 @@ pub fn spawn(
             let (kind, paths) = (event.kind, event.paths);
 
             for path in paths {
-                if !is_image(&path) {
+                if !crate::scanner::is_image(&path) {
                     continue;
                 }
                 let msg = match kind {
@@ -107,15 +107,3 @@ pub fn spawn(
     Some((DirWatcher { _inner: watcher }, rx))
 }
 
-/// パスが対応画像形式かどうかを確認する（scanner.rs と同一リスト）。
-fn is_image(path: &Path) -> bool {
-    const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "bmp", "tiff", "tif", "gif"];
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|ext| {
-            IMAGE_EXTS
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(ext))
-        })
-        .unwrap_or(false)
-}

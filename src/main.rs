@@ -284,7 +284,8 @@ fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
 ///
 /// 1. キャッシュヒット → キャッシュ済みファイルを直接 Plasma に渡す（高速パス）
 /// 2. キャッシュミス  → `spawn_blocking` で加工・保存してから Plasma に渡す
-async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache: &Cache) -> Result<()> {
+///    （`store()` が LRU 退避も担う）
+async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache: &Arc<Cache>) -> Result<()> {
     let key = CacheKey {
         src: src.to_path_buf(),
         screen_w,
@@ -299,7 +300,7 @@ async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache:
         cached
     } else {
         let src_owned = src.to_path_buf();
-        let cache_owned = Arc::new(Cache::new(cache.directory.clone(), 0)); // no evict here
+        let cache_owned = Arc::clone(cache);
         let mode = config.display.mode;
         let blur_sigma = config.display.blur_sigma;
         let bg_darken = config.display.bg_darken;
@@ -317,11 +318,6 @@ async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache:
         .await
         .context("image processing task panicked")??
     };
-
-    // 加工後にキャッシュ全体の退避チェック（メインキャッシュで実施）
-    if let Err(e) = cache.evict_if_needed() {
-        tracing::warn!("cache eviction error: {}", e);
-    }
 
     plasma::set_wallpaper(&output).await
 }

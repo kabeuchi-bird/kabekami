@@ -60,9 +60,7 @@ pub struct Rotation {
     pub order: Order,
     #[serde(default = "default_true")]
     pub change_on_start: bool,
-    /// Phase 2 で参照されるため Phase 1 では未使用。設計書 §8 / §5a 参照。
     #[serde(default = "default_true")]
-    #[allow(dead_code)]
     pub prefetch: bool,
 }
 
@@ -120,9 +118,7 @@ pub enum DisplayMode {
 pub struct Cache {
     #[serde(default = "default_cache_dir")]
     pub directory: PathBuf,
-    /// Phase 2 のキャッシュ管理（§12 LRU）で参照される。
     #[serde(default = "default_max_size_mb")]
-    #[allow(dead_code)]
     pub max_size_mb: u64,
 }
 
