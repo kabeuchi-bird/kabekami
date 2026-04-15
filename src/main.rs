@@ -14,6 +14,7 @@ mod blur_pad;
 mod cache;
 mod config;
 mod display_mode;
+mod i18n;
 mod notify;
 mod plasma;
 mod prefetch;
