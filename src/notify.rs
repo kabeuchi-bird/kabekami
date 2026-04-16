@@ -10,25 +10,33 @@
 
 use std::collections::HashMap;
 
+use crate::i18n::Lang;
+
 /// デスクトップ通知の状態を保持する。
 ///
 /// `main()` で 1 インスタンスを作り、エラー／成功のたびに `error()` / `clear()` を呼ぶ。
 pub struct Notifier {
     /// 前回送信した通知の ID（0 = 未送信）。replaces_id として再利用する。
     last_id: u32,
+    /// デスクトップ通知に表示するサマリー文字列。言語設定に応じて初期化される。
+    summary: &'static str,
 }
 
 impl Notifier {
-    pub fn new() -> Self {
-        Self { last_id: 0 }
+    /// 言語設定に応じたサマリー文字列でノーティファイアを初期化する。
+    pub fn new(lang: Lang) -> Self {
+        Self {
+            last_id: 0,
+            summary: crate::i18n::strings(lang).notify_failed,
+        }
     }
 
     /// エラー通知を送る。
     ///
     /// 前回の通知を `replaces_id` で置き換えるため、連続エラーでも通知は 1 件に留まる。
     /// D-Bus が使えない環境では `debug` ログを出して無視する（通知はベストエフォート）。
-    pub async fn error(&mut self, summary: &str, body: &str) {
-        match self.send_dbus(summary, body).await {
+    pub async fn error(&mut self, body: &str) {
+        match self.send_dbus(self.summary, body).await {
             Ok(id) => self.last_id = id,
             Err(e) => tracing::debug!("desktop notification unavailable: {}", e),
         }
@@ -56,8 +64,8 @@ impl Notifier {
                 Some("org.freedesktop.Notifications"),
                 "Notify",
                 &(
-                    "kabekami",   // app_name
-                    self.last_id, // replaces_id (0 = 新規)
+                    "kabekami",     // app_name
+                    self.last_id,   // replaces_id (0 = 新規)
                     "dialog-error", // app_icon
                     summary,
                     body,

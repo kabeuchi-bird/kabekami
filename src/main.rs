@@ -84,8 +84,12 @@ async fn main() -> Result<()> {
             }
         };
 
+    // 言語設定を解決する（環境変数 → config → デフォルト ja）
+    let lang = resolve_lang(&config);
+    tracing::info!("ui language: {:?}", lang);
+
     // デスクトップ通知ハンドル
-    let mut notifier = notify::Notifier::new();
+    let mut notifier = notify::Notifier::new(lang);
 
     // トレイを非同期に起動（D-Bus が使えない環境では None になる）
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TrayCmd>();
@@ -93,6 +97,7 @@ async fn main() -> Result<()> {
         cmd_tx,
         config.display.mode,
         config.rotation.interval_secs,
+        lang,
     )
     .await;
 
@@ -102,7 +107,7 @@ async fn main() -> Result<()> {
             if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                 tracing::error!(error = %e, "initial wallpaper apply failed");
                 let msg = e.to_string();
-                notifier.error("壁紙の設定に失敗しました / Wallpaper apply failed", &msg).await;
+                notifier.error(&msg).await;
                 update_tray_error(&tray_handle, msg).await;
             } else {
                 notifier.clear();
@@ -128,7 +133,7 @@ async fn main() -> Result<()> {
                     if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                         tracing::error!(error = %e, "auto apply failed");
                         let msg = e.to_string();
-                        notifier.error("壁紙の設定に失敗しました / Wallpaper apply failed", &msg).await;
+                        notifier.error(&msg).await;
                         update_tray_error(&tray_handle, msg).await;
                     } else {
                         notifier.clear();
@@ -147,7 +152,7 @@ async fn main() -> Result<()> {
                             if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                                 tracing::error!(error = %e, "tray Next failed");
                                 let msg = e.to_string();
-                                notifier.error("壁紙の設定に失敗しました / Wallpaper apply failed", &msg).await;
+                                notifier.error(&msg).await;
                                 update_tray_error(&tray_handle, msg).await;
                             } else {
                                 notifier.clear();
@@ -164,7 +169,7 @@ async fn main() -> Result<()> {
                             if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                                 tracing::error!(error = %e, "tray Prev failed");
                                 let msg = e.to_string();
-                                notifier.error("壁紙の設定に失敗しました / Wallpaper apply failed", &msg).await;
+                                notifier.error(&msg).await;
                                 update_tray_error(&tray_handle, msg).await;
                             } else {
                                 notifier.clear();
@@ -196,7 +201,7 @@ async fn main() -> Result<()> {
                             if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache).await {
                                 tracing::error!(error = %e, "reapply after mode change failed");
                                 let msg = e.to_string();
-                                notifier.error("壁紙の設定に失敗しました / Wallpaper apply failed", &msg).await;
+                                notifier.error(&msg).await;
                                 update_tray_error(&tray_handle, msg).await;
                             } else {
                                 notifier.clear();
@@ -268,6 +273,21 @@ fn init_tracing() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("kabekami=info,warn"));
     fmt().with_env_filter(filter).init();
+}
+
+/// 表示言語を解決する。優先順位:
+///
+/// 1. 環境変数 `KABEKAMI_LANG`（`"en"` / `"ja"`）
+/// 2. `config.toml` の `[ui] language`
+/// 3. デフォルト: 日本語
+fn resolve_lang(config: &Config) -> i18n::Lang {
+    if let Ok(val) = std::env::var("KABEKAMI_LANG") {
+        return i18n::Lang::from_str(val.trim());
+    }
+    if !config.ui.language.is_empty() {
+        return i18n::Lang::from_str(&config.ui.language);
+    }
+    i18n::Lang::default()
 }
 
 /// 画面解像度を解決する。優先順位:

@@ -30,9 +30,6 @@ impl Lang {
 ///
 /// すべてのフィールドは `'static` 参照なのでゼロコストで渡せる。
 /// フォーマット文字列（`tooltip_current` 等）は `{}` を 1 個含む。
-///
-/// Phase 3.2 で `tray.rs` / `notify.rs` から全フィールドが参照される。
-#[allow(dead_code)]
 pub struct UiStrings {
     /// トレイメニュー: 次の壁紙
     pub next_wallpaper: &'static str,

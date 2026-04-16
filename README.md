@@ -1,63 +1,64 @@
-# kabekami（壁紙）
+> [日本語版 README はこちら / Japanese README](README.ja.md)
 
-KDE Plasma 向け壁紙ローテーションツール。Rust 製。
+# kabekami (壁紙)
 
-- ローカル画像をタイマーで順次 / ランダム切り替え
-- **BlurPad** モード: 元画像をぼかした背景の中央に原画をオーバーレイ（[Variety](https://github.com/varietywalls/variety) の blur-pad に相当）
-- システムトレイ常駐（SNI プロトコル）＋コンテキストメニュー操作
-- 加工済み画像のキャッシュ（SHA256 キー、LRU 退避）で短い間隔でも高速
-- 次の画像を事前にバックグラウンド加工しておく先読み機構
+A KDE Plasma wallpaper rotation daemon written in Rust.
 
-## 動作要件
+- Rotates local images on a timer (sequential or random order)
+- **BlurPad** mode: overlays the original image centred on a blurred background (equivalent to [Variety](https://github.com/varietywalls/variety)'s blur-pad)
+- System tray resident (SNI protocol) with context menu controls
+- LRU cache of processed images (SHA256 keyed) for fast switching even at short intervals
+- Background prefetch: pre-processes the next image while the current one is displayed
 
-| 項目 | 要件 |
-|---|---|
+## Requirements
+
+| Item | Requirement |
+|------|------------|
 | OS | Linux |
-| DE | KDE Plasma 5.7 以降 または Plasma 6 |
-| Rust | 1.75 以降（edition 2021） |
-| 外部コマンド | `plasma-apply-wallpaperimage`（Plasma 付属） |
-| D-Bus | セッションバスへのアクセス（トレイ表示に必要） |
+| DE | KDE Plasma 5.7+ or Plasma 6 |
+| Rust | 1.75+ (edition 2021) |
+| External command | `plasma-apply-wallpaperimage` (bundled with Plasma) |
+| D-Bus | Session bus access (required for tray icon) |
 
-> **Note** `plasma-apply-wallpaperimage` は KDE パッケージに同梱されています。
-> Arch Linux では `plasma-workspace`、Fedora/Debian では `plasma-workspace` または
-> `kde-plasma-desktop` に含まれています。
+> **Note** `plasma-apply-wallpaperimage` is included with KDE packages.
+> Arch Linux: `plasma-workspace` · Fedora/Debian: `plasma-workspace` or `kde-plasma-desktop`.
 
-## インストール
+## Installation
 
-### cargo build（推奨）
+### cargo build (recommended)
 
 ```bash
 git clone https://github.com/kabeuchi-bird/kabekami.git
 cd kabekami
 cargo build --release
-# バイナリは target/release/kabekami に生成される
+# Binary is output to target/release/kabekami
 sudo install -m755 target/release/kabekami /usr/local/bin/
 ```
 
-### cargo install（crates.io 公開後）
+### cargo install (after crates.io release)
 
 ```bash
 cargo install kabekami
 ```
 
-### AUR（Arch Linux）
+### AUR (Arch Linux)
 
 ```bash
-# 公開後
+# After release
 paru -S kabekami
-# または
+# or
 yay -S kabekami
 ```
 
-## クイックスタート
+## Quick Start
 
-1. **設定ファイルを作成する**
+1. **Create a configuration file**
 
    ```bash
    mkdir -p ~/.config/kabekami
    ```
 
-   `~/.config/kabekami/config.toml` を以下の内容で作成します:
+   Create `~/.config/kabekami/config.toml`:
 
    ```toml
    [sources]
@@ -65,12 +66,12 @@ yay -S kabekami
    recursive = true
 
    [rotation]
-   interval_secs = 1800   # 30 分ごとに切り替え
+   interval_secs = 1800   # rotate every 30 minutes
    order = "random"
    change_on_start = true
 
    [display]
-   mode = "blur_pad"      # BlurPad モード（推奨）
+   mode = "blur_pad"      # BlurPad mode (recommended)
    blur_sigma = 25.0
    bg_darken = 0.1
 
@@ -79,29 +80,26 @@ yay -S kabekami
    max_size_mb = 500
    ```
 
-2. **起動する**
+2. **Launch**
 
    ```bash
    kabekami
    ```
 
-   起動するとシステムトレイにアイコンが表示されます。
+   A tray icon will appear in your system tray.
 
-3. **自動起動を設定する（任意）**
+3. **Set up autostart (optional)**
 
-   以下のいずれかの方法で設定できます。
+   **Method A — KDE System Settings (recommended)**
 
-   **方法 A — KDE システム設定から設定する（推奨・GUI）**
+   1. Open **System Settings**
+   2. Go to **Startup and Shutdown** → **Autostart**
+   3. Click **Add Application…**
+   4. Type `kabekami`, select it, and click **OK**
 
-   1. **システム設定** を開く
-   2. 「**起動と終了**」→「**自動起動**」を選択
-   3. 「**アプリケーションを追加...**」をクリック
-   4. `kabekami` と入力して選択し、「OK」
-
-   または `.desktop` ファイルを直接配置する方法もあります:
+   Or place a `.desktop` file directly:
 
    ```bash
-   # ~/.config/autostart/ に .desktop ファイルを作成する
    cat > ~/.config/autostart/kabekami.desktop <<'EOF'
    [Desktop Entry]
    Name=kabekami
@@ -114,10 +112,9 @@ yay -S kabekami
    EOF
    ```
 
-   > `X-KDE-autostart-phase=2` により、Plasma シェルの初期化が完了してから
-   > 起動するためトレイアイコンが確実に表示されます。
+   > `X-KDE-autostart-phase=2` ensures kabekami starts after the Plasma shell has fully initialised, so the tray icon is reliably shown.
 
-   **方法 B — systemd ユーザーユニットで管理する**
+   **Method B — systemd user unit**
 
    ```ini
    # ~/.config/systemd/user/kabekami.service
@@ -136,189 +133,189 @@ yay -S kabekami
 
    ```bash
    systemctl --user enable --now kabekami.service
-   # ログを確認する場合
+   # View logs
    journalctl --user -u kabekami.service -f
    ```
 
-   > systemd 方式のほうがクラッシュ時の自動再起動（`Restart=on-failure`）や
-   > ログ管理が容易です。`plasma-plasmashell.service` を `After` に指定することで
-   > トレイの準備ができてから起動します。
+   > The systemd approach provides automatic restart on crash (`Restart=on-failure`) and integrated log management. Specifying `plasma-plasmashell.service` in `After=` ensures the tray is ready before kabekami starts.
 
-## 設定ファイルリファレンス
+## Configuration Reference
 
-設定ファイルのパス: `~/.config/kabekami/config.toml`
+Config file: `~/.config/kabekami/config.toml`
 
-設定ファイルが存在しない場合はすべてデフォルト値で起動します。
+If the file does not exist, all default values are used.
 
-### `[sources]` — 画像ソース
+### `[sources]` — Image Sources
 
 ```toml
 [sources]
-# 壁紙画像を格納したディレクトリ（複数指定可）
+# Directories containing wallpaper images (multiple entries allowed)
 directories = [
     "~/Pictures/Wallpapers",
     "~/Pictures/Photos",
 ]
-# サブディレクトリを再帰的に走査するか（デフォルト: true）
+# Recursively scan subdirectories (default: true)
 recursive = true
 ```
 
-対応拡張子: `jpg` / `jpeg` / `png` / `webp` / `bmp` / `tiff` / `gif`
+Supported extensions: `jpg` / `jpeg` / `png` / `webp` / `bmp` / `tiff` / `gif`
 
-### `[rotation]` — 切り替え設定
+### `[rotation]` — Rotation Settings
 
 ```toml
 [rotation]
-# 切り替え間隔（秒）。最小値は 5 秒（下限未満は自動補正）
+# Rotation interval in seconds. Minimum is 5 s (lower values are clamped).
 interval_secs = 1800
 
-# 切り替え順序
-#   "random"     — Fisher-Yates シャッフル（全画像を一巡してから再シャッフル）
-#   "sequential" — ディレクトリ走査順に順次切り替え
+# Rotation order
+#   "random"     — Fisher-Yates shuffle (visits every image once before reshuffling)
+#   "sequential" — in directory scan order
 order = "random"
 
-# 起動直後に壁紙を即時切り替えるか（デフォルト: true）
+# Change wallpaper immediately on startup (default: true)
 change_on_start = true
 
-# 次の壁紙を事前加工しておくか（短い間隔のときに有効）（デフォルト: true）
+# Pre-process the next wallpaper in the background (default: true)
+# Recommended when using short intervals
 prefetch = true
 ```
 
-### `[display]` — 表示モード
+### `[display]` — Display Mode
 
 ```toml
 [display]
-# 表示モード（詳細は下記参照）
+# Display mode (see table below)
 mode = "blur_pad"
 
-# BlurPad 用パラメータ
-blur_sigma = 25.0        # ぼかし強度（大きいほどぼける、推奨: 15〜30）
-bg_darken  = 0.1         # 背景を暗くする割合（0.0〜1.0、0.1 = 10%暗く）
+# BlurPad parameters
+blur_sigma = 25.0   # Blur intensity (higher = more blur, recommended: 15–30)
+bg_darken  = 0.1    # Darken background by this fraction (0.0–1.0, 0.1 = 10% darker)
 ```
 
-#### 表示モード一覧
+#### Display Modes
 
-| モード | 動作 | 実装状況 |
-|---|---|---|
-| `blur_pad` | 元画像をぼかした背景＋前景オーバーレイ（**推奨**） | Phase 2 ✓ |
-| `fill` | 画面を埋める（はみ出し部分を切り取り） | Phase 3 予定 ※ |
-| `fit` | 画面に収める（余白は黒） | Phase 3 予定 ※ |
-| `stretch` | アスペクト比無視で引き伸ばし | Phase 3 予定 ※ |
-| `smart` | アスペクト比の差が小さければ `fill`、大きければ `blur_pad` を自動選択 | Phase 3 予定 ※ |
+| Mode | Behaviour |
+|------|-----------|
+| `blur_pad` | Blurred background with the original image overlaid (**recommended**) |
+| `fill` | Fill screen, cropping edges to maintain aspect ratio |
+| `fit` | Fit within screen, black letterbox/pillarbox |
+| `stretch` | Stretch to fill, ignoring aspect ratio |
+| `smart` | Auto-selects `fill` or `blur_pad` based on aspect ratio difference |
 
-> ※ Phase 3 実装前は `blur_pad` にフォールバックします。
-
-### `[cache]` — キャッシュ設定
+### `[cache]` — Cache Settings
 
 ```toml
 [cache]
-# 加工済み画像の保存先（デフォルト: ~/.cache/kabekami）
+# Directory for processed image cache (default: ~/.cache/kabekami)
 directory = "~/.cache/kabekami"
-# キャッシュの最大サイズ（MB）。超えたら古いファイルから削除（デフォルト: 500）
+# Maximum cache size in MB. Oldest files are evicted when exceeded (default: 500)
 max_size_mb = 500
 ```
 
-## 使い方
+### `[ui]` — UI Language
 
-### 起動オプション
-
+```toml
+[ui]
+# Display language: "ja" (Japanese, default) or "en" (English)
+# Can be overridden at runtime with the KABEKAMI_LANG environment variable
+language = "ja"
 ```
-kabekami [OPTIONS]
-```
 
-| 環境変数 | 説明 |
-|---|---|
-| `KABEKAMI_SCREEN=2560x1440` | 画面解像度を手動指定（Phase 3 で自動取得予定） |
-| `RUST_LOG=kabekami=debug` | デバッグログを有効化 |
+## Usage
 
-**例:**
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `KABEKAMI_SCREEN=2560x1440` | Override screen resolution (auto-detected via `kscreen-doctor` by default) |
+| `KABEKAMI_LANG=en` | Override UI language at runtime (`ja` or `en`) |
+| `RUST_LOG=kabekami=debug` | Enable debug logging |
+
+**Examples:**
 
 ```bash
-# 4K モニター向けに解像度を指定して起動
+# Specify resolution for a 4K monitor
 KABEKAMI_SCREEN=3840x2160 kabekami
 
-# デバッグログを有効にして起動
+# Run with English tray menu and notifications
+KABEKAMI_LANG=en kabekami
+
+# Enable debug logging
 RUST_LOG=kabekami=debug kabekami
 ```
 
-> **Note** Phase 3 では `kscreen-doctor` を使って画面解像度を自動取得する予定です。
-> それまでは `KABEKAMI_SCREEN` 環境変数で設定してください。デフォルト: `1920x1080`
+### System Tray Menu
 
-### システムトレイメニュー
-
-起動後、システムトレイのアイコンを右クリックするとコンテキストメニューが表示されます。
+After launch, right-click the tray icon to open the context menu:
 
 ```
 kabekami
-├── 次の壁紙              — 即座に次の壁紙へ切り替え（タイマーもリセット）
-├── 前の壁紙              — 直前の壁紙に戻る（最大 50 枚分の履歴）
-├── ─────────────────────
-├── 一時停止 / 再開        — タイマー自動切り替えを止める / 再開する
-├── ─────────────────────
-├── 表示モード ▶          — Fill / Fit / Stretch / BlurPad / Smart から選択
-├── 切り替え間隔 ▶        — 10秒 / 30秒 / 5分 / 30分 / 1時間 / 3時間
-├── ─────────────────────
-├── 現在の壁紙を開く       — xdg-open で現在の壁紙ファイルを開く
-├── ─────────────────────
-└── 終了
+├── Next Wallpaper          — Switch immediately (timer resets)
+├── Previous Wallpaper      — Go back to the previous image (up to 50 history)
+├── ───────────────────────
+├── Pause / Resume          — Stop or resume automatic rotation
+├── ───────────────────────
+├── Display Mode ▶          — Fill / Fit / Stretch / BlurPad / Smart
+├── Rotation Interval ▶     — 10s / 30s / 5m / 30m / 1h / 3h
+├── ───────────────────────
+├── Open Current Wallpaper  — Open the current file with xdg-open
+├── ───────────────────────
+└── Quit
 ```
 
-### Ctrl-C で終了
+> When `KABEKAMI_LANG=ja` (or `language = "ja"` in config), the menu is shown in Japanese.
+
+### Stopping
 
 ```bash
-# フォアグラウンドで起動中の場合
+# If running in the foreground
 Ctrl-C
 ```
 
-## ログ
+## Logging
 
-kabekami は `tracing` クレートを使ってログを出力します。
-デフォルトでは `INFO` レベル以上が `stderr` に出力されます。
+kabekami uses the `tracing` crate. By default `INFO` and above are printed to `stderr`.
 
 ```bash
-# ログレベルを変更する（trace / debug / info / warn / error）
+# Change log level (trace / debug / info / warn / error)
 RUST_LOG=kabekami=debug kabekami
 
-# 全クレートのログを出力する
+# Log all crates
 RUST_LOG=debug kabekami
 ```
 
-## キャッシュについて
+## Cache
 
-加工済み画像は `~/.cache/kabekami/` に JPEG（品質 92）で保存されます。
-キャッシュキーは以下の組み合わせの SHA256 ハッシュです:
+Processed images are stored as JPEG (quality 92) under `~/.cache/kabekami/`. The cache key is a SHA256 hash of:
 
-- 元画像の絶対パス
-- 画面解像度
-- 表示モード
-- `blur_sigma` / `bg_darken` の値
+- Absolute source image path
+- Screen resolution
+- Display mode
+- `blur_sigma` and `bg_darken` values
 
-**同じ画像・同じ設定であれば再起動後もキャッシュがヒット**するため、
-2 回目以降の切り替えは非常に高速です。
+**The cache persists across restarts**, so subsequent switches of the same image with the same settings are nearly instant.
 
-キャッシュを手動でクリアする場合:
+To clear the cache manually:
 
 ```bash
 rm -rf ~/.cache/kabekami/
 ```
 
-## トラブルシューティング
+## Troubleshooting
 
-### トレイアイコンが表示されない
+### Tray icon not appearing
 
-- `org.kde.StatusNotifierWatcher` が動作しているか確認してください。
-  KDE Plasma が起動している環境では通常自動で起動します。
-- Plasma が完全に起動する前に kabekami を起動した場合、
-  `kabekami` を再起動してください。
-- GNOME など SNI 非対応の DE では KStatusNotifierItem 対応プラグインが必要です。
+- Verify `org.kde.StatusNotifierWatcher` is running. It starts automatically with KDE Plasma.
+- If kabekami started before Plasma was fully initialised, restart kabekami.
+- On non-SNI desktops (GNOME, etc.) a KStatusNotifierItem compatibility plugin is required.
 
-### `plasma-apply-wallpaperimage` が見つからない
+### `plasma-apply-wallpaperimage` not found
 
 ```bash
 which plasma-apply-wallpaperimage
 ```
 
-見つからない場合はパッケージをインストールしてください:
+If not found, install the package:
 
 ```bash
 # Arch Linux
@@ -331,17 +328,15 @@ sudo dnf install plasma-workspace
 sudo apt install plasma-workspace
 ```
 
-### 壁紙が切り替わらない（evaluateScript エラー）
+### Wallpaper not changing (evaluateScript error)
 
-Plasma のウィジェットがロックされているときは `evaluateScript` が失敗することがあります。
-デスクトップのロックを解除してから再試行してください。
+Plasma's `evaluateScript` can fail when desktop widgets are locked. Unlock the desktop and try again.
 
-### 画像の加工が遅い（4K 環境）
+### Slow image processing (4K displays)
 
-BlurPad 加工は内部で 1/4 サイズでぼかし処理を行うため通常 1〜2 秒で完了しますが、
-`prefetch = true` にしておくと**次の画像を事前加工**するため切り替え時は即座に反映されます。
+BlurPad processing uses a quarter-scale intermediate for the blur step, typically completing in 1–2 s. With `prefetch = true`, the next image is processed in the background so switching is instant at the cost of slightly higher idle CPU/memory usage.
 
-## ライセンス
+## License
 
 [MIT License](LICENSE)
 
@@ -349,4 +344,4 @@ BlurPad 加工は内部で 1/4 サイズでぼかし処理を行うため通常 
 
 ## Acknowledgments
 
-kabekami は [Variety](https://github.com/varietywalls/variety) に強くインスパイアされたプロジェクトです。Variety の作者である **Peter Levi** 氏、および長年にわたりメンテナンスを続けてきたコントリビューターの皆さんに深く感謝します。Variety が培ってきた壁紙表示モードの設計思想（特に blur-pad や smart fit）は、kabekami の中核的な機能の着想源となっています。
+kabekami is heavily inspired by [Variety](https://github.com/varietywalls/variety). Many thanks to **Peter Levi** and all the contributors who have maintained Variety over the years. The design philosophy behind Variety's display modes — especially blur-pad and smart fit — is the direct inspiration for kabekami's core features.

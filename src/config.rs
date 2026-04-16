@@ -22,8 +22,6 @@ pub struct Config {
     pub display: Display,
     #[serde(default)]
     pub cache: Cache,
-    /// Phase 3.2 で `resolve_lang()` から参照される。
-    #[allow(dead_code)]
     #[serde(default)]
     pub ui: Ui,
 }
@@ -216,9 +214,6 @@ impl Config {
 /// 1. 環境変数 `KABEKAMI_LANG`
 /// 2. このフィールド（`config.toml` の `[ui] language`）
 /// 3. デフォルト: `"ja"`（日本語）
-///
-/// Phase 3.2 で `main.rs` の `resolve_lang()` から参照される。
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Ui {
     /// `"ja"` または `"en"`。空文字列はデフォルト（日本語）として扱う。
