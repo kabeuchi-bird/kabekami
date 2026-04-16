@@ -108,7 +108,7 @@ async fn main() -> Result<()> {
     tracing::info!("ui language: {:?}", lang);
 
     // デスクトップ通知ハンドル
-    let mut notifier = notify::Notifier::new(lang);
+    let mut notifier = notify::Notifier::new(lang).await;
 
     // トレイを非同期に起動（D-Bus が使えない環境では None になる）
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TrayCmd>();
@@ -123,10 +123,13 @@ async fn main() -> Result<()> {
     // D-Bus デーモンインターフェースを登録（CLI からのリモート操作を受け付ける）
     let _dbus_conn = spawn_dbus_iface(cmd_tx).await;
 
+    // Plasma への壁紙適用ハンドル（D-Bus 接続を保持して再利用）
+    let plasma_shell = plasma::PlasmaShell::new().await;
+
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
-            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
+            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                 tracing::error!(error = %e, "initial wallpaper apply failed");
                 let msg = e.to_string();
                 notifier.error(&msg).await;
@@ -152,7 +155,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if let Some(path) = scheduler.next() {
-                    if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
+                    if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                         tracing::error!(error = %e, "auto apply failed");
                         let msg = e.to_string();
                         notifier.error(&msg).await;
@@ -171,7 +174,7 @@ async fn main() -> Result<()> {
                     TrayCmd::Next => {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
-                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
+                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                                 tracing::error!(error = %e, "tray Next failed");
                                 let msg = e.to_string();
                                 notifier.error(&msg).await;
@@ -188,7 +191,7 @@ async fn main() -> Result<()> {
 
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
-                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
+                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                                 tracing::error!(error = %e, "tray Prev failed");
                                 let msg = e.to_string();
                                 notifier.error(&msg).await;
@@ -197,6 +200,7 @@ async fn main() -> Result<()> {
                                 notifier.clear();
                                 update_tray_clear_error(&tray_handle).await;
                                 update_tray_current(&tray_handle, &path).await;
+                                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                             }
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
@@ -220,7 +224,7 @@ async fn main() -> Result<()> {
                         tracing::info!("display mode → {:?}", mode);
                         config.display.mode = mode;
                         if let Some(cur) = scheduler.current().cloned() {
-                            if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache).await {
+                            if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                                 tracing::error!(error = %e, "reapply after mode change failed");
                                 let msg = e.to_string();
                                 notifier.error(&msg).await;
@@ -305,7 +309,17 @@ async fn main() -> Result<()> {
                                 let new_lang = resolve_lang(&new_cfg);
                                 if new_lang != lang {
                                     lang = new_lang;
-                                    notifier = notify::Notifier::new(lang);
+                                    notifier = notify::Notifier::new(lang).await;
+                                }
+
+                                // warn_notify の変更は tracing subscriber を再初期化できないため
+                                // 再起動後にのみ反映される
+                                if new_cfg.ui.warn_notify != config.ui.warn_notify {
+                                    tracing::warn!(
+                                        "warn_notify setting changed ({} → {}); restart kabekami to apply this change",
+                                        config.ui.warn_notify,
+                                        new_cfg.ui.warn_notify
+                                    );
                                 }
 
                                 // 7. 設定更新
@@ -313,7 +327,7 @@ async fn main() -> Result<()> {
 
                                 // 8. 現在の壁紙を新設定で再適用
                                 if let Some(cur) = prev_current {
-                                    if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache).await {
+                                    if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                                         tracing::error!(error = %e, "reload: reapply failed");
                                         let msg = e.to_string();
                                         notifier.error(&msg).await;
@@ -552,7 +566,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnNotifyLayer {
 ///
 /// 1. 環境変数 `KABEKAMI_LANG`（`"en"` / `"ja"`）
 /// 2. `config.toml` の `[ui] language`
-/// 3. デフォルト: 日本語
+/// 3. デフォルト: 英語
 fn resolve_lang(config: &Config) -> i18n::Lang {
     if let Ok(val) = std::env::var("KABEKAMI_LANG") {
         return i18n::Lang::from_str(val.trim());
@@ -609,7 +623,7 @@ fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
 /// 1. キャッシュヒット → キャッシュ済みファイルを直接 Plasma に渡す（高速パス）
 /// 2. キャッシュミス  → `spawn_blocking` で加工・保存してから Plasma に渡す
 ///    （`store()` が LRU 退避も担う）
-async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache: &Arc<Cache>) -> Result<()> {
+async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache: &Arc<Cache>, plasma: &plasma::PlasmaShell) -> Result<()> {
     let key = CacheKey {
         src: src.to_path_buf(),
         screen_w,
@@ -643,7 +657,7 @@ async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache:
         .context("image processing task panicked")??
     };
 
-    plasma::set_wallpaper(&output).await
+    plasma.set_wallpaper(&output).await
 }
 
 /// トレイアイコンに `last_error` をセットする。

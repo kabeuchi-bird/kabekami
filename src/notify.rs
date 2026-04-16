@@ -10,6 +10,8 @@
 
 use std::collections::HashMap;
 
+use anyhow::Result;
+
 use crate::i18n::Lang;
 
 /// デスクトップ通知の状態を保持する。
@@ -24,17 +26,22 @@ pub struct Notifier {
     warn_last_id: u32,
     /// 警告通知のサマリー文字列。
     warn_summary: &'static str,
+    /// D-Bus セッション接続。確立済みの接続を保持して再利用する。
+    /// 利用不可の場合は `None`（通知はベストエフォートで送信を試みる）。
+    conn: Option<zbus::Connection>,
 }
 
 impl Notifier {
     /// 言語設定に応じたサマリー文字列でノーティファイアを初期化する。
-    pub fn new(lang: Lang) -> Self {
+    pub async fn new(lang: Lang) -> Self {
         let strings = crate::i18n::strings(lang);
+        let conn = zbus::Connection::session().await.ok();
         Self {
             last_id: 0,
             summary: strings.notify_failed,
             warn_last_id: 0,
             warn_summary: strings.notify_warning,
+            conn,
         }
     }
 
@@ -63,15 +70,22 @@ impl Notifier {
     }
 
     /// `org.freedesktop.Notifications::Notify` を呼び、付与された通知 ID を返す。
+    ///
+    /// 接続が未確立の場合は再接続を試みる。それでも失敗した場合はエラーを返す。
     async fn send_dbus(
-        &self,
+        &mut self,
         icon: &str,
         summary: &str,
         body: &str,
         expire_ms: i32,
         replaces_id: u32,
-    ) -> zbus::Result<u32> {
-        let conn = zbus::Connection::session().await?;
+    ) -> Result<u32> {
+        // 接続がなければ再接続を試みる
+        if self.conn.is_none() {
+            self.conn = zbus::Connection::session().await.ok();
+        }
+        let conn = self.conn.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("D-Bus session unavailable"))?;
 
         // Notify シグネチャ:
         //   (app_name, replaces_id, app_icon, summary, body,
@@ -98,6 +112,6 @@ impl Notifier {
             )
             .await?;
 
-        reply.body().deserialize::<u32>().map_err(zbus::Error::from)
+        Ok(reply.body().deserialize::<u32>()?)
     }
 }
