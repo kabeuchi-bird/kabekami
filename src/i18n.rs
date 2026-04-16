@@ -55,6 +55,8 @@ pub struct UiStrings {
     pub notify_failed: &'static str,
     /// 切り替え間隔プリセットのラベル一覧。`tray::INTERVAL_PRESETS` と並列。
     pub interval_labels: &'static [&'static str],
+    /// トレイメニュー: 設定を再読み込み
+    pub reload_config: &'static str,
 }
 
 /// 日本語文字列テーブル。
@@ -71,6 +73,7 @@ pub static JA: UiStrings = UiStrings {
     tooltip_error:   "エラー: {}",
     notify_failed:   "壁紙の設定に失敗しました",
     interval_labels: &["10秒", "30秒", "5分", "30分", "1時間", "3時間"],
+    reload_config:   "設定を再読み込み",
 };
 
 /// 英語文字列テーブル。
@@ -87,6 +90,7 @@ pub static EN: UiStrings = UiStrings {
     tooltip_error:   "Error: {}",
     notify_failed:   "Wallpaper apply failed",
     interval_labels: &["10s", "30s", "5m", "30m", "1h", "3h"],
+    reload_config:   "Reload Config",
 };
 
 /// `Lang` から対応する `UiStrings` 参照を返す。

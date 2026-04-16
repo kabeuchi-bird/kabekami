@@ -30,6 +30,8 @@ pub enum TrayCmd {
     SetInterval(u64),
     /// 現在の壁紙ファイルを xdg-open で開く
     OpenCurrent,
+    /// 設定ファイルを再読み込みする
+    ReloadConfig,
     /// アプリ終了
     Quit,
 }
@@ -207,6 +209,16 @@ impl ksni::Tray for KabekamiTray {
                 enabled: !self.current_name.is_empty(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.notifier.send(TrayCmd::OpenCurrent);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            // 設定を再読み込み / Reload Config
+            StandardItem {
+                label: self.strings.reload_config.into(),
+                icon_name: "view-refresh".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.notifier.send(TrayCmd::ReloadConfig);
                 }),
                 ..Default::default()
             }
