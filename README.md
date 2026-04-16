@@ -286,7 +286,7 @@ RUST_LOG=debug kabekami
 
 ## Cache
 
-Processed images are stored as JPEG (quality 92) under `~/.cache/kabekami/`. The cache key is a SHA256 hash of:
+Processed images are stored as WebP (lossless) under `~/.cache/kabekami/`. The cache key is a SHA256 hash of:
 
 - Absolute source image path
 - Screen resolution
