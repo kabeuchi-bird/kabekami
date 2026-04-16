@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 /// 画像として扱う拡張子（大文字小文字を無視して比較する）。
-const IMAGE_EXTENSIONS: &[&str] = &[
+pub(crate) const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "webp", "bmp", "tiff", "tif", "gif",
 ];
 
@@ -72,7 +72,7 @@ fn scan_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn is_image(path: &Path) -> bool {
+pub(crate) fn is_image(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|ext| {

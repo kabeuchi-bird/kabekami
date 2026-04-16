@@ -522,6 +522,213 @@ Phase 2 完了で 10 秒間隔が安定動作する。
 11. `plasma.rs` — D-Bus evaluateScript 対応
 12. `display_mode.rs` — Fill / Fit / Stretch / Smart の実装
 13. `notify` によるディレクトリ監視（画像追加/削除の自動反映）
+14. `notify.rs` / `tray.rs` — エラー通知（デスクトップ通知＋トレイアイコン変化）
+
+### Phase 3.1: 言語切り替え機能の準備
+
+UI 文字列を単一モジュールに集約し、日本語・英語の両言語に対応する基盤を整える。
+実際の切り替え機能はまだ有効化しない（既存動作は日本語のまま維持）。
+
+**変更ファイル:**
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `src/i18n.rs` | 新規作成: `Lang` enum・`UiStrings` 構造体・言語別定数 |
+| `src/config.rs` | `[ui]` セクションと `language` フィールドを追加 |
+
+**`src/i18n.rs` 設計:**
+
+```rust
+/// 対応言語。デフォルトは日本語。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Lang {
+    #[default]
+    Ja,
+    En,
+}
+
+impl Lang {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "en" => Self::En,
+            _ => Self::Ja,
+        }
+    }
+}
+
+/// トレイ・通知で使用する UI 文字列の集合。
+pub struct UiStrings {
+    pub next_wallpaper:   &'static str,
+    pub prev_wallpaper:   &'static str,
+    pub pause:            &'static str,
+    pub resume:           &'static str,
+    pub display_mode:     &'static str,
+    pub interval:         &'static str,
+    pub open_current:     &'static str,
+    pub quit:             &'static str,
+    pub tooltip_current:  &'static str,   // プレースホルダ {} で %name% を受け取る
+    pub tooltip_error:    &'static str,   // プレースホルダ {} でエラーメッセージを受け取る
+    pub notify_failed:    &'static str,   // デスクトップ通知のサマリー
+    pub interval_labels:  &'static [&'static str], // INTERVAL_PRESETS と並列
+}
+
+pub static JA: UiStrings = UiStrings {
+    next_wallpaper:  "次の壁紙",
+    prev_wallpaper:  "前の壁紙",
+    pause:           "一時停止",
+    resume:          "再開",
+    display_mode:    "表示モード",
+    interval:        "切り替え間隔",
+    open_current:    "現在の壁紙を開く",
+    quit:            "終了",
+    tooltip_current: "現在: {}",
+    tooltip_error:   "エラー: {}",
+    notify_failed:   "壁紙の設定に失敗しました",
+    interval_labels: &["10秒", "30秒", "5分", "30分", "1時間", "3時間"],
+};
+
+pub static EN: UiStrings = UiStrings {
+    next_wallpaper:  "Next Wallpaper",
+    prev_wallpaper:  "Previous Wallpaper",
+    pause:           "Pause",
+    resume:          "Resume",
+    display_mode:    "Display Mode",
+    interval:        "Rotation Interval",
+    open_current:    "Open Current Wallpaper",
+    quit:            "Quit",
+    tooltip_current: "Current: {}",
+    tooltip_error:   "Error: {}",
+    notify_failed:   "Wallpaper apply failed",
+    interval_labels: &["10s", "30s", "5m", "30m", "1h", "3h"],
+};
+
+/// `Lang` から対応する `UiStrings` 参照を返す。
+pub fn strings(lang: Lang) -> &'static UiStrings {
+    match lang {
+        Lang::Ja => &JA,
+        Lang::En => &EN,
+    }
+}
+```
+
+**`src/config.rs` への追加:**
+
+```toml
+# config.toml に追加するセクション
+[ui]
+# 表示言語: "ja"（日本語、デフォルト） または "en"（English）
+# 環境変数 KABEKAMI_LANG で上書き可能
+language = "ja"
+```
+
+```rust
+// Config 構造体に追加
+#[serde(default)]
+pub ui: Ui,
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Ui {
+    #[serde(default)]
+    pub language: String,   // "ja" | "en"（空文字列 = 日本語デフォルト）
+}
+```
+
+**言語解決の優先順位（Phase 3.2 で実装）:**
+
+1. 環境変数 `KABEKAMI_LANG=en`（最優先）
+2. `config.toml` の `[ui] language`
+3. デフォルト: `"ja"`（日本語）
+
+**このフェーズでは実際の文字列差し替えは行わない。** `i18n.rs` と `config.rs` の変更のみ。
+
+### Phase 3.2: 言語切り替え機能の実装と英語 README 追加
+
+Phase 3.1 の基盤を使って実際に切り替えを有効化し、英語 README を整備する。
+
+**変更ファイル:**
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `src/main.rs` | 言語を解決して `UiStrings` を取得し、各モジュールへ渡す |
+| `src/tray.rs` | `KabekamiTray` に `strings: &'static UiStrings` フィールドを追加し、全メニューラベルを差し替え |
+| `src/notify.rs` | `Notifier::error()` のサマリー引数を廃止し、`lang` から自動生成 |
+| `README.md` | 英語版に書き直す（国際的なプロジェクトの標準形式） |
+| `README.ja.md` | 現行の日本語 README を移動 |
+
+**`main.rs` での言語解決:**
+
+```rust
+fn resolve_lang(config: &Config) -> crate::i18n::Lang {
+    // 1. 環境変数
+    if let Ok(val) = std::env::var("KABEKAMI_LANG") {
+        return crate::i18n::Lang::from_str(val.trim());
+    }
+    // 2. config.toml
+    if !config.ui.language.is_empty() {
+        return crate::i18n::Lang::from_str(&config.ui.language);
+    }
+    // 3. デフォルト（日本語）
+    crate::i18n::Lang::default()
+}
+```
+
+**`tray.rs` での使用方法:**
+
+`KabekamiTray` に `strings: &'static UiStrings` を追加し、
+`menu()` 内のリテラル文字列を `self.strings.next_wallpaper` 等に差し替える。
+`interval_labels` は `INTERVAL_PRESETS` と同じインデックスで参照する:
+
+```rust
+// 切り替え間隔サブメニュー（差し替え後）
+options: self.strings.interval_labels
+    .iter()
+    .zip(INTERVAL_PRESETS.iter())
+    .map(|(label, _)| RadioItem { label: label.to_string(), ..Default::default() })
+    .collect(),
+```
+
+**`notify.rs` での使用方法:**
+
+`Notifier` に `summary: &'static str` を保持させ、`new()` に `lang` を渡す:
+
+```rust
+pub struct Notifier {
+    last_id: u32,
+    summary: &'static str,
+}
+impl Notifier {
+    pub fn new(lang: crate::i18n::Lang) -> Self {
+        Self { last_id: 0, summary: crate::i18n::strings(lang).notify_failed }
+    }
+    pub async fn error(&mut self, body: &str) {
+        // summary は self.summary を使う（引数から除去）
+    }
+}
+```
+
+**README 構成:**
+
+```
+README.md      ← 英語版（GitHub デフォルト表示）
+README.ja.md   ← 日本語版（現行 README.md を移動・リンク更新）
+```
+
+`README.md` 冒頭に以下を追加:
+
+```markdown
+> [日本語版 README はこちら](README.ja.md)
+```
+
+英語 `README.md` は現行の日本語版と同等の内容（構成・セクション・コマンド例）を英語で記述する。
+Acknowledgments セクションは両言語版に含める。
+
+**検証:**
+
+```bash
+cargo check                    # 型エラーなし
+cargo test                     # 全テスト通過
+KABEKAMI_LANG=en cargo run     # 英語メニューで起動確認
+```
 
 ---
 

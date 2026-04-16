@@ -125,15 +125,8 @@ pub fn process_for_cache(
     let img = image::open(src)
         .map_err(|e| anyhow::anyhow!("failed to open {}: {}", src.display(), e))?;
 
-    let processed = match mode {
-        DisplayMode::BlurPad => {
-            crate::blur_pad::generate_blur_pad(&img, screen_w, screen_h, blur_sigma, bg_darken)
-        }
-        other => {
-            tracing::warn!("display mode {:?} not implemented, using BlurPad", other);
-            crate::blur_pad::generate_blur_pad(&img, screen_w, screen_h, blur_sigma, bg_darken)
-        }
-    };
+    let processed =
+        crate::display_mode::process(&img, screen_w, screen_h, mode, blur_sigma, bg_darken);
 
     cache.store(&key, &processed)
 }

@@ -22,6 +22,8 @@ pub struct Config {
     pub display: Display,
     #[serde(default)]
     pub cache: Cache,
+    #[serde(default)]
+    pub ui: Ui,
 }
 
 impl Default for Config {
@@ -31,6 +33,7 @@ impl Default for Config {
             rotation: Rotation::default(),
             display: Display::default(),
             cache: Cache::default(),
+            ui: Ui::default(),
         }
     }
 }
@@ -60,9 +63,7 @@ pub struct Rotation {
     pub order: Order,
     #[serde(default = "default_true")]
     pub change_on_start: bool,
-    /// Phase 2 で参照されるため Phase 1 では未使用。設計書 §8 / §5a 参照。
     #[serde(default = "default_true")]
-    #[allow(dead_code)]
     pub prefetch: bool,
 }
 
@@ -120,9 +121,7 @@ pub enum DisplayMode {
 pub struct Cache {
     #[serde(default = "default_cache_dir")]
     pub directory: PathBuf,
-    /// Phase 2 のキャッシュ管理（§12 LRU）で参照される。
     #[serde(default = "default_max_size_mb")]
-    #[allow(dead_code)]
     pub max_size_mb: u64,
 }
 
@@ -207,6 +206,19 @@ impl Config {
             .collect();
         self.cache.directory = expand_tilde(&self.cache.directory);
     }
+}
+
+/// UI 表示言語の設定。
+///
+/// 言語解決の優先順位（`main.rs` の `resolve_lang()` で実施）:
+/// 1. 環境変数 `KABEKAMI_LANG`
+/// 2. このフィールド（`config.toml` の `[ui] language`）
+/// 3. デフォルト: `"ja"`（日本語）
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct Ui {
+    /// `"ja"` または `"en"`。空文字列はデフォルト（日本語）として扱う。
+    #[serde(default)]
+    pub language: String,
 }
 
 fn expand_tilde(path: &Path) -> PathBuf {

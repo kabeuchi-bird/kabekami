@@ -2,7 +2,7 @@
 //!
 //! ## キャッシュキー
 //! SHA256(元画像の絶対パス | 画面幅 | 画面高 | DisplayMode | blur_sigma | bg_darken)
-//! → 16 進数文字列 + `.jpg` がキャッシュファイル名となる。
+//! → 16 進数文字列 + `.webp` がキャッシュファイル名となる。
 //!
 //! ## LRU 退避
 //! `store()` の後に `evict_if_needed()` を呼び、総容量が `max_size_bytes` を
@@ -66,16 +66,10 @@ impl Cache {
             return Ok(path);
         }
 
-        // JPEG quality 92（設計書 §5 に指定）
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-            std::fs::File::create(&path)
-                .with_context(|| format!("cannot create cache file: {}", path.display()))?,
-            92,
-        );
+        // WebP 可逆圧縮（アルファ保持・品質劣化なし）
         image::DynamicImage::ImageRgba8(img.clone())
-            .into_rgb8()
-            .write_with_encoder(encoder)
-            .with_context(|| format!("JPEG encode failed: {}", path.display()))?;
+            .save_with_format(&path, image::ImageFormat::WebP)
+            .with_context(|| format!("WebP encode failed: {}", path.display()))?;
 
         tracing::debug!("cached: {}", path.display());
         self.evict_if_needed()?;
@@ -115,7 +109,7 @@ impl Cache {
     /// キャッシュキーからファイルパスを導出する（ファイルの存在は確認しない）。
     pub fn path_for(&self, key: &CacheKey) -> PathBuf {
         let hash = Self::compute_hash(key);
-        self.directory.join(format!("{hash}.jpg"))
+        self.directory.join(format!("{hash}.webp"))
     }
 
     /// キャッシュキーのハッシュ値（SHA256 → 16 進 64 文字）を計算する。
@@ -135,7 +129,12 @@ impl Cache {
     }
 }
 
-/// キャッシュディレクトリ内の `.jpg` ファイルを mtime 昇順（古い順）で返す。
+/// kabekami がこれまでに書き出したことがある拡張子をすべて列挙する。
+/// フォーマット変更後も旧形式のファイルが LRU 退避対象から漏れないようにする。
+const CACHE_EXTS: &[&str] = &["jpg", "webp", "png"];
+
+/// キャッシュディレクトリ内の画像ファイルを mtime 昇順（古い順）で返す。
+/// `CACHE_EXTS` に含まれる拡張子のみを対象とする。
 fn cache_entries_by_mtime(dir: &Path) -> Result<Vec<(PathBuf, u64, SystemTime)>> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -144,7 +143,8 @@ fn cache_entries_by_mtime(dir: &Path) -> Result<Vec<(PathBuf, u64, SystemTime)>>
     for entry in std::fs::read_dir(dir).context("failed to read cache directory")? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jpg") {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !CACHE_EXTS.contains(&ext) {
             continue;
         }
         let meta = entry.metadata()?;

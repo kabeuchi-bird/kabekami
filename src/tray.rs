@@ -13,6 +13,7 @@
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::DisplayMode;
+use crate::i18n::{Lang, UiStrings};
 
 /// メインループに送るトレイコマンド。
 #[derive(Debug)]
@@ -55,6 +56,10 @@ pub struct KabekamiTray {
     pub interval_secs: u64,
     /// 現在の壁紙のファイル名（トレイのツールチップに使う）
     pub current_name: String,
+    /// 直近のエラーメッセージ。`None` = 正常動作中。
+    pub last_error: Option<String>,
+    /// UI 文字列テーブル（言語設定に応じて初期化）。
+    pub strings: &'static UiStrings,
 }
 
 impl ksni::Tray for KabekamiTray {
@@ -63,7 +68,11 @@ impl ksni::Tray for KabekamiTray {
     }
 
     fn icon_name(&self) -> String {
-        "preferences-desktop-wallpaper".into()
+        if self.last_error.is_some() {
+            "dialog-error".into()
+        } else {
+            "preferences-desktop-wallpaper".into()
+        }
     }
 
     fn title(&self) -> String {
@@ -73,10 +82,10 @@ impl ksni::Tray for KabekamiTray {
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
             title: "kabekami".into(),
-            description: if self.current_name.is_empty() {
-                String::new()
-            } else {
-                format!("現在: {}", self.current_name)
+            description: match &self.last_error {
+                Some(e) => self.strings.tooltip_error.replacen("{}", e, 1),
+                None if self.current_name.is_empty() => String::new(),
+                None => self.strings.tooltip_current.replacen("{}", &self.current_name, 1),
             },
             ..Default::default()
         }
@@ -106,18 +115,18 @@ impl ksni::Tray for KabekamiTray {
             .unwrap_or(3);
 
         vec![
-            // ▶ 次の壁紙
+            // ▶ 次の壁紙 / Next Wallpaper
             StandardItem {
-                label: "次の壁紙".into(),
+                label: self.strings.next_wallpaper.into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.notifier.send(TrayCmd::Next);
                 }),
                 ..Default::default()
             }
             .into(),
-            // ◀ 前の壁紙
+            // ◀ 前の壁紙 / Previous Wallpaper
             StandardItem {
-                label: "前の壁紙".into(),
+                label: self.strings.prev_wallpaper.into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.notifier.send(TrayCmd::Prev);
                 }),
@@ -128,9 +137,9 @@ impl ksni::Tray for KabekamiTray {
             // ⏸ 一時停止 / ▶ 再開
             StandardItem {
                 label: if self.paused {
-                    "再開".into()
+                    self.strings.resume.into()
                 } else {
-                    "一時停止".into()
+                    self.strings.pause.into()
                 },
                 icon_name: if self.paused {
                     "media-playback-start".into()
@@ -146,9 +155,9 @@ impl ksni::Tray for KabekamiTray {
             }
             .into(),
             MenuItem::Separator,
-            // 表示モード サブメニュー
+            // 表示モード / Display Mode サブメニュー
             SubMenu {
-                label: "表示モード".into(),
+                label: self.strings.display_mode.into(),
                 submenu: vec![RadioGroup {
                     selected: mode_selected,
                     select: Box::new(|this: &mut Self, idx| {
@@ -168,9 +177,9 @@ impl ksni::Tray for KabekamiTray {
                 ..Default::default()
             }
             .into(),
-            // 切り替え間隔 サブメニュー
+            // 切り替え間隔 / Rotation Interval サブメニュー
             SubMenu {
-                label: "切り替え間隔".into(),
+                label: self.strings.interval.into(),
                 submenu: vec![RadioGroup {
                     selected: interval_selected,
                     select: Box::new(|this: &mut Self, idx| {
@@ -178,9 +187,9 @@ impl ksni::Tray for KabekamiTray {
                         this.interval_secs = secs;
                         let _ = this.notifier.send(TrayCmd::SetInterval(secs));
                     }),
-                    options: INTERVAL_PRESETS
+                    options: self.strings.interval_labels
                         .iter()
-                        .map(|(_, label)| RadioItem {
+                        .map(|label| RadioItem {
                             label: label.to_string(),
                             ..Default::default()
                         })
@@ -191,9 +200,9 @@ impl ksni::Tray for KabekamiTray {
             }
             .into(),
             MenuItem::Separator,
-            // 現在の壁紙を開く
+            // 現在の壁紙を開く / Open Current Wallpaper
             StandardItem {
-                label: "現在の壁紙を開く".into(),
+                label: self.strings.open_current.into(),
                 icon_name: "document-open".into(),
                 enabled: !self.current_name.is_empty(),
                 activate: Box::new(|this: &mut Self| {
@@ -203,9 +212,9 @@ impl ksni::Tray for KabekamiTray {
             }
             .into(),
             MenuItem::Separator,
-            // 終了
+            // 終了 / Quit
             StandardItem {
-                label: "終了".into(),
+                label: self.strings.quit.into(),
                 icon_name: "application-exit".into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.notifier.send(TrayCmd::Quit);
@@ -225,6 +234,7 @@ pub async fn spawn_tray(
     notifier: UnboundedSender<TrayCmd>,
     mode: DisplayMode,
     interval_secs: u64,
+    lang: Lang,
 ) -> Option<ksni::Handle<KabekamiTray>> {
     use ksni::TrayMethods;
 
@@ -234,6 +244,8 @@ pub async fn spawn_tray(
         mode,
         interval_secs,
         current_name: String::new(),
+        last_error: None,
+        strings: crate::i18n::strings(lang),
     };
 
     // `assume_sni_available(true)` にすることで、デスクトップ環境の起動が

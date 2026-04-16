@@ -1,19 +1,28 @@
 //! kabekami — KDE Plasma 向け壁紙ローテーションツール
 //!
-//! ## Phase 2 追加機能（設計書 §13 Phase 2）
-//! - キャッシュ（`cache.rs`）: 加工済み画像を SHA256 キーで保存。再起動後もヒット。
-//! - 先読み（`prefetch.rs`）: 壁紙設定直後に次の画像をバックグラウンド加工開始。
-//! - トレイ（`tray.rs`）: `ksni` + SNI プロトコルでシステムトレイに常駐。
-//! - スケジューラ（`scheduler.rs`）: 前へ戻る・一時停止・再開・間隔変更。
+//! ## Phase 3 追加機能（設計書 §13 Phase 3）
+//! - 画面解像度の自動取得（`screen.rs`）: `kscreen-doctor --outputs` でプライマリ
+//!   モニタの解像度を自動検出。`KABEKAMI_SCREEN=WxH` 環境変数で上書き可能。
+//! - D-Bus 壁紙設定（`plasma.rs`）: `org.kde.PlasmaShell::evaluateScript` を
+//!   一次手段に、`plasma-apply-wallpaperimage` CLI をフォールバックとして使用。
+//! - 全表示モード実装（`display_mode.rs`）: Fill / Fit / Stretch / Smart。
+//!   BlurPad フォールバックを廃止し、全モードを正式実装。
+//! - ディレクトリ監視（`watcher.rs`）: `notify` で画像の追加・削除をリアルタイム検知
+//!   し、スケジューラに反映する。
 
 mod blur_pad;
 mod cache;
 mod config;
+mod display_mode;
+mod i18n;
+mod notify;
 mod plasma;
 mod prefetch;
 mod scanner;
 mod scheduler;
+mod screen;
 mod tray;
+mod watcher;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -29,9 +38,10 @@ use crate::prefetch::Prefetcher;
 use crate::scheduler::Scheduler;
 use crate::tray::TrayCmd;
 
-/// Phase 1 と同様のデフォルト解像度。Phase 3 で `kscreen-doctor` 連携に置き換え。
-const DEFAULT_SCREEN_W: u32 = 1920;
-const DEFAULT_SCREEN_H: u32 = 1080;
+/// `KABEKAMI_SCREEN` 環境変数が未設定かつ `kscreen-doctor` も使えない場合の
+/// フォールバック解像度。Phase 3 で kscreen-doctor 連携が入るため実際には滅多に使われない。
+const FALLBACK_SCREEN_W: u32 = 1920;
+const FALLBACK_SCREEN_H: u32 = 1080;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
@@ -61,12 +71,33 @@ async fn main() -> Result<()> {
     let mut scheduler = Scheduler::new(images, config.rotation.order);
     let mut prefetcher = Prefetcher::new();
 
+    // ディレクトリ監視を起動（環境によっては unavailable のため Option）
+    let (mut watch_rx, _watcher) =
+        match watcher::spawn(&config.sources.directories, config.sources.recursive) {
+            Some((w, rx)) => (rx, Some(w)),
+            None => {
+                // ウォッチャーが使えない場合は即座に閉じるチャンネルを用意する。
+                // select! では Some(ev) パターンが一致しないため無害にスキップされる。
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<watcher::WatchEvent>();
+                drop(tx);
+                (rx, None)
+            }
+        };
+
+    // 言語設定を解決する（環境変数 → config → デフォルト ja）
+    let lang = resolve_lang(&config);
+    tracing::info!("ui language: {:?}", lang);
+
+    // デスクトップ通知ハンドル
+    let mut notifier = notify::Notifier::new(lang);
+
     // トレイを非同期に起動（D-Bus が使えない環境では None になる）
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TrayCmd>();
     let tray_handle = tray::spawn_tray(
         cmd_tx,
         config.display.mode,
         config.rotation.interval_secs,
+        lang,
     )
     .await;
 
@@ -75,14 +106,19 @@ async fn main() -> Result<()> {
         if let Some(path) = scheduler.next() {
             if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                 tracing::error!(error = %e, "initial wallpaper apply failed");
+                let msg = e.to_string();
+                notifier.error(&msg).await;
+                update_tray_error(&tray_handle, msg).await;
             } else {
+                notifier.clear();
+                update_tray_clear_error(&tray_handle).await;
                 update_tray_current(&tray_handle, &path).await;
                 start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
             }
         }
     }
 
-    // タイマー: 最初の tick は即座ではなく 1 interval 後から。
+    // タイマー: 最初の tick は 1 interval 後から。
     let mut ticker = make_ticker(config.rotation.interval_secs);
 
     tracing::info!("entering main loop (interval={}s)", config.rotation.interval_secs);
@@ -96,7 +132,12 @@ async fn main() -> Result<()> {
                 if let Some(path) = scheduler.next() {
                     if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                         tracing::error!(error = %e, "auto apply failed");
+                        let msg = e.to_string();
+                        notifier.error(&msg).await;
+                        update_tray_error(&tray_handle, msg).await;
                     } else {
+                        notifier.clear();
+                        update_tray_clear_error(&tray_handle).await;
                         update_tray_current(&tray_handle, &path).await;
                         start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                     }
@@ -110,12 +151,16 @@ async fn main() -> Result<()> {
                         if let Some(path) = scheduler.next() {
                             if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                                 tracing::error!(error = %e, "tray Next failed");
+                                let msg = e.to_string();
+                                notifier.error(&msg).await;
+                                update_tray_error(&tray_handle, msg).await;
                             } else {
+                                notifier.clear();
+                                update_tray_clear_error(&tray_handle).await;
                                 update_tray_current(&tray_handle, &path).await;
                                 start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                             }
                         }
-                        // 「次へ」操作でタイマーをリセット（次の自動切り替えは 1 interval 後）
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
 
@@ -123,7 +168,12 @@ async fn main() -> Result<()> {
                         if let Some(path) = scheduler.prev() {
                             if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
                                 tracing::error!(error = %e, "tray Prev failed");
+                                let msg = e.to_string();
+                                notifier.error(&msg).await;
+                                update_tray_error(&tray_handle, msg).await;
                             } else {
+                                notifier.clear();
+                                update_tray_clear_error(&tray_handle).await;
                                 update_tray_current(&tray_handle, &path).await;
                             }
                         }
@@ -147,10 +197,15 @@ async fn main() -> Result<()> {
                     TrayCmd::SetMode(mode) => {
                         tracing::info!("display mode → {:?}", mode);
                         config.display.mode = mode;
-                        // 設定を変えたら現在の壁紙をすぐ再処理（キャッシュミス → 再加工）
                         if let Some(cur) = scheduler.current().cloned() {
                             if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache).await {
                                 tracing::error!(error = %e, "reapply after mode change failed");
+                                let msg = e.to_string();
+                                notifier.error(&msg).await;
+                                update_tray_error(&tray_handle, msg).await;
+                            } else {
+                                notifier.clear();
+                                update_tray_clear_error(&tray_handle).await;
                             }
                             start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                         }
@@ -183,6 +238,20 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // ディレクトリ変更監視イベント（ウォッチャーが無効な場合は到達しない）
+            Some(ev) = watch_rx.recv() => {
+                match ev {
+                    watcher::WatchEvent::Added(path) => {
+                        tracing::info!("new image detected: {}", path.display());
+                        scheduler.add_image(path);
+                    }
+                    watcher::WatchEvent::Removed(path) => {
+                        tracing::info!("image removed: {}", path.display());
+                        scheduler.remove_image(&path);
+                    }
+                }
+            }
+
             _ = signal::ctrl_c() => {
                 tracing::info!("received Ctrl-C, shutting down");
                 break;
@@ -206,24 +275,55 @@ fn init_tracing() {
     fmt().with_env_filter(filter).init();
 }
 
-/// `KABEKAMI_SCREEN=WxH` 環境変数、なければデフォルト解像度を使う。
+/// 表示言語を解決する。優先順位:
+///
+/// 1. 環境変数 `KABEKAMI_LANG`（`"en"` / `"ja"`）
+/// 2. `config.toml` の `[ui] language`
+/// 3. デフォルト: 日本語
+fn resolve_lang(config: &Config) -> i18n::Lang {
+    if let Ok(val) = std::env::var("KABEKAMI_LANG") {
+        return i18n::Lang::from_str(val.trim());
+    }
+    if !config.ui.language.is_empty() {
+        return i18n::Lang::from_str(&config.ui.language);
+    }
+    i18n::Lang::default()
+}
+
+/// 画面解像度を解決する。優先順位:
+///
+/// 1. `KABEKAMI_SCREEN=WxH` 環境変数
+/// 2. `kscreen-doctor --outputs` による自動検出
+/// 3. フォールバック（1920×1080）
 fn resolve_screen_size() -> (u32, u32) {
+    // 1. 環境変数による手動指定
     if let Ok(val) = std::env::var("KABEKAMI_SCREEN") {
         if let Some((w, h)) = val.split_once('x') {
             if let (Ok(w), Ok(h)) = (w.trim().parse::<u32>(), h.trim().parse::<u32>()) {
                 if w > 0 && h > 0 {
+                    tracing::info!("screen size from KABEKAMI_SCREEN: {}x{}", w, h);
                     return (w, h);
                 }
             }
         }
         tracing::warn!("invalid KABEKAMI_SCREEN='{}', expected WxH (e.g. 2560x1440)", val);
     }
-    (DEFAULT_SCREEN_W, DEFAULT_SCREEN_H)
+
+    // 2. kscreen-doctor による自動検出
+    if let Some((w, h)) = screen::detect() {
+        tracing::info!("screen size from kscreen-doctor: {}x{}", w, h);
+        return (w, h);
+    }
+
+    tracing::warn!(
+        "could not detect screen size, using fallback {}x{}",
+        FALLBACK_SCREEN_W,
+        FALLBACK_SCREEN_H
+    );
+    (FALLBACK_SCREEN_W, FALLBACK_SCREEN_H)
 }
 
 /// 「1 interval 後に最初の tick」が来る Interval を生成する。
-///
-/// `interval()` と異なり初期 tick が即座に来ない。
 fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
     let period = Duration::from_secs(interval_secs);
     let mut t = interval_at(Instant::now() + period, period);
@@ -235,7 +335,8 @@ fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
 ///
 /// 1. キャッシュヒット → キャッシュ済みファイルを直接 Plasma に渡す（高速パス）
 /// 2. キャッシュミス  → `spawn_blocking` で加工・保存してから Plasma に渡す
-async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache: &Cache) -> Result<()> {
+///    （`store()` が LRU 退避も担う）
+async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache: &Arc<Cache>) -> Result<()> {
     let key = CacheKey {
         src: src.to_path_buf(),
         screen_w,
@@ -250,7 +351,7 @@ async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache:
         cached
     } else {
         let src_owned = src.to_path_buf();
-        let cache_owned = Arc::new(Cache::new(cache.directory.clone(), 0)); // no evict here
+        let cache_owned = Arc::clone(cache);
         let mode = config.display.mode;
         let blur_sigma = config.display.blur_sigma;
         let bg_darken = config.display.bg_darken;
@@ -269,12 +370,24 @@ async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache:
         .context("image processing task panicked")??
     };
 
-    // 加工後にキャッシュ全体の退避チェック（メインキャッシュで実施）
-    if let Err(e) = cache.evict_if_needed() {
-        tracing::warn!("cache eviction error: {}", e);
-    }
+    plasma::set_wallpaper(&output).await
+}
 
-    plasma::set_wallpaper(&output)
+/// トレイアイコンに `last_error` をセットする。
+async fn update_tray_error(
+    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
+    msg: String,
+) {
+    if let Some(ref h) = tray_handle {
+        h.update(|t| t.last_error = Some(msg)).await;
+    }
+}
+
+/// トレイアイコンの `last_error` をクリアする。
+async fn update_tray_clear_error(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>) {
+    if let Some(ref h) = tray_handle {
+        h.update(|t| t.last_error = None).await;
+    }
 }
 
 /// トレイアイコンの `current_name` を更新する。

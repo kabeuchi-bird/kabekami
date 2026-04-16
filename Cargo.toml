@@ -11,6 +11,7 @@ dirs = "6"
 hex = "0.4.3"
 image = "0.25"
 ksni = "0.3.4"
+notify = "7"
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.11.0"
@@ -18,6 +19,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signa
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [profile.release]
 lto = "thin"

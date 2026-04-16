@@ -127,6 +127,33 @@ impl Scheduler {
         self.images.len()
     }
 
+    /// 画像を動的に追加する（ディレクトリ監視で使用）。
+    ///
+    /// すでにリストに存在する場合は何もしない。
+    /// ランダムモードではキューにも追加する（一巡の途中でも拾われるように）。
+    pub fn add_image(&mut self, path: PathBuf) {
+        if self.images.contains(&path) {
+            return;
+        }
+        self.images.push(path.clone());
+        // キューの末尾にも追加して、現在の一巡に含める
+        self.queue.push_back(path);
+    }
+
+    /// 画像を動的に削除する（ディレクトリ監視で使用）。
+    ///
+    /// リスト・キュー・現在画像から除去する。
+    /// 現在表示中の画像が削除された場合は `current` を `None` にし、
+    /// 次の `next()` 呼び出しでキューから新しい画像を選択する。
+    pub fn remove_image(&mut self, path: &PathBuf) {
+        self.images.retain(|p| p != path);
+        self.queue.retain(|p| p != path);
+        if self.current.as_ref() == Some(path) {
+            self.current = None;
+        }
+        self.history.retain(|p| p != path);
+    }
+
     // ---- private --------------------------------------------------------
 
     /// キューを補充する。
