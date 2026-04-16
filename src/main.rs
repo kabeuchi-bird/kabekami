@@ -13,6 +13,7 @@
 mod blur_pad;
 mod cache;
 mod config;
+mod daemon_iface;
 mod display_mode;
 mod i18n;
 mod notify;
@@ -29,6 +30,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use zbus;
 use tokio::signal;
 use tokio::time::{interval_at, Instant, MissedTickBehavior};
 
@@ -43,8 +45,22 @@ use crate::tray::TrayCmd;
 const FALLBACK_SCREEN_W: u32 = 1920;
 const FALLBACK_SCREEN_H: u32 = 1080;
 
+/// CLI サブコマンド。デーモンへの 1 回限りの操作を表す。
+enum CliCmd {
+    Next,
+    Prev,
+    TogglePause,
+    ReloadConfig,
+    Quit,
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
+    // CLI コマンドが指定されていればデーモンへ転送して終了する
+    if let Some(cmd) = parse_cli()? {
+        return send_to_daemon(cmd).await;
+    }
+
     // Config を先にロード（tracing の初期化に warn_notify フラグが必要なため）
     let mut config = Config::load().context("failed to load config")?;
 
@@ -97,12 +113,15 @@ async fn main() -> Result<()> {
     // トレイを非同期に起動（D-Bus が使えない環境では None になる）
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TrayCmd>();
     let tray_handle = tray::spawn_tray(
-        cmd_tx,
+        cmd_tx.clone(),
         config.display.mode,
         config.rotation.interval_secs,
         lang,
     )
     .await;
+
+    // D-Bus デーモンインターフェースを登録（CLI からのリモート操作を受け付ける）
+    let _dbus_conn = spawn_dbus_iface(cmd_tx).await;
 
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
@@ -387,6 +406,96 @@ fn init_tracing(warn_notify: bool) -> Option<tokio::sync::mpsc::UnboundedReceive
             .with(fmt::layer())
             .init();
         None
+    }
+}
+
+/// CLI 引数を解析して `CliCmd` を返す。引数がなければ `None`（デーモンモード）。
+fn parse_cli() -> Result<Option<CliCmd>> {
+    let mut args = std::env::args().skip(1).peekable();
+    let Some(arg) = args.next() else { return Ok(None) };
+
+    let cmd = match arg.as_str() {
+        "--next"          => CliCmd::Next,
+        "--prev"          => CliCmd::Prev,
+        "--toggle-pause"  => CliCmd::TogglePause,
+        "--reload-config" => CliCmd::ReloadConfig,
+        "--quit"          => CliCmd::Quit,
+        "--help" | "-h" => {
+            println!("kabekami — KDE Plasma wallpaper rotation daemon\n");
+            println!("USAGE:");
+            println!("  kabekami                start the daemon");
+            println!("  kabekami --next         switch to next wallpaper");
+            println!("  kabekami --prev         switch to previous wallpaper");
+            println!("  kabekami --toggle-pause pause / resume rotation");
+            println!("  kabekami --reload-config reload config.toml");
+            println!("  kabekami --quit         quit the daemon");
+            std::process::exit(0);
+        }
+        other => anyhow::bail!("unknown option '{}'. Try --help.", other),
+    };
+    Ok(Some(cmd))
+}
+
+/// D-Bus 経由でデーモンにコマンドを送信する。
+async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
+    use daemon_iface::{BUS_NAME, OBJECT_PATH};
+
+    let method = match cmd {
+        CliCmd::Next         => "Next",
+        CliCmd::Prev         => "Prev",
+        CliCmd::TogglePause  => "TogglePause",
+        CliCmd::ReloadConfig => "ReloadConfig",
+        CliCmd::Quit         => "Quit",
+    };
+
+    let conn = zbus::Connection::session()
+        .await
+        .context("failed to connect to D-Bus session bus")?;
+
+    conn.call_method(
+        Some(BUS_NAME),
+        OBJECT_PATH,
+        Some(BUS_NAME),
+        method,
+        &(),
+    )
+    .await
+    .with_context(|| {
+        format!("failed to send '{method}' to kabekami daemon — is it running?")
+    })?;
+
+    Ok(())
+}
+
+/// D-Bus デーモンインターフェースを起動する。
+///
+/// 登録に失敗した場合（D-Bus 未使用環境など）は警告ログを出して `None` を返す。
+/// 返値の `Connection` を main() スコープで保持し続けることでサービスが維持される。
+async fn spawn_dbus_iface(
+    tx: tokio::sync::mpsc::UnboundedSender<TrayCmd>,
+) -> Option<zbus::Connection> {
+    use daemon_iface::{BUS_NAME, OBJECT_PATH, DaemonIface};
+
+    let result = zbus::conn::Builder::session()
+        .and_then(|b| b.name(BUS_NAME))
+        .and_then(|b| b.serve_at(OBJECT_PATH, DaemonIface { tx }))
+        .map(|b| async move { b.build().await });
+
+    match result {
+        Err(e) => {
+            tracing::warn!("D-Bus daemon interface unavailable: {}", e);
+            None
+        }
+        Ok(fut) => match fut.await {
+            Ok(conn) => {
+                tracing::info!("D-Bus daemon interface active ({})", BUS_NAME);
+                Some(conn)
+            }
+            Err(e) => {
+                tracing::warn!("D-Bus daemon interface unavailable: {}", e);
+                None
+            }
+        },
     }
 }
 

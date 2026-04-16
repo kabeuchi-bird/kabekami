@@ -267,9 +267,27 @@ kabekami
 
 > When `KABEKAMI_LANG=ja` (or `language = "ja"` in config), the menu is shown in Japanese.
 
+### CLI Commands
+
+When the daemon is already running, you can control it from the command line:
+
+```bash
+kabekami --next           # Switch to next wallpaper
+kabekami --prev           # Switch to previous wallpaper
+kabekami --toggle-pause   # Pause / resume automatic rotation
+kabekami --reload-config  # Reload config.toml without restarting
+kabekami --quit           # Quit the daemon
+```
+
+Commands communicate with the daemon via D-Bus (`org.kabekami.Daemon`).
+If the daemon is not running, the command exits with an error.
+
 ### Stopping
 
 ```bash
+# From the command line
+kabekami --quit
+
 # If running in the foreground
 Ctrl-C
 ```
