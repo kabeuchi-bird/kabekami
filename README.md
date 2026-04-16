@@ -344,4 +344,4 @@ BlurPad processing uses a quarter-scale intermediate for the blur step, typicall
 
 ## Acknowledgments
 
-kabekami is heavily inspired by [Variety](https://github.com/varietywalls/variety). Many thanks to **Peter Levi** and all the contributors who have maintained Variety over the years. The design philosophy behind Variety's display modes — especially blur-pad and smart fit — is the direct inspiration for kabekami's core features.
+kabekami is heavily inspired by [Variety](https://github.com/varietywalls/variety). Many thanks to **Peter Levi** and all the contributors who have maintained Variety over the years. 
