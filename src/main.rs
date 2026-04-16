@@ -45,9 +45,12 @@ const FALLBACK_SCREEN_H: u32 = 1080;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
-    init_tracing();
-
+    // Config を先にロード（tracing の初期化に warn_notify フラグが必要なため）
     let mut config = Config::load().context("failed to load config")?;
+
+    // warn_notify に応じた tracing subscriber を初期化
+    let mut warn_rx = init_tracing(config.ui.warn_notify);
+
     tracing::info!(?config, "loaded config");
 
     let images = crate::scanner::scan(&config.sources.directories, config.sources.recursive)
@@ -342,6 +345,13 @@ async fn main() -> Result<()> {
                 }
             }
 
+            msg = next_warn(&mut warn_rx) => {
+                match msg {
+                    Some(msg) => notifier.warn(&msg).await,
+                    None => warn_rx = None, // チャンネルが閉じたらブランチを無効化
+                }
+            }
+
             _ = signal::ctrl_c() => {
                 tracing::info!("received Ctrl-C, shutting down");
                 break;
@@ -358,11 +368,75 @@ async fn main() -> Result<()> {
 
 // ── ヘルパー関数 ─────────────────────────────────────────────────────────────
 
-fn init_tracing() {
-    use tracing_subscriber::{fmt, EnvFilter};
+fn init_tracing(warn_notify: bool) -> Option<tokio::sync::mpsc::UnboundedReceiver<String>> {
+    use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("kabekami=info,warn"));
-    fmt().with_env_filter(filter).init();
+
+    if warn_notify {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer())
+            .with(WarnNotifyLayer { tx })
+            .init();
+        Some(rx)
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer())
+            .init();
+        None
+    }
+}
+
+/// warn_rx が None のときは永遠に pending にする（select! ブランチを無効化）。
+async fn next_warn(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+) -> Option<String> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// WARN イベントを tokio チャンネル経由で非同期に転送する tracing レイヤー。
+struct WarnNotifyLayer {
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+struct MessageVisitor(String);
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0 = value.to_string();
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{:?}", value);
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnNotifyLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        // kabekami クレートの WARN のみを対象にする（外部クレートの WARN は除外）
+        if *event.metadata().level() == tracing::Level::WARN
+            && event.metadata().target().starts_with("kabekami")
+        {
+            let mut v = MessageVisitor(String::new());
+            event.record(&mut v);
+            if !v.0.is_empty() {
+                let _ = self.tx.send(v.0);
+            }
+        }
+    }
 }
 
 /// 表示言語を解決する。優先順位:

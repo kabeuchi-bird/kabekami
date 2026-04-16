@@ -228,6 +228,8 @@ max_size_mb = 500
 # 表示言語: "en"（英語、デフォルト） または "ja"（日本語）
 # 環境変数 KABEKAMI_LANG で実行時に上書き可能
 language = "en"
+# WARN レベルのログをデスクトップ通知として表示する（デフォルト: false）
+warn_notify = false
 ```
 
 ## 使い方

@@ -53,6 +53,8 @@ pub struct UiStrings {
     pub tooltip_error: &'static str,
     /// デスクトップ通知のサマリー（壁紙設定失敗時）
     pub notify_failed: &'static str,
+    /// デスクトップ通知のサマリー（WARN 通知時）
+    pub notify_warning: &'static str,
     /// 切り替え間隔プリセットのラベル一覧。`tray::INTERVAL_PRESETS` と並列。
     pub interval_labels: &'static [&'static str],
     /// トレイメニュー: 設定を再読み込み
@@ -72,6 +74,7 @@ pub static JA: UiStrings = UiStrings {
     tooltip_current: "現在: {}",
     tooltip_error:   "エラー: {}",
     notify_failed:   "壁紙の設定に失敗しました",
+    notify_warning:  "kabekami 警告",
     interval_labels: &["10秒", "30秒", "5分", "30分", "1時間", "3時間"],
     reload_config:   "設定を再読み込み",
 };
@@ -89,6 +92,7 @@ pub static EN: UiStrings = UiStrings {
     tooltip_current: "Current: {}",
     tooltip_error:   "Error: {}",
     notify_failed:   "Wallpaper apply failed",
+    notify_warning:  "kabekami Warning",
     interval_labels: &["10s", "30s", "5m", "30m", "1h", "3h"],
     reload_config:   "Reload Config",
 };

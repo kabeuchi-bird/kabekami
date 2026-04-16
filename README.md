@@ -219,6 +219,8 @@ max_size_mb = 500
 # Display language: "en" (English, default) or "ja" (Japanese)
 # Can be overridden at runtime with the KABEKAMI_LANG environment variable
 language = "en"
+# Show WARN-level log events as desktop notifications (default: false)
+warn_notify = false
 ```
 
 ## Usage

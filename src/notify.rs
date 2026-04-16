@@ -16,18 +16,25 @@ use crate::i18n::Lang;
 ///
 /// `main()` で 1 インスタンスを作り、エラー／成功のたびに `error()` / `clear()` を呼ぶ。
 pub struct Notifier {
-    /// 前回送信した通知の ID（0 = 未送信）。replaces_id として再利用する。
+    /// 前回送信したエラー通知の ID（0 = 未送信）。replaces_id として再利用する。
     last_id: u32,
-    /// デスクトップ通知に表示するサマリー文字列。言語設定に応じて初期化される。
+    /// エラー通知のサマリー文字列。
     summary: &'static str,
+    /// 前回送信した警告通知の ID（0 = 未送信）。
+    warn_last_id: u32,
+    /// 警告通知のサマリー文字列。
+    warn_summary: &'static str,
 }
 
 impl Notifier {
     /// 言語設定に応じたサマリー文字列でノーティファイアを初期化する。
     pub fn new(lang: Lang) -> Self {
+        let strings = crate::i18n::strings(lang);
         Self {
             last_id: 0,
-            summary: crate::i18n::strings(lang).notify_failed,
+            summary: strings.notify_failed,
+            warn_last_id: 0,
+            warn_summary: strings.notify_warning,
         }
     }
 
@@ -36,7 +43,7 @@ impl Notifier {
     /// 前回の通知を `replaces_id` で置き換えるため、連続エラーでも通知は 1 件に留まる。
     /// D-Bus が使えない環境では `debug` ログを出して無視する（通知はベストエフォート）。
     pub async fn error(&mut self, body: &str) {
-        match self.send_dbus(self.summary, body).await {
+        match self.send_dbus("dialog-error", self.summary, body, 7000, self.last_id).await {
             Ok(id) => self.last_id = id,
             Err(e) => tracing::debug!("desktop notification unavailable: {}", e),
         }
@@ -47,8 +54,23 @@ impl Notifier {
         self.last_id = 0;
     }
 
+    /// WARN レベルのログを通知として表示する。連続警告は 1 件に集約される。
+    pub async fn warn(&mut self, body: &str) {
+        match self.send_dbus("dialog-warning", self.warn_summary, body, 5000, self.warn_last_id).await {
+            Ok(id) => self.warn_last_id = id,
+            Err(e) => tracing::debug!("desktop notification unavailable: {}", e),
+        }
+    }
+
     /// `org.freedesktop.Notifications::Notify` を呼び、付与された通知 ID を返す。
-    async fn send_dbus(&self, summary: &str, body: &str) -> zbus::Result<u32> {
+    async fn send_dbus(
+        &self,
+        icon: &str,
+        summary: &str,
+        body: &str,
+        expire_ms: i32,
+        replaces_id: u32,
+    ) -> zbus::Result<u32> {
         let conn = zbus::Connection::session().await?;
 
         // Notify シグネチャ:
@@ -64,14 +86,14 @@ impl Notifier {
                 Some("org.freedesktop.Notifications"),
                 "Notify",
                 &(
-                    "kabekami",     // app_name
-                    self.last_id,   // replaces_id (0 = 新規)
-                    "dialog-error", // app_icon
+                    "kabekami", // app_name
+                    replaces_id,
+                    icon,
                     summary,
                     body,
                     actions,
                     hints,
-                    7000i32, // expire_timeout (ms)
+                    expire_ms,
                 ),
             )
             .await?;
