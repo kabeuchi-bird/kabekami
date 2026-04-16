@@ -6,22 +6,22 @@
 //!
 //! 1. 環境変数 `KABEKAMI_LANG`（`"en"` / `"ja"`）
 //! 2. `config.toml` の `[ui] language`
-//! 3. デフォルト: `"ja"`（日本語）
+//! 3. デフォルト: `"en"`（英語）
 
-/// 対応言語。デフォルトは日本語。
+/// 対応言語。デフォルトは英語。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Lang {
-    #[default]
     Ja,
+    #[default]
     En,
 }
 
 impl Lang {
-    /// 文字列から `Lang` を解析する。未知の値は `Ja` にフォールバック。
+    /// 文字列から `Lang` を解析する。未知の値は `En` にフォールバック。
     pub fn from_str(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
-            "en" => Self::En,
-            _ => Self::Ja,
+            "ja" => Self::Ja,
+            _ => Self::En,
         }
     }
 }
@@ -115,8 +115,10 @@ mod tests {
     #[test]
     fn from_str_ja_and_fallback() {
         assert_eq!(Lang::from_str("ja"), Lang::Ja);
-        assert_eq!(Lang::from_str(""), Lang::Ja);
-        assert_eq!(Lang::from_str("fr"), Lang::Ja); // 未知 → 日本語
+        assert_eq!(Lang::from_str("JA"), Lang::Ja);
+        assert_eq!(Lang::from_str(" ja "), Lang::Ja);
+        assert_eq!(Lang::from_str(""), Lang::En);  // 未知 → 英語
+        assert_eq!(Lang::from_str("fr"), Lang::En); // 未知 → 英語
     }
 
     #[test]

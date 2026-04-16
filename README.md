@@ -216,9 +216,9 @@ max_size_mb = 500
 
 ```toml
 [ui]
-# Display language: "ja" (Japanese, default) or "en" (English)
+# Display language: "en" (English, default) or "ja" (Japanese)
 # Can be overridden at runtime with the KABEKAMI_LANG environment variable
-language = "ja"
+language = "en"
 ```
 
 ## Usage

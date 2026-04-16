@@ -81,7 +81,7 @@ yay -S kabekami
    max_size_mb = 500
 
    [ui]
-   language = "ja"        # "ja"（日本語）または "en"（英語）
+   language = "en"        # "en"（英語、デフォルト）または "ja"（日本語）
    ```
 
 2. **起動する**
@@ -225,9 +225,9 @@ max_size_mb = 500
 
 ```toml
 [ui]
-# 表示言語: "ja"（日本語、デフォルト） または "en"（英語）
+# 表示言語: "en"（英語、デフォルト） または "ja"（日本語）
 # 環境変数 KABEKAMI_LANG で実行時に上書き可能
-language = "ja"
+language = "en"
 ```
 
 ## 使い方
@@ -272,7 +272,7 @@ kabekami
 └── 終了
 ```
 
-> `KABEKAMI_LANG=en`（または `language = "en"`）を設定すると英語メニューで表示されます。
+> `KABEKAMI_LANG=ja`（または `language = "ja"`）を設定すると日本語メニューで表示されます。
 
 ### Ctrl-C で終了
 
