@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
     tracing::info!("using screen size {}x{}", screen_w, screen_h);
 
     // キャッシュ・スケジューラ・先読みを初期化
-    let cache = Arc::new(Cache::new(
+    let mut cache = Arc::new(Cache::new(
         config.cache.directory.clone(),
         config.cache.max_size_mb,
     ));
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     let mut prefetcher = Prefetcher::new();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
-    let (mut watch_rx, _watcher) =
+    let (mut watch_rx, mut _watcher_handle) =
         match watcher::spawn(&config.sources.directories, config.sources.recursive) {
             Some((w, rx)) => (rx, Some(w)),
             None => {
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
         };
 
     // 言語設定を解決する（環境変数 → config → デフォルト ja）
-    let lang = resolve_lang(&config);
+    let mut lang = resolve_lang(&config);
     tracing::info!("ui language: {:?}", lang);
 
     // デスクトップ通知ハンドル
@@ -228,6 +228,96 @@ async fn main() -> Result<()> {
                                     .arg(&path)
                                     .status();
                             });
+                        }
+                    }
+
+                    TrayCmd::ReloadConfig => {
+                        // Phase 5 でファイル監視 / SIGUSR1 / D-Bus によるリロードを追加する際は、
+                        // このブロックを async fn do_reload_config(...) に切り出して再利用する。
+                        match Config::load() {
+                            Err(e) => {
+                                tracing::error!(error = %e, "config reload failed");
+                                let msg = e.to_string();
+                                notifier.error(&msg).await;
+                                update_tray_error(&tray_handle, msg).await;
+                            }
+                            Ok(new_cfg) => {
+                                tracing::info!("reloading config");
+
+                                // 1. 現在の壁紙パスを退避（scheduler 再構築前）
+                                let prev_current = scheduler.current().cloned();
+
+                                // 2. 画像再スキャン → scheduler 再構築
+                                match scanner::scan(&new_cfg.sources.directories, new_cfg.sources.recursive) {
+                                    Ok(images) if !images.is_empty() => {
+                                        tracing::info!("reload: {} image(s) found", images.len());
+                                        scheduler = Scheduler::new(images, new_cfg.rotation.order);
+                                    }
+                                    Ok(_) => tracing::warn!("reload: no images found, keeping current list"),
+                                    Err(e) => tracing::warn!("reload: scan error: {}", e),
+                                }
+
+                                // 3. ウォッチャー再起動
+                                (watch_rx, _watcher_handle) =
+                                    match watcher::spawn(&new_cfg.sources.directories, new_cfg.sources.recursive) {
+                                        Some((w, rx)) => (rx, Some(w)),
+                                        None => {
+                                            let (tx, rx) =
+                                                tokio::sync::mpsc::unbounded_channel::<watcher::WatchEvent>();
+                                            drop(tx);
+                                            (rx, None)
+                                        }
+                                    };
+
+                                // 4. キャッシュ再構築（設定変更を反映）
+                                prefetcher.abort();
+                                cache = Arc::new(Cache::new(
+                                    new_cfg.cache.directory.clone(),
+                                    new_cfg.cache.max_size_mb,
+                                ));
+
+                                // 5. タイマー再起動
+                                ticker = make_ticker(new_cfg.rotation.interval_secs);
+
+                                // 6. 言語更新
+                                let new_lang = resolve_lang(&new_cfg);
+                                if new_lang != lang {
+                                    lang = new_lang;
+                                    notifier = notify::Notifier::new(lang);
+                                }
+
+                                // 7. 設定更新
+                                config = new_cfg;
+
+                                // 8. 現在の壁紙を新設定で再適用
+                                if let Some(cur) = prev_current {
+                                    if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache).await {
+                                        tracing::error!(error = %e, "reload: reapply failed");
+                                        let msg = e.to_string();
+                                        notifier.error(&msg).await;
+                                        update_tray_error(&tray_handle, msg).await;
+                                    } else {
+                                        notifier.clear();
+                                        update_tray_clear_error(&tray_handle).await;
+                                        update_tray_current(&tray_handle, &cur).await;
+                                        start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
+                                    }
+                                }
+
+                                // 9. トレイ状態更新
+                                if let Some(ref h) = tray_handle {
+                                    let mode = config.display.mode;
+                                    let secs = config.rotation.interval_secs;
+                                    let strings = crate::i18n::strings(lang);
+                                    h.update(|t| {
+                                        t.mode = mode;
+                                        t.interval_secs = secs;
+                                        t.strings = strings;
+                                    }).await;
+                                }
+
+                                tracing::info!("config reload complete");
+                            }
                         }
                     }
 
