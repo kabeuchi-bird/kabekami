@@ -351,4 +351,4 @@ BlurPad 加工は内部で 1/4 サイズでぼかし処理を行うため通常 
 
 ## Acknowledgments
 
-kabekami は [Variety](https://github.com/varietywalls/variety) に強くインスパイアされたプロジェクトです。Variety の作者である **Peter Levi** 氏、および長年にわたりメンテナンスを続けてきたコントリビューターの皆さんに深く感謝します。Variety が培ってきた壁紙表示モードの設計思想（特に blur-pad や smart fit）は、kabekami の中核的な機能の着想源となっています。
+kabekami は [Variety](https://github.com/varietywalls/variety) に強くインスパイアされたプロジェクトです。Variety の作者である **Peter Levi** 氏、および長年にわたりメンテナンスを続けてきたコントリビューターの皆さんに深く感謝します。
