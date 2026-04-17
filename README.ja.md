@@ -9,6 +9,7 @@ KDE Plasma 向け壁紙ローテーションツール。Rust 製。
 - システムトレイ常駐（SNI プロトコル）＋コンテキストメニュー操作
 - 加工済み画像のキャッシュ（SHA256 キー、LRU 退避）で短い間隔でも高速
 - 次の画像を事前にバックグラウンド加工しておく先読み機構
+- **GUI 設定ツール**（`kabekami-config`）: egui 製の 5 タブ設定画面。BlurPad のリアルタイムプレビュー付き
 
 ## 動作要件
 
@@ -32,14 +33,15 @@ KDE Plasma 向け壁紙ローテーションツール。Rust 製。
 git clone https://github.com/kabeuchi-bird/kabekami.git
 cd kabekami
 cargo build --release
-# バイナリは target/release/kabekami に生成される
-sudo install -m755 target/release/kabekami /usr/local/bin/
+# 両方のバイナリをインストール
+sudo install -m755 target/release/kabekami        /usr/local/bin/
+sudo install -m755 target/release/kabekami-config /usr/local/bin/
 ```
 
 ### cargo install（crates.io 公開後）
 
 ```bash
-cargo install kabekami
+cargo install kabekami kabekami-config
 ```
 
 ### AUR（Arch Linux）
@@ -82,6 +84,12 @@ yay -S kabekami
 
    [ui]
    language = "en"        # "en"（英語、デフォルト）または "ja"（日本語）
+   ```
+
+   TOML を直接編集せずに設定したい場合は GUI 設定ツールをお使いください:
+
+   ```bash
+   kabekami-config
    ```
 
 2. **起動する**
@@ -148,6 +156,36 @@ yay -S kabekami
    > systemd 方式のほうがクラッシュ時の自動再起動（`Restart=on-failure`）や
    > ログ管理が容易です。`plasma-plasmashell.service` を `After` に指定することで
    > トレイの準備ができてから起動します。
+
+## GUI 設定ツール（`kabekami-config`）
+
+`kabekami-config` は kabekami に同梱されたグラフィカルな設定エディターです。
+
+**システムトレイから起動する:**
+
+トレイアイコンを右クリック → **設定を開く**
+
+**コマンドラインから直接起動する:**
+
+```bash
+kabekami-config
+```
+
+### タブ一覧
+
+| タブ | 内容 |
+|------|------|
+| **Sources** | 壁紙ディレクトリの追加 / 削除、再帰スキャンの切り替え |
+| **Rotation** | 切り替え間隔、順次 / ランダム順、起動時即時切り替え、先読み |
+| **Display** | 表示モード選択（BlurPad / Fill / Fit / Stretch / Smart）、ぼかし強度・背景暗さのスライダー（**リアルタイムプレビュー付き**） |
+| **Cache** | キャッシュディレクトリのパス、最大サイズ（MB） |
+| **UI** | 表示言語（`en` / `ja`）、警告のデスクトップ通知 |
+
+「**保存 / Save**」ボタンをクリックすると `~/.config/kabekami/config.toml` に書き出されます。
+起動中のデーモンは inotify でファイル変更を検知し、再起動なしで自動的に再読み込みします。
+
+> **Note** Display タブのリアルタイムプレビューは 480×270（16:9）で描画します。
+> 加工処理はバックグラウンドスレッドで実行されるため UI はブロックされません。
 
 ## 設定ファイルリファレンス
 
@@ -270,6 +308,9 @@ kabekami
 ├── 切り替え間隔 ▶        — 10秒 / 30秒 / 5分 / 30分 / 1時間 / 3時間
 ├── ─────────────────────
 ├── 現在の壁紙を開く       — xdg-open で現在の壁紙ファイルを開く
+├── 設定を再読み込み       — 再起動なしで config.toml を再読み込み
+├── ─────────────────────
+├── 設定を開く            — kabekami-config GUI を起動
 ├── ─────────────────────
 └── 終了
 ```
@@ -291,7 +332,7 @@ kabekami --quit           # デーモンを終了
 コマンドは D-Bus（`org.kabekami.Daemon`）経由でデーモンに転送されます。
 デーモンが起動していない場合はエラーになります。
 
-### Ctrl-C で終了
+### 終了する
 
 ```bash
 # コマンドラインから終了
@@ -333,6 +374,21 @@ RUST_LOG=debug kabekami
 rm -rf ~/.cache/kabekami/
 ```
 
+## リポジトリ構成
+
+```
+kabekami/
+├── src/                     # kabekami デーモン
+│   ├── main.rs
+│   ├── config.rs            # kabekami-common::config の再エクスポート
+│   ├── display_mode.rs      # kabekami-common::display_mode の再エクスポート
+│   └── ...
+├── crates/
+│   ├── kabekami-common/     # 共有ライブラリ（設定型・画像処理）
+│   └── kabekami-config/     # GUI 設定ツール（egui / eframe）
+└── Cargo.toml               # Cargo ワークスペースルート
+```
+
 ## トラブルシューティング
 
 ### トレイアイコンが表示されない
@@ -371,6 +427,11 @@ Plasma のウィジェットがロックされているときは `evaluateScript
 
 BlurPad 加工は内部で 1/4 サイズでぼかし処理を行うため通常 1〜2 秒で完了しますが、
 `prefetch = true` にしておくと**次の画像を事前加工**するため切り替え時は即座に反映されます。
+
+### kabekami-config で保存しても反映されない
+
+デーモンは inotify で `config.toml` の変更を検知し自動で再読み込みします。
+デーモンが起動していない場合は次回起動時に反映されます。
 
 ## ライセンス
 

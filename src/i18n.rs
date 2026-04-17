@@ -59,6 +59,8 @@ pub struct UiStrings {
     pub interval_labels: &'static [&'static str],
     /// トレイメニュー: 設定を再読み込み
     pub reload_config: &'static str,
+    /// トレイメニュー: 設定 GUI を開く
+    pub open_settings: &'static str,
 }
 
 /// 日本語文字列テーブル。
@@ -77,6 +79,7 @@ pub static JA: UiStrings = UiStrings {
     notify_warning:  "kabekami 警告",
     interval_labels: &["10秒", "30秒", "5分", "30分", "1時間", "3時間"],
     reload_config:   "設定を再読み込み",
+    open_settings:   "設定を開く",
 };
 
 /// 英語文字列テーブル。
@@ -95,6 +98,7 @@ pub static EN: UiStrings = UiStrings {
     notify_warning:  "kabekami Warning",
     interval_labels: &["10s", "30s", "5m", "30m", "1h", "3h"],
     reload_config:   "Reload Config",
+    open_settings:   "Open Settings",
 };
 
 /// `Lang` から対応する `UiStrings` 参照を返す。

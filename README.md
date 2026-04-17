@@ -9,6 +9,7 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 - System tray resident (SNI protocol) with context menu controls
 - LRU cache of processed images (SHA256 keyed) for fast switching even at short intervals
 - Background prefetch: pre-processes the next image while the current one is displayed
+- **GUI settings tool** (`kabekami-config`): five-tab egui interface with real-time BlurPad preview
 
 ## Requirements
 
@@ -31,14 +32,15 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 git clone https://github.com/kabeuchi-bird/kabekami.git
 cd kabekami
 cargo build --release
-# Binary is output to target/release/kabekami
-sudo install -m755 target/release/kabekami /usr/local/bin/
+# Install both binaries
+sudo install -m755 target/release/kabekami        /usr/local/bin/
+sudo install -m755 target/release/kabekami-config /usr/local/bin/
 ```
 
 ### cargo install (after crates.io release)
 
 ```bash
-cargo install kabekami
+cargo install kabekami kabekami-config
 ```
 
 ### AUR (Arch Linux)
@@ -78,6 +80,12 @@ yay -S kabekami
    [cache]
    directory = "~/.cache/kabekami"
    max_size_mb = 500
+   ```
+
+   Alternatively, open the GUI settings tool to configure without editing TOML manually:
+
+   ```bash
+   kabekami-config
    ```
 
 2. **Launch**
@@ -138,6 +146,34 @@ yay -S kabekami
    ```
 
    > The systemd approach provides automatic restart on crash (`Restart=on-failure`) and integrated log management. Specifying `plasma-plasmashell.service` in `After=` ensures the tray is ready before kabekami starts.
+
+## Settings GUI (`kabekami-config`)
+
+`kabekami-config` is a graphical settings editor bundled with kabekami.
+
+**Launch from the system tray:**
+
+Right-click the tray icon → **Open Settings**
+
+**Launch directly:**
+
+```bash
+kabekami-config
+```
+
+### Tabs
+
+| Tab | Contents |
+|-----|----------|
+| **Sources** | Add/remove wallpaper directories, toggle recursive scan |
+| **Rotation** | Interval, sequential/random order, change-on-start, prefetch |
+| **Display** | Mode selector (BlurPad / Fill / Fit / Stretch / Smart), blur sigma and background darkness sliders with **real-time preview** |
+| **Cache** | Cache directory path, maximum size (MB) |
+| **UI** | Display language (`en` / `ja`), desktop notification for warnings |
+
+Changes are saved to `~/.config/kabekami/config.toml` when you click **Save**. The running daemon detects the file change automatically via inotify and reloads without a restart.
+
+> **Note** The real-time preview in the Display tab renders at 480×270 (16:9). Processing runs in a background thread so the UI stays responsive.
 
 ## Configuration Reference
 
@@ -261,6 +297,9 @@ kabekami
 ├── Rotation Interval ▶     — 10s / 30s / 5m / 30m / 1h / 3h
 ├── ───────────────────────
 ├── Open Current Wallpaper  — Open the current file with xdg-open
+├── Reload Config           — Reload config.toml without restarting
+├── ───────────────────────
+├── Open Settings           — Launch kabekami-config GUI
 ├── ───────────────────────
 └── Quit
 ```
@@ -321,6 +360,21 @@ To clear the cache manually:
 rm -rf ~/.cache/kabekami/
 ```
 
+## Repository Structure
+
+```
+kabekami/
+├── src/                     # kabekami daemon
+│   ├── main.rs
+│   ├── config.rs            # re-exports kabekami-common::config
+│   ├── display_mode.rs      # re-exports kabekami-common::display_mode
+│   └── ...
+├── crates/
+│   ├── kabekami-common/     # Shared library (config types, image processing)
+│   └── kabekami-config/     # GUI settings tool (egui / eframe)
+└── Cargo.toml               # Cargo workspace root
+```
+
 ## Troubleshooting
 
 ### Tray icon not appearing
@@ -355,6 +409,10 @@ Plasma's `evaluateScript` can fail when desktop widgets are locked. Unlock the d
 ### Slow image processing (4K displays)
 
 BlurPad processing uses a quarter-scale intermediate for the blur step, typically completing in 1–2 s. With `prefetch = true`, the next image is processed in the background so switching is instant at the cost of slightly higher idle CPU/memory usage.
+
+### Settings not applied after saving in kabekami-config
+
+The daemon reloads the config automatically via inotify when `config.toml` changes. If the daemon is not running, changes take effect on the next start.
 
 ## License
 
