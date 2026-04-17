@@ -9,7 +9,8 @@ KDE Plasma 向け壁紙ローテーションツール。Rust 製。
 - システムトレイ常駐（SNI プロトコル）＋コンテキストメニュー操作
 - 加工済み画像のキャッシュ（SHA256 キー、LRU 退避）で短い間隔でも高速
 - 次の画像を事前にバックグラウンド加工しておく先読み機構
-- **GUI 設定ツール**（`kabekami-config`）: egui 製の 5 タブ設定画面。BlurPad のリアルタイムプレビュー付き
+- **オンライン壁紙ソース**: Bing Daily・Unsplash・Wallhaven・Reddit から指定間隔で自動ダウンロード
+- **GUI 設定ツール**（`kabekami-config`）: egui 製の 6 タブ設定画面。BlurPad のリアルタイムプレビュー付き
 
 ## 動作要件
 
@@ -180,6 +181,7 @@ kabekami-config
 | **Display** | 表示モード選択（BlurPad / Fill / Fit / Stretch / Smart）、ぼかし強度・背景暗さのスライダー（**リアルタイムプレビュー付き**） |
 | **Cache** | キャッシュディレクトリのパス、最大サイズ（MB） |
 | **UI** | 表示言語（`en` / `ja`）、警告のデスクトップ通知 |
+| **Online** | オンラインプロバイダーの追加 / 削除（Bing / Unsplash / Wallhaven / Reddit）、API キー、取得間隔、ダウンロード先ディレクトリ |
 
 「**保存 / Save**」ボタンをクリックすると `~/.config/kabekami/config.toml` に書き出されます。
 起動中のデーモンは inotify でファイル変更を検知し、再起動なしで自動的に再読み込みします。
@@ -270,6 +272,58 @@ language = "en"
 warn_notify = false
 ```
 
+### `[[online_sources]]` — オンライン壁紙ソース
+
+`[[online_sources]]` 配列の各エントリがオンラインプロバイダー 1 件の設定です。
+ダウンロード先はデフォルトで `~/.local/share/kabekami/<provider>/` に保存されます。
+
+```toml
+# Bing Daily — API キー不要、1 日最大 8 枚
+[[online_sources]]
+provider = "bing"
+enabled  = true
+count    = 8            # 1〜8（Bing API 上限）
+locale   = "ja-JP"      # 省略時は "en-US"（例: "ja-JP", "de-DE"）
+# download_dir = "~/.local/share/kabekami/bing"   # ダウンロード先を変更する場合
+
+# Unsplash — API キー必須（無料プランは 50 リクエスト/時間）
+[[online_sources]]
+provider = "unsplash"
+enabled  = true
+api_key  = "YOUR_ACCESS_KEY"
+query    = "nature landscape"   # 検索キーワード（省略時は "wallpaper"）
+count    = 10                   # 1〜30
+# quality = "regular"           # "regular"（デフォルト、約 1080p）または "full"（高解像度・大容量）
+
+# Wallhaven — API キーは任意（NSFW コンテンツ閲覧時のみ必要）
+[[online_sources]]
+provider = "wallhaven"
+enabled  = true
+# api_key = "YOUR_API_KEY"
+query    = "anime landscape"
+count    = 10                   # 1〜24
+
+# Reddit — API キー不要
+[[online_sources]]
+provider       = "reddit"
+enabled        = true
+subreddit      = "wallpapers"   # サブレディット名（英数字とアンダースコアのみ）
+count          = 10
+interval_hours = 1              # 取得間隔の上書き（省略時は Reddit のデフォルト: 1 時間）
+```
+
+#### プロバイダーのデフォルト値
+
+| プロバイダー | デフォルト間隔 | 最大件数 | 備考 |
+|------------|------------|---------|------|
+| `bing` | 24 時間 | 8 | 画面サイズに応じて FHD または UHD を自動選択 |
+| `unsplash` | 24 時間 | 30 | `quality = "regular"` 推奨（`"full"` は数十 MB になる場合あり） |
+| `wallhaven` | 24 時間 | 24 | デフォルトは SFW のみ（`purity = 100`） |
+| `reddit` | 1 時間 | 100 | 直接リンクの画像のみ対応（ギャラリー・アルバムリンクは除外） |
+
+取得インターバルのタイムスタンプは画像が 1 枚以上ダウンロードされたときのみ更新されます。
+インターバルを無視してすぐに取得したい場合はトレイメニューの **今すぐ取得** を使ってください。
+
 ## 使い方
 
 ### 環境変数
@@ -311,6 +365,7 @@ kabekami
 ├── 設定を再読み込み       — 再起動なしで config.toml を再読み込み
 ├── ─────────────────────
 ├── 設定を開く            — kabekami-config GUI を起動
+├── 今すぐ取得            — オンラインソースを即時取得（インターバル無視）
 ├── ─────────────────────
 └── 終了
 ```
@@ -432,6 +487,17 @@ BlurPad 加工は内部で 1/4 サイズでぼかし処理を行うため通常 
 
 デーモンは inotify で `config.toml` の変更を検知し自動で再読み込みします。
 デーモンが起動していない場合は次回起動時に反映されます。
+
+### オンラインソースの画像が 0 枚しかダウンロードされない
+
+- **Unsplash**: `api_key` が設定されているか、無料プランの 50 リクエスト/時間の上限に達していないか確認してください。
+- **Reddit**: サブレディットが存在し、直接リンクの画像投稿（`.jpg` / `.png` / `.webp` で終わる URL、または `post_hint = "image"` の投稿）があることを確認してください。imgur ギャラリーや動画投稿は対象外です。
+- **Wallhaven / Bing**: ネットワーク接続を確認してください。`RUST_LOG=kabekami=debug kabekami` で詳細なエラーを確認できます。
+- `.last_fetch` タイムスタンプは画像が 1 枚以上ダウンロードされたときのみ更新されます。0 枚の場合は次のインターバルで再試行されます。
+
+### ダウンロード済みの画像がローテーションに表示されない
+
+トレイメニューの **今すぐ取得** で即時取得を試み、その後 **設定を再読み込み** でダウンロードディレクトリを再スキャンしてください。
 
 ## ライセンス
 
