@@ -36,15 +36,9 @@ pub enum TrayCmd {
     Quit,
 }
 
-/// 設計書 §10 のメニューに表示する切り替え間隔プリセット。
-pub const INTERVAL_PRESETS: &[(u64, &str)] = &[
-    (10, "10秒"),
-    (30, "30秒"),
-    (300, "5分"),
-    (1800, "30分"),
-    (3600, "1時間"),
-    (10800, "3時間"),
-];
+/// 設計書 §10 のメニューに表示する切り替え間隔プリセット（秒）。
+/// ラベル表示は `i18n::UiStrings::interval_labels` を使用する。
+pub const INTERVAL_PRESETS: &[u64] = &[10, 30, 300, 1800, 3600, 10800];
 
 /// トレイアイコンの表示状態。メインループが `Handle::update()` で書き込み、
 /// `menu()` が読み出してメニューを組み立てる。
@@ -113,7 +107,7 @@ impl ksni::Tray for KabekamiTray {
         // 切り替え間隔のラジオボタン選択インデックス
         let interval_selected = INTERVAL_PRESETS
             .iter()
-            .position(|(s, _)| *s == self.interval_secs)
+            .position(|&s| s == self.interval_secs)
             .unwrap_or(3);
 
         vec![
@@ -185,7 +179,7 @@ impl ksni::Tray for KabekamiTray {
                 submenu: vec![RadioGroup {
                     selected: interval_selected,
                     select: Box::new(|this: &mut Self, idx| {
-                        let secs = INTERVAL_PRESETS[idx].0;
+                        let secs = INTERVAL_PRESETS[idx];
                         this.interval_secs = secs;
                         let _ = this.notifier.send(TrayCmd::SetInterval(secs));
                     }),

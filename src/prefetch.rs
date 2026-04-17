@@ -121,7 +121,7 @@ pub fn process_for_cache(
         return Ok(cached);
     }
 
-    tracing::info!("prefetch: processing {}", src.display());
+    tracing::debug!("prefetch: processing {}", src.display());
 
     // マジックバイトによるフォーマット検出（拡張子に依存しない）
     let reader = image::ImageReader::open(src)

@@ -30,9 +30,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use zbus;
 use tokio::signal;
 use tokio::time::{interval_at, Instant, MissedTickBehavior};
+use zbus;
 
 use crate::cache::{Cache, CacheKey};
 use crate::config::Config;

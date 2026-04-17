@@ -213,7 +213,7 @@ impl Config {
 /// 言語解決の優先順位（`main.rs` の `resolve_lang()` で実施）:
 /// 1. 環境変数 `KABEKAMI_LANG`
 /// 2. このフィールド（`config.toml` の `[ui] language`）
-/// 3. デフォルト: `"ja"`（日本語）
+/// 3. デフォルト: 英語
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Ui {
     /// `"ja"` または `"en"`。空文字列はデフォルト（英語）として扱う。
