@@ -41,7 +41,7 @@ pub async fn fetch(
         ("purity", "100".to_string()),    // SFW のみ
         ("categories", "111".to_string()), // general + anime + people
         ("atleast", "1920x1080".to_string()),
-        ("per_page", cfg.count.min(24).to_string()),
+        ("per_page", cfg.count.clamp(1, 24).to_string()),
     ];
     if let Some(key) = cfg.api_key.as_deref().filter(|k| !k.is_empty()) {
         params.push(("apikey", key.to_string()));

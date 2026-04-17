@@ -26,6 +26,7 @@ mod tray;
 mod watcher;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -142,7 +143,16 @@ async fn main() -> Result<()> {
     // オンラインプロバイダーのフェッチ用チャンネルと共有クライアント
     let (online_tx, mut online_rx) =
         tokio::sync::mpsc::unbounded_channel::<provider::FetchResult>();
-    let online_client = provider::make_client().ok();
+    let online_client = match provider::make_client() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!("online sources disabled: HTTP client init failed: {:#}", e);
+            None
+        }
+    };
+
+    // 画面サイズをフェッチコンテキストとして保持
+    let fetch_ctx = provider::FetchContext { screen_w, screen_h };
 
     // 30 分ごとにプロバイダーを確認する（第 1 tick は即時）
     let mut fetch_ticker = tokio::time::interval(Duration::from_secs(1800));
@@ -152,6 +162,9 @@ async fn main() -> Result<()> {
     let online_configs = std::sync::Arc::new(std::sync::Mutex::new(
         config.online_sources.clone(),
     ));
+
+    // 同時フェッチを防ぐフラグ（前のタスクが終わる前に次の tick が来ても無視する）
+    let fetch_in_progress = Arc::new(AtomicBool::new(false));
 
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
@@ -180,15 +193,21 @@ async fn main() -> Result<()> {
             // オンラインプロバイダーの定期フェッチ（30 分ごと、初回は即時）
             _ = fetch_ticker.tick() => {
                 if let Some(ref client) = online_client {
-                    let configs = online_configs.lock().unwrap().clone();
-                    if !configs.is_empty() {
+                    let configs = online_configs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if !configs.is_empty()
+                        && !fetch_in_progress.load(Ordering::Acquire)
+                    {
+                        fetch_in_progress.store(true, Ordering::Release);
                         let tx = online_tx.clone();
                         let client = client.clone();
+                        let ctx = fetch_ctx;
+                        let in_progress = fetch_in_progress.clone();
                         tokio::spawn(async move {
-                            let results = provider::fetch_all_due(&configs, &client).await;
+                            let results = provider::fetch_all_due(&configs, &client, ctx, false).await;
                             for r in results {
                                 let _ = tx.send(r);
                             }
+                            in_progress.store(false, Ordering::Release);
                         });
                     }
                 }
@@ -398,7 +417,7 @@ async fn main() -> Result<()> {
                                 }
 
                                 // 7. 設定更新（オンラインソース設定も共有 Arc を更新）
-                                *online_configs.lock().unwrap() = new_cfg.online_sources.clone();
+                                *online_configs.lock().unwrap_or_else(|e| e.into_inner()) = new_cfg.online_sources.clone();
                                 config = new_cfg;
 
                                 // 8. 現在の壁紙を新設定で再適用
@@ -437,6 +456,31 @@ async fn main() -> Result<()> {
                         match std::process::Command::new("kabekami-config").spawn() {
                             Ok(_) => tracing::info!("launched kabekami-config"),
                             Err(e) => tracing::warn!("failed to launch kabekami-config: {}", e),
+                        }
+                    }
+
+                    TrayCmd::FetchNow => {
+                        if let Some(ref client) = online_client {
+                            let configs = online_configs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            if !configs.is_empty()
+                                && !fetch_in_progress.load(Ordering::Acquire)
+                            {
+                                fetch_in_progress.store(true, Ordering::Release);
+                                let tx = online_tx.clone();
+                                let client = client.clone();
+                                let ctx = fetch_ctx;
+                                let in_progress = fetch_in_progress.clone();
+                                tokio::spawn(async move {
+                                    let results = provider::fetch_all_due(&configs, &client, ctx, true).await;
+                                    for r in results {
+                                        let _ = tx.send(r);
+                                    }
+                                    in_progress.store(false, Ordering::Release);
+                                });
+                                tracing::info!("manual fetch triggered");
+                            } else {
+                                tracing::info!("fetch already in progress, skipping");
+                            }
                         }
                     }
 

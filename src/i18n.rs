@@ -61,6 +61,8 @@ pub struct UiStrings {
     pub reload_config: &'static str,
     /// トレイメニュー: 設定 GUI を開く
     pub open_settings: &'static str,
+    /// トレイメニュー: オンライン壁紙を今すぐ取得
+    pub fetch_now: &'static str,
 }
 
 /// 日本語文字列テーブル。
@@ -80,6 +82,7 @@ pub static JA: UiStrings = UiStrings {
     interval_labels: &["10秒", "30秒", "5分", "30分", "1時間", "3時間"],
     reload_config:   "設定を再読み込み",
     open_settings:   "設定を開く",
+    fetch_now:       "今すぐ取得",
 };
 
 /// 英語文字列テーブル。
@@ -99,6 +102,7 @@ pub static EN: UiStrings = UiStrings {
     interval_labels: &["10s", "30s", "5m", "30m", "1h", "3h"],
     reload_config:   "Reload Config",
     open_settings:   "Open Settings",
+    fetch_now:       "Fetch Wallpapers Now",
 };
 
 /// `Lang` から対応する `UiStrings` 参照を返す。

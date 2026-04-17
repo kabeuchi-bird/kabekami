@@ -14,11 +14,17 @@ pub mod unsplash;
 pub mod wallhaven;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use kabekami_common::config::OnlineSourceConfig;
+
+/// 画面サイズ（ピクセル）。プロバイダーが解像度を選択するために使用する。
+#[derive(Debug, Clone, Copy)]
+pub struct FetchContext {
+    pub screen_w: u32,
+    pub screen_h: u32,
+}
 
 /// プロバイダーが新たにダウンロードした画像のパスと件数。
 pub struct FetchResult {
@@ -26,66 +32,89 @@ pub struct FetchResult {
     pub new_paths: Vec<PathBuf>,
 }
 
-/// 各プロバイダーを確認し、再取得が必要なものだけフェッチして結果を返す。
+/// 各プロバイダーを並列確認し、再取得が必要なものだけフェッチして結果を返す。
 ///
-/// ネットワークエラーは warning としてログに記録するだけで、他のプロバイダーの
-/// 処理は継続する。
+/// `force = true` のときは `.last_fetch` タイムスタンプを無視して全プロバイダーを取得する。
+/// ネットワークエラーは warning としてログに記録するだけで、他のプロバイダーの処理は継続する。
 pub async fn fetch_all_due(
     configs: &[OnlineSourceConfig],
     client: &reqwest::Client,
+    ctx: FetchContext,
+    force: bool,
 ) -> Vec<FetchResult> {
+    let mut set = tokio::task::JoinSet::new();
+
+    for cfg in configs.iter().filter(|c| c.enabled) {
+        let cfg = cfg.clone();
+        let client = client.clone();
+        set.spawn(async move { fetch_if_due(&cfg, &client, ctx, force).await });
+    }
+
     let mut results = Vec::new();
-    for cfg in configs {
-        if !cfg.enabled {
-            continue;
-        }
-        if !is_fetch_due(cfg) {
-            tracing::debug!(
-                "provider {}: not due yet (interval={}h)",
-                cfg.provider,
-                cfg.effective_interval_hours()
-            );
-            continue;
-        }
-
-        let dir = cfg.resolved_download_dir();
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            tracing::warn!("provider {}: cannot create dir {}: {}", cfg.provider, dir.display(), e);
-            continue;
-        }
-
-        let provider_name = cfg.provider.to_string();
-        tracing::info!("provider {}: fetching…", provider_name);
-
-        match fetch_one(cfg, &dir, client).await {
-            Ok(paths) => {
-                mark_fetch_done(cfg);
-                tracing::info!(
-                    "provider {}: {} image(s) available",
-                    provider_name,
-                    paths.len()
-                );
-                results.push(FetchResult {
-                    provider: provider_name,
-                    new_paths: paths,
-                });
-            }
-            Err(e) => {
-                tracing::warn!("provider {}: fetch failed: {:#}", provider_name, e);
-            }
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok(Some(r)) => results.push(r),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("provider task panicked: {}", e),
         }
     }
     results
+}
+
+/// 1 プロバイダーのフェッチが必要かどうかを判定し、必要なら実行する。
+async fn fetch_if_due(
+    cfg: &OnlineSourceConfig,
+    client: &reqwest::Client,
+    ctx: FetchContext,
+    force: bool,
+) -> Option<FetchResult> {
+    if !force && !is_fetch_due(cfg).await {
+        tracing::debug!(
+            "provider {}: not due yet (interval={}h)",
+            cfg.provider,
+            cfg.effective_interval_hours()
+        );
+        return None;
+    }
+
+    let dir = cfg.resolved_download_dir();
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        tracing::warn!("provider {}: cannot create dir {}: {}", cfg.provider, dir.display(), e);
+        return None;
+    }
+
+    let provider_name = cfg.provider.to_string();
+    tracing::info!("provider {}: fetching…", provider_name);
+
+    match fetch_one(cfg, &dir, client, ctx).await {
+        Ok(paths) if !paths.is_empty() => {
+            mark_fetch_done(cfg).await;
+            tracing::info!("provider {}: {} image(s) available", provider_name, paths.len());
+            Some(FetchResult { provider: provider_name, new_paths: paths })
+        }
+        Ok(_) => {
+            tracing::warn!(
+                "provider {}: fetch returned 0 images (skipping timestamp update)",
+                provider_name
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!("provider {}: fetch failed: {:#}", provider_name, e);
+            None
+        }
+    }
 }
 
 async fn fetch_one(
     cfg: &OnlineSourceConfig,
     dir: &Path,
     client: &reqwest::Client,
+    ctx: FetchContext,
 ) -> Result<Vec<PathBuf>> {
     use kabekami_common::config::ProviderKind;
     match cfg.provider {
-        ProviderKind::Bing => bing::fetch(cfg, dir, client).await,
+        ProviderKind::Bing => bing::fetch(cfg, dir, client, ctx).await,
         ProviderKind::Unsplash => unsplash::fetch(cfg, dir, client).await,
         ProviderKind::Wallhaven => wallhaven::fetch(cfg, dir, client).await,
         ProviderKind::Reddit => reddit::fetch(cfg, dir, client).await,
@@ -93,59 +122,97 @@ async fn fetch_one(
 }
 
 /// `.last_fetch` タイムスタンプを確認して再取得が必要かどうかを返す。
-fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
+async fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
     let stamp = cfg.resolved_download_dir().join(".last_fetch");
-    if !stamp.exists() {
+    if !tokio::fs::try_exists(&stamp).await.unwrap_or(false) {
         return true;
     }
     let interval_secs = cfg.effective_interval_hours() * 3600;
-    let modified = std::fs::metadata(&stamp)
-        .and_then(|m| m.modified())
+    let modified = tokio::fs::metadata(&stamp)
+        .await
+        .ok()
+        .and_then(|m| m.modified().ok())
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    let elapsed = SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or_default();
+    let elapsed = SystemTime::now().duration_since(modified).unwrap_or_default();
     elapsed.as_secs() >= interval_secs
 }
 
-/// `.last_fetch` タイムスタンプを更新する。
-fn mark_fetch_done(cfg: &OnlineSourceConfig) {
+/// `.last_fetch` タイムスタンプを更新する（画像を 1 枚以上取得できたときのみ呼ぶこと）。
+async fn mark_fetch_done(cfg: &OnlineSourceConfig) {
     let stamp = cfg.resolved_download_dir().join(".last_fetch");
-    if let Err(e) = std::fs::write(&stamp, b"") {
+    if let Err(e) = tokio::fs::write(&stamp, b"").await {
         tracing::warn!("provider {}: failed to write last_fetch stamp: {}", cfg.provider, e);
     }
 }
 
 /// HTTP GET で画像をダウンロードして `dest` に書き出す。
 ///
-/// アトミックな書き込みのため一時ファイル経由で rename する。
-pub async fn download_image(
-    client: &reqwest::Client,
-    url: &str,
-    dest: &Path,
-) -> Result<()> {
+/// - Content-Type が `text/html` / `application/json` の場合はエラー（HTML エラーページ対策）
+/// - 一時ファイル経由のアトミック書き込み
+/// - 最大 3 回の指数バックオフリトライ（2s → 4s）
+pub async fn download_image(client: &reqwest::Client, url: &str, dest: &Path) -> Result<()> {
+    let mut last_err = anyhow::anyhow!("download not attempted");
+    let mut delay = Duration::from_secs(2);
+
+    for attempt in 0..3u32 {
+        match try_download(client, url, dest).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e;
+                if attempt < 2 {
+                    tracing::debug!(
+                        "download attempt {}/3 failed for {}: {:#}",
+                        attempt + 1,
+                        url,
+                        last_err
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
+async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Result<()> {
     let resp = client.get(url).send().await?;
     let status = resp.status();
     if !status.is_success() {
         anyhow::bail!("HTTP {} downloading {}", status, url);
     }
-    let bytes = resp.bytes().await?;
 
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if content_type.starts_with("text/html") || content_type.starts_with("application/json") {
+        anyhow::bail!(
+            "unexpected Content-Type '{}' downloading {} (HTML/JSON error page?)",
+            content_type,
+            url
+        );
+    }
+
+    let bytes = resp.bytes().await?;
     let tmp = dest.with_extension("tmp");
     tokio::fs::write(&tmp, &bytes).await?;
     tokio::fs::rename(&tmp, dest).await?;
     Ok(())
 }
 
-/// 共有 `reqwest::Client` を生成する。
-pub fn make_client() -> Result<Arc<reqwest::Client>> {
+/// `reqwest::Client` を生成する。`reqwest::Client` は内部で `Arc` を使っているため
+/// `.clone()` は安価で、外側の `Arc` ラップは不要。
+pub fn make_client() -> Result<reqwest::Client> {
     let client = reqwest::Client::builder()
         .user_agent(concat!(
             "kabekami/",
             env!("CARGO_PKG_VERSION"),
             " (Linux wallpaper tool)"
         ))
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(Duration::from_secs(30))
         .build()?;
-    Ok(Arc::new(client))
+    Ok(client)
 }

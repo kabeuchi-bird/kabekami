@@ -24,7 +24,9 @@ struct UnsplashPhoto {
 
 #[derive(Deserialize)]
 struct UnsplashUrls {
-    /// フルサイズ（非圧縮）URL
+    /// 1080p 相当の圧縮 URL（デフォルト）
+    regular: String,
+    /// フルサイズ（非圧縮）URL。`quality = "full"` 設定時に使用。
     full: String,
 }
 
@@ -58,6 +60,9 @@ pub async fn fetch(
         .await
         .context("failed to parse Unsplash API response")?;
 
+    // quality = "full" のみフルサイズ。デフォルトは regular（1080p 相当、容量が 1/10 程度）。
+    let use_full = cfg.quality.as_deref() == Some("full");
+
     let mut available = Vec::new();
 
     for photo in &photos {
@@ -69,7 +74,8 @@ pub async fn fetch(
             continue;
         }
 
-        match download_image(client, &photo.urls.full, &dest).await {
+        let url = if use_full { &photo.urls.full } else { &photo.urls.regular };
+        match download_image(client, url, &dest).await {
             Ok(()) => {
                 tracing::debug!("unsplash: downloaded {}", dest.display());
                 available.push(dest);

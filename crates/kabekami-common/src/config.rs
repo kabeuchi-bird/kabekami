@@ -310,6 +310,12 @@ pub struct OnlineSourceConfig {
     /// 再取得間隔の上書き（時間）。`None` の場合はプロバイダーのデフォルトを使用。
     #[serde(default)]
     pub interval_hours: Option<u64>,
+    /// ロケール（Bing で使用。例: `"ja-JP"`, `"en-US"`）。デフォルト: `"en-US"`。
+    #[serde(default)]
+    pub locale: Option<String>,
+    /// 画像品質（Unsplash で使用: `"regular"` または `"full"`）。デフォルト: `"regular"`。
+    #[serde(default)]
+    pub quality: Option<String>,
 }
 
 impl OnlineSourceConfig {

@@ -34,6 +34,8 @@ pub enum TrayCmd {
     ReloadConfig,
     /// 設定 GUI を開く
     OpenSettings,
+    /// オンライン壁紙を今すぐ取得（インターバル無視）
+    FetchNow,
     /// アプリ終了
     Quit,
 }
@@ -225,6 +227,16 @@ impl ksni::Tray for KabekamiTray {
                 icon_name: "preferences-system".into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.notifier.send(TrayCmd::OpenSettings);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            // 今すぐ取得 / Fetch Wallpapers Now
+            StandardItem {
+                label: self.strings.fetch_now.into(),
+                icon_name: "download".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.notifier.send(TrayCmd::FetchNow);
                 }),
                 ..Default::default()
             }
