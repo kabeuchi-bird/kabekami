@@ -10,7 +10,6 @@
 //! - ディレクトリ監視（`watcher.rs`）: `notify` で画像の追加・削除をリアルタイム検知
 //!   し、スケジューラに反映する。
 
-mod blur_pad;
 mod cache;
 mod config;
 mod daemon_iface;
@@ -354,6 +353,13 @@ async fn main() -> Result<()> {
 
                                 tracing::info!("config reload complete");
                             }
+                        }
+                    }
+
+                    TrayCmd::OpenSettings => {
+                        match std::process::Command::new("kabekami-config").spawn() {
+                            Ok(_) => tracing::info!("launched kabekami-config"),
+                            Err(e) => tracing::warn!("failed to launch kabekami-config: {}", e),
                         }
                     }
 

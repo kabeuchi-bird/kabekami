@@ -1,0 +1,17 @@
+[package]
+name = "kabekami-config"
+version = "0.1.0"
+edition = "2021"
+description = "GUI settings tool for kabekami"
+license = "MIT"
+
+[[bin]]
+name = "kabekami-config"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+eframe = "0.29"
+egui = "0.29"
+image = "0.25"
+kabekami-common = { path = "../kabekami-common" }

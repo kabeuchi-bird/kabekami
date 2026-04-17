@@ -32,6 +32,8 @@ pub enum TrayCmd {
     OpenCurrent,
     /// 設定ファイルを再読み込みする
     ReloadConfig,
+    /// 設定 GUI を開く
+    OpenSettings,
     /// アプリ終了
     Quit,
 }
@@ -213,6 +215,16 @@ impl ksni::Tray for KabekamiTray {
                 icon_name: "view-refresh".into(),
                 activate: Box::new(|this: &mut Self| {
                     let _ = this.notifier.send(TrayCmd::ReloadConfig);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            // 設定を開く / Open Settings
+            StandardItem {
+                label: self.strings.open_settings.into(),
+                icon_name: "preferences-system".into(),
+                activate: Box::new(|this: &mut Self| {
+                    let _ = this.notifier.send(TrayCmd::OpenSettings);
                 }),
                 ..Default::default()
             }
