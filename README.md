@@ -9,7 +9,8 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 - System tray resident (SNI protocol) with context menu controls
 - LRU cache of processed images (SHA256 keyed) for fast switching even at short intervals
 - Background prefetch: pre-processes the next image while the current one is displayed
-- **GUI settings tool** (`kabekami-config`): five-tab egui interface with real-time BlurPad preview
+- **Online wallpaper sources**: automatically download fresh wallpapers from Bing Daily, Unsplash, Wallhaven, and Reddit at configurable intervals
+- **GUI settings tool** (`kabekami-config`): six-tab egui interface with real-time BlurPad preview
 
 ## Requirements
 
@@ -170,6 +171,7 @@ kabekami-config
 | **Display** | Mode selector (BlurPad / Fill / Fit / Stretch / Smart), blur sigma and background darkness sliders with **real-time preview** |
 | **Cache** | Cache directory path, maximum size (MB) |
 | **UI** | Display language (`en` / `ja`), desktop notification for warnings |
+| **Online** | Add/remove online providers (Bing / Unsplash / Wallhaven / Reddit), API keys, fetch interval, download directory |
 
 Changes are saved to `~/.config/kabekami/config.toml` when you click **Save**. The running daemon detects the file change automatically via inotify and reloads without a restart.
 
@@ -259,6 +261,58 @@ language = "en"
 warn_notify = false
 ```
 
+### `[[online_sources]]` — Online Wallpaper Sources
+
+Each entry in the `[[online_sources]]` array configures one online provider.
+Downloaded images are stored in `~/.local/share/kabekami/<provider>/` by default.
+
+```toml
+# Bing Daily — no API key required, up to 8 images per day
+[[online_sources]]
+provider = "bing"
+enabled  = true
+count    = 8            # 1–8 (Bing API limit)
+locale   = "en-US"      # optional — e.g. "ja-JP", "de-DE" (default: "en-US")
+# download_dir = "~/.local/share/kabekami/bing"   # override download path
+
+# Unsplash — API key required (free tier: 50 req/hour)
+[[online_sources]]
+provider = "unsplash"
+enabled  = true
+api_key  = "YOUR_ACCESS_KEY"
+query    = "nature landscape"   # search terms (default: "wallpaper")
+count    = 10                   # 1–30
+# quality = "regular"           # "regular" (default, ~1080p) or "full" (raw, very large)
+
+# Wallhaven — API key optional (required only for NSFW content)
+[[online_sources]]
+provider = "wallhaven"
+enabled  = true
+# api_key = "YOUR_API_KEY"
+query    = "anime landscape"
+count    = 10                   # 1–24
+
+# Reddit — no API key required
+[[online_sources]]
+provider       = "reddit"
+enabled        = true
+subreddit      = "wallpapers"   # subreddit name (alphanumeric + underscore only)
+count          = 10
+interval_hours = 1              # override fetch interval (default: 1h for Reddit)
+```
+
+#### Provider defaults
+
+| Provider | Default interval | Max count | Notes |
+|----------|-----------------|-----------|-------|
+| `bing` | 24 h | 8 | Downloads FHD (1920×1080) or UHD (3840×2160) based on screen size |
+| `unsplash` | 24 h | 30 | `quality = "regular"` is recommended over `"full"` |
+| `wallhaven` | 24 h | 24 | SFW only by default (`purity = 100`) |
+| `reddit` | 1 h | 100 | Direct-link images only; `post_hint = "image"` or URL extension |
+
+The fetch interval timer resets only after at least one image is successfully downloaded.
+To trigger a fetch immediately, use **Fetch Wallpapers Now** in the tray menu.
+
 ## Usage
 
 ### Environment Variables
@@ -300,6 +354,7 @@ kabekami
 ├── Reload Config           — Reload config.toml without restarting
 ├── ───────────────────────
 ├── Open Settings           — Launch kabekami-config GUI
+├── Fetch Wallpapers Now    — Trigger online provider fetch immediately (ignores interval)
 ├── ───────────────────────
 └── Quit
 ```
@@ -413,6 +468,17 @@ BlurPad processing uses a quarter-scale intermediate for the blur step, typicall
 ### Settings not applied after saving in kabekami-config
 
 The daemon reloads the config automatically via inotify when `config.toml` changes. If the daemon is not running, changes take effect on the next start.
+
+### Online sources download 0 images
+
+- **Unsplash**: check that `api_key` is set and the 50 req/hour free-tier limit has not been exceeded.
+- **Reddit**: the subreddit must exist and contain posts with direct image links (`.jpg`, `.png`, `.webp`). Gallery/album links are not supported.
+- **Wallhaven / Bing**: verify network connectivity and check `RUST_LOG=kabekami=debug` output for detailed error messages.
+- The `.last_fetch` timestamp is only updated when at least one image is downloaded. If a fetch returns 0 images, the next attempt happens at the next interval tick (not after a full interval delay).
+
+### Online images not appearing in rotation after download
+
+Use **Fetch Wallpapers Now** in the tray menu to trigger an immediate fetch and confirm the images are added. Then use **Reload Config** to re-scan the download directories.
 
 ## License
 
