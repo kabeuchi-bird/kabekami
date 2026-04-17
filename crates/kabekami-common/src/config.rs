@@ -22,6 +22,9 @@ pub struct Config {
     pub cache: Cache,
     #[serde(default)]
     pub ui: Ui,
+    /// オンライン壁紙プロバイダー設定（`[[online_sources]]` 配列）。
+    #[serde(default)]
+    pub online_sources: Vec<OnlineSourceConfig>,
 }
 
 impl Default for Config {
@@ -32,6 +35,7 @@ impl Default for Config {
             display: Display::default(),
             cache: Cache::default(),
             ui: Ui::default(),
+            online_sources: Vec::new(),
         }
     }
 }
@@ -231,7 +235,104 @@ impl Config {
             .map(|p| expand_tilde(p))
             .collect();
         self.cache.directory = expand_tilde(&self.cache.directory);
+        for oc in &mut self.online_sources {
+            if let Some(dir) = &oc.download_dir {
+                oc.download_dir = Some(expand_tilde(dir));
+            }
+        }
     }
+}
+
+// ── オンラインソース ──────────────────────────────────────────────────────────
+
+/// オンラインプロバイダー種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    Bing,
+    Unsplash,
+    Wallhaven,
+    Reddit,
+}
+
+impl ProviderKind {
+    /// プロバイダーの識別名（ディレクトリ名にも使用）。
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bing => "bing",
+            Self::Unsplash => "unsplash",
+            Self::Wallhaven => "wallhaven",
+            Self::Reddit => "reddit",
+        }
+    }
+
+    /// デフォルトの再取得間隔（時間）。
+    pub fn default_interval_hours(self) -> u64 {
+        match self {
+            Self::Bing => 24,
+            Self::Unsplash => 24,
+            Self::Wallhaven => 24,
+            Self::Reddit => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// オンライン壁紙ソース 1 件の設定。TOML では `[[online_sources]]` 配列。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OnlineSourceConfig {
+    /// プロバイダー種別。
+    pub provider: ProviderKind,
+    /// 有効/無効（デフォルト: true）。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// ダウンロード先ディレクトリ。
+    /// `None` の場合は `~/.local/share/kabekami/<provider>` を使用。
+    #[serde(default)]
+    pub download_dir: Option<PathBuf>,
+    /// API キー（Unsplash: 必須、Wallhaven: NSFW 閲覧時のみ必要）。
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// 検索クエリ（Unsplash / Wallhaven / Reddit subreddit 以外で使用）。
+    #[serde(default)]
+    pub query: Option<String>,
+    /// 保持する画像枚数（デフォルト: 10）。
+    #[serde(default = "default_online_count")]
+    pub count: u32,
+    /// Reddit プロバイダーで使用するサブレディット名（例: `"wallpapers"`）。
+    #[serde(default)]
+    pub subreddit: Option<String>,
+    /// 再取得間隔の上書き（時間）。`None` の場合はプロバイダーのデフォルトを使用。
+    #[serde(default)]
+    pub interval_hours: Option<u64>,
+}
+
+impl OnlineSourceConfig {
+    /// 実際のダウンロードディレクトリを返す（`download_dir` が未設定の場合はデフォルト値）。
+    pub fn resolved_download_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.download_dir {
+            return dir.clone();
+        }
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from(".local/share"))
+            .join("kabekami")
+            .join(self.provider.name())
+    }
+
+    /// 実効的な再取得間隔（時間）。
+    pub fn effective_interval_hours(&self) -> u64 {
+        self.interval_hours
+            .unwrap_or_else(|| self.provider.default_interval_hours())
+    }
+}
+
+fn default_online_count() -> u32 {
+    10
 }
 
 fn expand_tilde(path: &Path) -> PathBuf {

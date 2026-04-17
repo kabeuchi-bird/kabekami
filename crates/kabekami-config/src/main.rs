@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use eframe::egui;
-use kabekami_common::config::{Config, DisplayMode, Order};
+use kabekami_common::config::{Config, DisplayMode, OnlineSourceConfig, Order, ProviderKind};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -95,6 +95,7 @@ fn render_preview(req: &PreviewRequest) -> anyhow::Result<egui::ColorImage> {
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Sources,
+    Online,
     Rotation,
     Display,
     Cache,
@@ -118,6 +119,9 @@ struct KabekamiApp {
 
     // Sources tab: editing
     new_dir_input: String,
+
+    // Online sources tab: editing
+    new_online_provider: ProviderKind,
 }
 
 impl KabekamiApp {
@@ -143,6 +147,7 @@ impl KabekamiApp {
             preview_rendering: false,
             preview_last: None,
             new_dir_input: String::new(),
+            new_online_provider: ProviderKind::Bing,
         }
     }
 
@@ -210,6 +215,7 @@ impl eframe::App for KabekamiApp {
             ui.horizontal(|ui| {
                 for (label, tab) in [
                     ("Sources", Tab::Sources),
+                    ("Online", Tab::Online),
                     ("Rotation", Tab::Rotation),
                     ("Display", Tab::Display),
                     ("Cache", Tab::Cache),
@@ -238,6 +244,7 @@ impl eframe::App for KabekamiApp {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 match self.tab {
                     Tab::Sources => self.ui_sources(ui),
+                    Tab::Online => self.ui_online(ui),
                     Tab::Rotation => self.ui_rotation(ui),
                     Tab::Display => self.ui_display(ui, ctx),
                     Tab::Cache => self.ui_cache(ui),
@@ -416,6 +423,110 @@ impl KabekamiApp {
             ui.add(egui::DragValue::new(&mut self.config.cache.max_size_mb).range(0..=100_000));
         });
         ui.label("0 = 無制限 / unlimited");
+    }
+
+    fn ui_online(&mut self, ui: &mut egui::Ui) {
+        ui.heading("オンラインソース / Online Sources");
+        ui.separator();
+        ui.label("インターネットから壁紙を自動取得します。/ Automatically fetch wallpapers from the internet.");
+        ui.add_space(8.0);
+
+        let mut remove_idx: Option<usize> = None;
+        let sources = self.config.online_sources.clone();
+        for (i, oc) in sources.iter().enumerate() {
+            let mut oc = oc.clone();
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut oc.enabled, format!("**{}**", oc.provider));
+                    if ui.small_button("✖  削除").clicked() {
+                        remove_idx = Some(i);
+                    }
+                });
+
+                ui.indent(format!("online_{}", i), |ui| {
+                    // API キー（Unsplash / Wallhaven）
+                    if matches!(oc.provider, ProviderKind::Unsplash | ProviderKind::Wallhaven) {
+                        ui.horizontal(|ui| {
+                            ui.label("API Key:");
+                            let mut key = oc.api_key.clone().unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(300.0)).changed() {
+                                oc.api_key = if key.is_empty() { None } else { Some(key) };
+                            }
+                        });
+                    }
+                    // クエリ（Unsplash / Wallhaven）
+                    if matches!(oc.provider, ProviderKind::Unsplash | ProviderKind::Wallhaven) {
+                        ui.horizontal(|ui| {
+                            ui.label("Query:");
+                            let mut q = oc.query.clone().unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut q).hint_text("nature").desired_width(200.0)).changed() {
+                                oc.query = if q.is_empty() { None } else { Some(q) };
+                            }
+                        });
+                    }
+                    // サブレディット（Reddit）
+                    if oc.provider == ProviderKind::Reddit {
+                        ui.horizontal(|ui| {
+                            ui.label("Subreddit:");
+                            let mut sub = oc.subreddit.clone().unwrap_or_default();
+                            if ui.add(egui::TextEdit::singleline(&mut sub).hint_text("wallpapers").desired_width(200.0)).changed() {
+                                oc.subreddit = if sub.is_empty() { None } else { Some(sub) };
+                            }
+                        });
+                    }
+                    // 保持枚数
+                    ui.horizontal(|ui| {
+                        ui.label("保持枚数 / Count:");
+                        ui.add(egui::DragValue::new(&mut oc.count).range(1..=100));
+                    });
+                    // 再取得間隔
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                            "再取得間隔 / Interval: {}h (default: {}h)",
+                            oc.interval_hours.unwrap_or(oc.provider.default_interval_hours()),
+                            oc.provider.default_interval_hours()
+                        ));
+                    });
+                });
+            });
+            self.config.online_sources[i] = oc;
+            ui.add_space(4.0);
+        }
+        if let Some(idx) = remove_idx {
+            self.config.online_sources.remove(idx);
+        }
+
+        // 新規追加
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("プロバイダーを追加 / Add provider:");
+            egui::ComboBox::from_id_salt("new_provider")
+                .selected_text(self.new_online_provider.to_string())
+                .show_ui(ui, |ui| {
+                    for p in [
+                        ProviderKind::Bing,
+                        ProviderKind::Unsplash,
+                        ProviderKind::Wallhaven,
+                        ProviderKind::Reddit,
+                    ] {
+                        ui.selectable_value(&mut self.new_online_provider, p, p.to_string());
+                    }
+                });
+            if ui.button("＋ 追加 / Add").clicked() {
+                self.config.online_sources.push(OnlineSourceConfig {
+                    provider: self.new_online_provider,
+                    enabled: true,
+                    download_dir: None,
+                    api_key: None,
+                    query: None,
+                    count: 10,
+                    subreddit: None,
+                    interval_hours: None,
+                });
+            }
+        });
+        ui.add_space(4.0);
+        ui.label("💡 ダウンロード先: ~/.local/share/kabekami/<provider>/");
     }
 
     fn ui_ui_tab(&mut self, ui: &mut egui::Ui) {

@@ -18,6 +18,7 @@ mod i18n;
 mod notify;
 mod plasma;
 mod prefetch;
+mod provider;
 mod scanner;
 mod scheduler;
 mod screen;
@@ -68,15 +69,28 @@ async fn main() -> Result<()> {
 
     tracing::info!(?config, "loaded config");
 
-    let images = crate::scanner::scan(&config.sources.directories, config.sources.recursive)
-        .context("failed to scan source directories")?;
-    if images.is_empty() {
-        anyhow::bail!(
-            "no images found. Configure [sources] directories in {}",
-            Config::config_path()?.display()
-        );
+    // ローカルディレクトリ + オンラインソースのダウンロードディレクトリを統合してスキャン
+    let mut scan_dirs = config.sources.directories.clone();
+    for oc in &config.online_sources {
+        if oc.enabled {
+            scan_dirs.push(oc.resolved_download_dir());
+        }
     }
-    tracing::info!("discovered {} image(s)", images.len());
+    let images = crate::scanner::scan(&scan_dirs, config.sources.recursive)
+        .context("failed to scan source directories")?;
+    let has_online = config.online_sources.iter().any(|s| s.enabled);
+    if images.is_empty() {
+        if has_online {
+            tracing::info!("no local images yet; waiting for online sources to fetch");
+        } else {
+            anyhow::bail!(
+                "no images found. Configure [sources] directories in {}",
+                Config::config_path()?.display()
+            );
+        }
+    } else {
+        tracing::info!("discovered {} image(s)", images.len());
+    }
 
     let (screen_w, screen_h) = resolve_screen_size();
     tracing::info!("using screen size {}x{}", screen_w, screen_h);
@@ -125,6 +139,20 @@ async fn main() -> Result<()> {
     // Plasma への壁紙適用ハンドル（D-Bus 接続を保持して再利用）
     let plasma_shell = plasma::PlasmaShell::new().await;
 
+    // オンラインプロバイダーのフェッチ用チャンネルと共有クライアント
+    let (online_tx, mut online_rx) =
+        tokio::sync::mpsc::unbounded_channel::<provider::FetchResult>();
+    let online_client = provider::make_client().ok();
+
+    // 30 分ごとにプロバイダーを確認する（第 1 tick は即時）
+    let mut fetch_ticker = tokio::time::interval(Duration::from_secs(1800));
+    fetch_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    // オンラインソース設定を共有（ReloadConfig で更新される）
+    let online_configs = std::sync::Arc::new(std::sync::Mutex::new(
+        config.online_sources.clone(),
+    ));
+
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
@@ -149,6 +177,54 @@ async fn main() -> Result<()> {
 
     loop {
         tokio::select! {
+            // オンラインプロバイダーの定期フェッチ（30 分ごと、初回は即時）
+            _ = fetch_ticker.tick() => {
+                if let Some(ref client) = online_client {
+                    let configs = online_configs.lock().unwrap().clone();
+                    if !configs.is_empty() {
+                        let tx = online_tx.clone();
+                        let client = client.clone();
+                        tokio::spawn(async move {
+                            let results = provider::fetch_all_due(&configs, &client).await;
+                            for r in results {
+                                let _ = tx.send(r);
+                            }
+                        });
+                    }
+                }
+            }
+
+            // オンラインフェッチ完了 → スケジューラに追加
+            Some(result) = online_rx.recv() => {
+                if !result.new_paths.is_empty() {
+                    let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
+                    for path in &result.new_paths {
+                        scheduler.add_image(path.clone());
+                    }
+                    tracing::info!(
+                        "provider {}: {} new image(s) added to rotation",
+                        result.provider,
+                        result.new_paths.len()
+                    );
+                    // 壁紙が 1 枚も表示されていなければ即時適用
+                    if was_empty {
+                        if let Some(path) = scheduler.next() {
+                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
+                                tracing::error!(error = %e, "online: initial apply failed");
+                                let msg = e.to_string();
+                                notifier.error(&msg).await;
+                                update_tray_error(&tray_handle, msg).await;
+                            } else {
+                                notifier.clear();
+                                update_tray_clear_error(&tray_handle).await;
+                                update_tray_current(&tray_handle, &path).await;
+                                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
+                            }
+                        }
+                    }
+                }
+            }
+
             _ = ticker.tick() => {
                 if scheduler.is_paused() {
                     continue;
@@ -321,7 +397,8 @@ async fn main() -> Result<()> {
                                     );
                                 }
 
-                                // 7. 設定更新
+                                // 7. 設定更新（オンラインソース設定も共有 Arc を更新）
+                                *online_configs.lock().unwrap() = new_cfg.online_sources.clone();
                                 config = new_cfg;
 
                                 // 8. 現在の壁紙を新設定で再適用
