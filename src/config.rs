@@ -213,12 +213,15 @@ impl Config {
 /// 言語解決の優先順位（`main.rs` の `resolve_lang()` で実施）:
 /// 1. 環境変数 `KABEKAMI_LANG`
 /// 2. このフィールド（`config.toml` の `[ui] language`）
-/// 3. デフォルト: `"ja"`（日本語）
+/// 3. デフォルト: 英語
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Ui {
-    /// `"ja"` または `"en"`。空文字列はデフォルト（日本語）として扱う。
+    /// `"ja"` または `"en"`。空文字列はデフォルト（英語）として扱う。
     #[serde(default)]
     pub language: String,
+    /// WARN レベルのログをデスクトップ通知として表示する（デフォルト: false）。
+    #[serde(default)]
+    pub warn_notify: bool,
 }
 
 fn expand_tilde(path: &Path) -> PathBuf {

@@ -6,8 +6,8 @@
 //! - `peek_next()`: 次の画像を先読みするためのチラ見せ（状態を変えない）
 //! - 全画像を一巡してから再シャッフル（ランダムモードでの連続重複を防止）
 
-use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 
 use crate::config::Order;
 
@@ -23,6 +23,8 @@ const HISTORY_LIMIT: usize = 50;
 pub struct Scheduler {
     /// ソース画像リスト（shuffle / refill の原本）
     images: Vec<PathBuf>,
+    /// `images` の重複チェック用セット（O(1) ルックアップ）
+    image_set: HashSet<PathBuf>,
     order: Order,
     /// 未表示の画像キュー。空になったら `refill()` する。
     queue: VecDeque<PathBuf>,
@@ -40,8 +42,10 @@ impl Scheduler {
     /// `order` が `Random` の場合はキューを Fisher-Yates シャッフルする。
     pub fn new(images: Vec<PathBuf>, order: Order) -> Self {
         let queue = Self::build_queue(&images, order, None);
+        let image_set = images.iter().cloned().collect();
         Self {
             images,
+            image_set,
             order,
             queue,
             history: VecDeque::new(),
@@ -132,8 +136,8 @@ impl Scheduler {
     /// すでにリストに存在する場合は何もしない。
     /// ランダムモードではキューにも追加する（一巡の途中でも拾われるように）。
     pub fn add_image(&mut self, path: PathBuf) {
-        if self.images.contains(&path) {
-            return;
+        if !self.image_set.insert(path.clone()) {
+            return; // すでに存在する
         }
         self.images.push(path.clone());
         // キューの末尾にも追加して、現在の一巡に含める
@@ -145,10 +149,11 @@ impl Scheduler {
     /// リスト・キュー・現在画像から除去する。
     /// 現在表示中の画像が削除された場合は `current` を `None` にし、
     /// 次の `next()` 呼び出しでキューから新しい画像を選択する。
-    pub fn remove_image(&mut self, path: &PathBuf) {
+    pub fn remove_image(&mut self, path: &Path) {
         self.images.retain(|p| p != path);
+        self.image_set.remove(path);
         self.queue.retain(|p| p != path);
-        if self.current.as_ref() == Some(path) {
+        if self.current.as_deref() == Some(path) {
             self.current = None;
         }
         self.history.retain(|p| p != path);

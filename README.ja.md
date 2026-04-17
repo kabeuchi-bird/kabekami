@@ -228,6 +228,8 @@ max_size_mb = 500
 # 表示言語: "en"（英語、デフォルト） または "ja"（日本語）
 # 環境変数 KABEKAMI_LANG で実行時に上書き可能
 language = "en"
+# WARN レベルのログをデスクトップ通知として表示する（デフォルト: false）
+warn_notify = false
 ```
 
 ## 使い方
@@ -274,9 +276,27 @@ kabekami
 
 > `KABEKAMI_LANG=ja`（または `language = "ja"`）を設定すると日本語メニューで表示されます。
 
+### CLI コマンド
+
+デーモン起動中はコマンドラインから操作できます:
+
+```bash
+kabekami --next           # 次の壁紙へ切り替え
+kabekami --prev           # 前の壁紙に戻る
+kabekami --toggle-pause   # 自動切り替えの一時停止 / 再開
+kabekami --reload-config  # config.toml を再読み込み（再起動不要）
+kabekami --quit           # デーモンを終了
+```
+
+コマンドは D-Bus（`org.kabekami.Daemon`）経由でデーモンに転送されます。
+デーモンが起動していない場合はエラーになります。
+
 ### Ctrl-C で終了
 
 ```bash
+# コマンドラインから終了
+kabekami --quit
+
 # フォアグラウンドで起動中の場合
 Ctrl-C
 ```

@@ -13,6 +13,7 @@
 mod blur_pad;
 mod cache;
 mod config;
+mod daemon_iface;
 mod display_mode;
 mod i18n;
 mod notify;
@@ -31,6 +32,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::signal;
 use tokio::time::{interval_at, Instant, MissedTickBehavior};
+use zbus;
 
 use crate::cache::{Cache, CacheKey};
 use crate::config::Config;
@@ -43,11 +45,28 @@ use crate::tray::TrayCmd;
 const FALLBACK_SCREEN_W: u32 = 1920;
 const FALLBACK_SCREEN_H: u32 = 1080;
 
+/// CLI サブコマンド。デーモンへの 1 回限りの操作を表す。
+enum CliCmd {
+    Next,
+    Prev,
+    TogglePause,
+    ReloadConfig,
+    Quit,
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<()> {
-    init_tracing();
+    // CLI コマンドが指定されていればデーモンへ転送して終了する
+    if let Some(cmd) = parse_cli()? {
+        return send_to_daemon(cmd).await;
+    }
 
+    // Config を先にロード（tracing の初期化に warn_notify フラグが必要なため）
     let mut config = Config::load().context("failed to load config")?;
+
+    // warn_notify に応じた tracing subscriber を初期化
+    let mut warn_rx = init_tracing(config.ui.warn_notify);
+
     tracing::info!(?config, "loaded config");
 
     let images = crate::scanner::scan(&config.sources.directories, config.sources.recursive)
@@ -89,22 +108,28 @@ async fn main() -> Result<()> {
     tracing::info!("ui language: {:?}", lang);
 
     // デスクトップ通知ハンドル
-    let mut notifier = notify::Notifier::new(lang);
+    let mut notifier = notify::Notifier::new(lang).await;
 
     // トレイを非同期に起動（D-Bus が使えない環境では None になる）
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TrayCmd>();
     let tray_handle = tray::spawn_tray(
-        cmd_tx,
+        cmd_tx.clone(),
         config.display.mode,
         config.rotation.interval_secs,
         lang,
     )
     .await;
 
+    // D-Bus デーモンインターフェースを登録（CLI からのリモート操作を受け付ける）
+    let _dbus_conn = spawn_dbus_iface(cmd_tx).await;
+
+    // Plasma への壁紙適用ハンドル（D-Bus 接続を保持して再利用）
+    let plasma_shell = plasma::PlasmaShell::new().await;
+
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
-            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
+            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                 tracing::error!(error = %e, "initial wallpaper apply failed");
                 let msg = e.to_string();
                 notifier.error(&msg).await;
@@ -130,7 +155,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if let Some(path) = scheduler.next() {
-                    if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
+                    if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                         tracing::error!(error = %e, "auto apply failed");
                         let msg = e.to_string();
                         notifier.error(&msg).await;
@@ -149,7 +174,7 @@ async fn main() -> Result<()> {
                     TrayCmd::Next => {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
-                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
+                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                                 tracing::error!(error = %e, "tray Next failed");
                                 let msg = e.to_string();
                                 notifier.error(&msg).await;
@@ -166,7 +191,7 @@ async fn main() -> Result<()> {
 
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
-                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache).await {
+                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                                 tracing::error!(error = %e, "tray Prev failed");
                                 let msg = e.to_string();
                                 notifier.error(&msg).await;
@@ -175,6 +200,7 @@ async fn main() -> Result<()> {
                                 notifier.clear();
                                 update_tray_clear_error(&tray_handle).await;
                                 update_tray_current(&tray_handle, &path).await;
+                                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                             }
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
@@ -198,7 +224,7 @@ async fn main() -> Result<()> {
                         tracing::info!("display mode → {:?}", mode);
                         config.display.mode = mode;
                         if let Some(cur) = scheduler.current().cloned() {
-                            if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache).await {
+                            if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                                 tracing::error!(error = %e, "reapply after mode change failed");
                                 let msg = e.to_string();
                                 notifier.error(&msg).await;
@@ -283,7 +309,17 @@ async fn main() -> Result<()> {
                                 let new_lang = resolve_lang(&new_cfg);
                                 if new_lang != lang {
                                     lang = new_lang;
-                                    notifier = notify::Notifier::new(lang);
+                                    notifier = notify::Notifier::new(lang).await;
+                                }
+
+                                // warn_notify の変更は tracing subscriber を再初期化できないため
+                                // 再起動後にのみ反映される
+                                if new_cfg.ui.warn_notify != config.ui.warn_notify {
+                                    tracing::warn!(
+                                        "warn_notify setting changed ({} → {}); restart kabekami to apply this change",
+                                        config.ui.warn_notify,
+                                        new_cfg.ui.warn_notify
+                                    );
                                 }
 
                                 // 7. 設定更新
@@ -291,7 +327,7 @@ async fn main() -> Result<()> {
 
                                 // 8. 現在の壁紙を新設定で再適用
                                 if let Some(cur) = prev_current {
-                                    if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache).await {
+                                    if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache, &plasma_shell).await {
                                         tracing::error!(error = %e, "reload: reapply failed");
                                         let msg = e.to_string();
                                         notifier.error(&msg).await;
@@ -342,6 +378,13 @@ async fn main() -> Result<()> {
                 }
             }
 
+            msg = next_warn(&mut warn_rx) => {
+                match msg {
+                    Some(msg) => notifier.warn(&msg).await,
+                    None => warn_rx = None, // チャンネルが閉じたらブランチを無効化
+                }
+            }
+
             _ = signal::ctrl_c() => {
                 tracing::info!("received Ctrl-C, shutting down");
                 break;
@@ -358,18 +401,172 @@ async fn main() -> Result<()> {
 
 // ── ヘルパー関数 ─────────────────────────────────────────────────────────────
 
-fn init_tracing() {
-    use tracing_subscriber::{fmt, EnvFilter};
+fn init_tracing(warn_notify: bool) -> Option<tokio::sync::mpsc::UnboundedReceiver<String>> {
+    use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("kabekami=info,warn"));
-    fmt().with_env_filter(filter).init();
+
+    if warn_notify {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer())
+            .with(WarnNotifyLayer { tx })
+            .init();
+        Some(rx)
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer())
+            .init();
+        None
+    }
+}
+
+/// CLI 引数を解析して `CliCmd` を返す。引数がなければ `None`（デーモンモード）。
+fn parse_cli() -> Result<Option<CliCmd>> {
+    let mut args = std::env::args().skip(1).peekable();
+    let Some(arg) = args.next() else { return Ok(None) };
+
+    let cmd = match arg.as_str() {
+        "--next"          => CliCmd::Next,
+        "--prev"          => CliCmd::Prev,
+        "--toggle-pause"  => CliCmd::TogglePause,
+        "--reload-config" => CliCmd::ReloadConfig,
+        "--quit"          => CliCmd::Quit,
+        "--help" | "-h" => {
+            println!("kabekami — KDE Plasma wallpaper rotation daemon\n");
+            println!("USAGE:");
+            println!("  kabekami                start the daemon");
+            println!("  kabekami --next         switch to next wallpaper");
+            println!("  kabekami --prev         switch to previous wallpaper");
+            println!("  kabekami --toggle-pause pause / resume rotation");
+            println!("  kabekami --reload-config reload config.toml");
+            println!("  kabekami --quit         quit the daemon");
+            std::process::exit(0);
+        }
+        other => anyhow::bail!("unknown option '{}'. Try --help.", other),
+    };
+    Ok(Some(cmd))
+}
+
+/// D-Bus 経由でデーモンにコマンドを送信する。
+async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
+    use daemon_iface::{BUS_NAME, OBJECT_PATH};
+
+    let method = match cmd {
+        CliCmd::Next         => "Next",
+        CliCmd::Prev         => "Prev",
+        CliCmd::TogglePause  => "TogglePause",
+        CliCmd::ReloadConfig => "ReloadConfig",
+        CliCmd::Quit         => "Quit",
+    };
+
+    let conn = zbus::Connection::session()
+        .await
+        .context("failed to connect to D-Bus session bus")?;
+
+    conn.call_method(
+        Some(BUS_NAME),
+        OBJECT_PATH,
+        Some(BUS_NAME),
+        method,
+        &(),
+    )
+    .await
+    .with_context(|| {
+        format!("failed to send '{method}' to kabekami daemon — is it running?")
+    })?;
+
+    Ok(())
+}
+
+/// D-Bus デーモンインターフェースを起動する。
+///
+/// 登録に失敗した場合（D-Bus 未使用環境など）は警告ログを出して `None` を返す。
+/// 返値の `Connection` を main() スコープで保持し続けることでサービスが維持される。
+async fn spawn_dbus_iface(
+    tx: tokio::sync::mpsc::UnboundedSender<TrayCmd>,
+) -> Option<zbus::Connection> {
+    use daemon_iface::{BUS_NAME, OBJECT_PATH, DaemonIface};
+
+    let result = zbus::conn::Builder::session()
+        .and_then(|b| b.name(BUS_NAME))
+        .and_then(|b| b.serve_at(OBJECT_PATH, DaemonIface { tx }))
+        .map(|b| async move { b.build().await });
+
+    match result {
+        Err(e) => {
+            tracing::warn!("D-Bus daemon interface unavailable: {}", e);
+            None
+        }
+        Ok(fut) => match fut.await {
+            Ok(conn) => {
+                tracing::info!("D-Bus daemon interface active ({})", BUS_NAME);
+                Some(conn)
+            }
+            Err(e) => {
+                tracing::warn!("D-Bus daemon interface unavailable: {}", e);
+                None
+            }
+        },
+    }
+}
+
+/// warn_rx が None のときは永遠に pending にする（select! ブランチを無効化）。
+async fn next_warn(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+) -> Option<String> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// WARN イベントを tokio チャンネル経由で非同期に転送する tracing レイヤー。
+struct WarnNotifyLayer {
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+}
+
+struct MessageVisitor(String);
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0 = value.to_string();
+        }
+    }
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.0 = format!("{:?}", value);
+        }
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnNotifyLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        // kabekami クレートの WARN のみを対象にする（外部クレートの WARN は除外）
+        if *event.metadata().level() == tracing::Level::WARN
+            && event.metadata().target().starts_with("kabekami")
+        {
+            let mut v = MessageVisitor(String::new());
+            event.record(&mut v);
+            if !v.0.is_empty() {
+                let _ = self.tx.send(v.0);
+            }
+        }
+    }
 }
 
 /// 表示言語を解決する。優先順位:
 ///
 /// 1. 環境変数 `KABEKAMI_LANG`（`"en"` / `"ja"`）
 /// 2. `config.toml` の `[ui] language`
-/// 3. デフォルト: 日本語
+/// 3. デフォルト: 英語
 fn resolve_lang(config: &Config) -> i18n::Lang {
     if let Ok(val) = std::env::var("KABEKAMI_LANG") {
         return i18n::Lang::from_str(val.trim());
@@ -426,7 +623,7 @@ fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
 /// 1. キャッシュヒット → キャッシュ済みファイルを直接 Plasma に渡す（高速パス）
 /// 2. キャッシュミス  → `spawn_blocking` で加工・保存してから Plasma に渡す
 ///    （`store()` が LRU 退避も担う）
-async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache: &Arc<Cache>) -> Result<()> {
+async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache: &Arc<Cache>, plasma: &plasma::PlasmaShell) -> Result<()> {
     let key = CacheKey {
         src: src.to_path_buf(),
         screen_w,
@@ -460,7 +657,7 @@ async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache:
         .context("image processing task panicked")??
     };
 
-    plasma::set_wallpaper(&output).await
+    plasma.set_wallpaper(&output).await
 }
 
 /// トレイアイコンに `last_error` をセットする。

@@ -44,6 +44,10 @@ impl Cache {
     }
 
     /// キャッシュヒットなら該当ファイルのパスを返す。
+    ///
+    /// `path.exists()` チェックと呼び出し元での利用の間に LRU 退避が走る可能性が
+    /// あるため（TOCTOU 競合）、返されたパスが存在しないこともある。
+    /// 呼び出し元は IO エラーが発生した場合にキャッシュミスとして再処理する。
     pub fn get(&self, key: &CacheKey) -> Option<PathBuf> {
         let path = self.path_for(key);
         if path.exists() {

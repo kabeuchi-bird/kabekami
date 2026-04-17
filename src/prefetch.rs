@@ -121,9 +121,30 @@ pub fn process_for_cache(
         return Ok(cached);
     }
 
-    tracing::info!("prefetch: processing {}", src.display());
-    let img = image::open(src)
+    tracing::debug!("prefetch: processing {}", src.display());
+
+    // マジックバイトによるフォーマット検出（拡張子に依存しない）
+    let reader = image::ImageReader::open(src)
         .map_err(|e| anyhow::anyhow!("failed to open {}: {}", src.display(), e))?;
+    let ext_fmt = reader.format(); // 拡張子から推定したフォーマット
+    let reader = reader
+        .with_guessed_format()
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {}", src.display(), e))?;
+    let content_fmt = reader.format(); // マジックバイトから検出したフォーマット
+
+    // 拡張子と実際のフォーマットが異なる場合は警告
+    if let (Some(ef), Some(cf)) = (ext_fmt, content_fmt) {
+        if ef != cf {
+            tracing::warn!(
+                "extension/format mismatch: {} (extension → {:?}, content → {:?}); decoding as {:?}",
+                src.display(), ef, cf, cf,
+            );
+        }
+    }
+
+    let img = reader
+        .decode()
+        .map_err(|e| anyhow::anyhow!("failed to decode {}: {}", src.display(), e))?;
 
     let processed =
         crate::display_mode::process(&img, screen_w, screen_h, mode, blur_sigma, bg_darken);
