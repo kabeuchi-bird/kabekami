@@ -1,4 +1,4 @@
-//! システムトレイアイコンとコンテキストメニュー。設計書 §10 に準拠。
+//! システムトレイアイコンとコンテキストメニュー。
 //!
 //! `ksni` クレートの SNI (StatusNotifierItem) プロトコルを使用する。
 //! KDE Plasma は SNI をネイティブサポートしているため、
@@ -40,8 +40,7 @@ pub enum TrayCmd {
     Quit,
 }
 
-/// 設計書 §10 のメニューに表示する切り替え間隔プリセット（秒）。
-/// ラベル表示は `i18n::UiStrings::interval_labels` を使用する。
+/// 切り替え間隔プリセット（秒）。ラベル表示は `i18n::UiStrings::interval_labels` を使用する。
 pub const INTERVAL_PRESETS: &[u64] = &[10, 30, 300, 1800, 3600, 10800];
 
 /// トレイアイコンの表示状態。メインループが `Handle::update()` で書き込み、
@@ -91,7 +90,6 @@ impl ksni::Tray for KabekamiTray {
         }
     }
 
-    /// 設計書 §10 のメニュー構成を組み立てる。
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
 

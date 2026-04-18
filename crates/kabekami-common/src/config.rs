@@ -1,6 +1,4 @@
 //! 設定ファイル（`~/.config/kabekami/config.toml`）の読み書き。
-//!
-//! 設計書 §8 に準拠。
 
 use std::path::{Path, PathBuf};
 

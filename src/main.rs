@@ -1,14 +1,4 @@
-//! kabekami — KDE Plasma 向け壁紙ローテーションツール
-//!
-//! ## Phase 3 追加機能（設計書 §13 Phase 3）
-//! - 画面解像度の自動取得（`screen.rs`）: `kscreen-doctor --outputs` でプライマリ
-//!   モニタの解像度を自動検出。`KABEKAMI_SCREEN=WxH` 環境変数で上書き可能。
-//! - D-Bus 壁紙設定（`plasma.rs`）: `org.kde.PlasmaShell::evaluateScript` を
-//!   一次手段に、`plasma-apply-wallpaperimage` CLI をフォールバックとして使用。
-//! - 全表示モード実装（`display_mode.rs`）: Fill / Fit / Stretch / Smart。
-//!   BlurPad フォールバックを廃止し、全モードを正式実装。
-//! - ディレクトリ監視（`watcher.rs`）: `notify` で画像の追加・削除をリアルタイム検知
-//!   し、スケジューラに反映する。
+//! kabekami — KDE Plasma 向け壁紙ローテーションデーモン
 
 mod cache;
 mod config;
@@ -41,8 +31,7 @@ use crate::prefetch::Prefetcher;
 use crate::scheduler::Scheduler;
 use crate::tray::TrayCmd;
 
-/// `KABEKAMI_SCREEN` 環境変数が未設定かつ `kscreen-doctor` も使えない場合の
-/// フォールバック解像度。Phase 3 で kscreen-doctor 連携が入るため実際には滅多に使われない。
+/// `KABEKAMI_SCREEN` 環境変数が未設定かつ `kscreen-doctor` も使えない場合のフォールバック解像度。
 const FALLBACK_SCREEN_W: u32 = 1920;
 const FALLBACK_SCREEN_H: u32 = 1080;
 
@@ -348,8 +337,6 @@ async fn main() -> Result<()> {
                     }
 
                     TrayCmd::ReloadConfig => {
-                        // Phase 5 でファイル監視 / SIGUSR1 / D-Bus によるリロードを追加する際は、
-                        // このブロックを async fn do_reload_config(...) に切り出して再利用する。
                         match Config::load() {
                             Err(e) => {
                                 tracing::error!(error = %e, "config reload failed");

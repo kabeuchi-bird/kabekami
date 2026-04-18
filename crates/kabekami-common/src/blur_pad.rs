@@ -1,4 +1,4 @@
-//! BlurPad 画像処理パイプライン。設計書 §5 に準拠。
+//! BlurPad 画像処理パイプライン。
 
 use image::{
     imageops::{self, FilterType},

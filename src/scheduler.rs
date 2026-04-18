@@ -1,10 +1,7 @@
-//! 壁紙ローテーションキュー。設計書 §9 / §11 に準拠。
+//! 壁紙ローテーションキュー。
 //!
-//! Phase 1 の `Queue` を拡張し、以下の機能を追加:
-//! - `prev()`: 履歴スタックから前の壁紙に戻る
-//! - `pause()` / `resume()`: タイマー切り替えの一時停止・再開
-//! - `peek_next()`: 次の画像を先読みするためのチラ見せ（状態を変えない）
-//! - 全画像を一巡してから再シャッフル（ランダムモードでの連続重複を防止）
+//! Sequential / Random の 2 モードで画像を順に選択し、`prev()` で履歴を遡る。
+//! ランダムモードでは全画像を一巡してから再シャッフルし、連続重複を防止する。
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -125,8 +122,6 @@ impl Scheduler {
         self.paused
     }
 
-    /// ソース画像の総数を返す。Phase 2 以降のトレイ表示等で使用予定。
-    #[allow(dead_code)]
     pub fn image_count(&self) -> usize {
         self.images.len()
     }

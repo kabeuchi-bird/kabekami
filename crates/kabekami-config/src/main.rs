@@ -1,4 +1,4 @@
-//! kabekami-config — GUI 設定ツール。設計書 §13 に準拠。
+//! kabekami-config — GUI 設定ツール。
 //!
 //! egui (eframe) による設定画面を提供する。
 //! - タブ: Sources / Rotation / Display / Cache / Ui

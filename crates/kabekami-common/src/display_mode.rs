@@ -1,4 +1,4 @@
-//! DisplayMode 別の画像加工。設計書 §4 に準拠。
+//! DisplayMode 別の画像加工。
 
 use image::{
     imageops::{self, FilterType},
