@@ -9,6 +9,7 @@ pkgbase = kabekami-git
 	makedepends = rust
 	makedepends = cargo
 	makedepends = git
+	makedepends = nasm
 	depends = plasma-workspace
 	depends = libxkbcommon
 	optdepends = kscreen: screen resolution auto-detection via kscreen-doctor
