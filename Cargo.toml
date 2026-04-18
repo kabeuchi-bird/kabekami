@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/kabekami-common", "crates/kabekami-config"]
+default-members = [".", "crates/kabekami-config"]
 resolver = "2"
 
 [package]
