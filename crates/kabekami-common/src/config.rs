@@ -163,7 +163,7 @@ fn default_max_size_mb() -> u64 {
     500
 }
 fn default_cache_dir() -> PathBuf {
-    dirs::cache_dir()
+    xdg_cache_dir()
         .unwrap_or_else(|| PathBuf::from(".cache"))
         .join("kabekami")
 }
@@ -195,7 +195,7 @@ impl Config {
     }
 
     pub fn config_path() -> Result<PathBuf> {
-        let dir = dirs::config_dir().context("failed to determine config directory")?;
+        let dir = xdg_config_dir().context("failed to determine config directory")?;
         Ok(dir.join("kabekami").join("config.toml"))
     }
 
@@ -324,7 +324,7 @@ impl OnlineSourceConfig {
         if let Some(dir) = &self.download_dir {
             return dir.clone();
         }
-        dirs::data_local_dir()
+        xdg_data_local_dir()
             .unwrap_or_else(|| PathBuf::from(".local/share"))
             .join("kabekami")
             .join(self.provider.name())
@@ -344,15 +344,40 @@ fn default_online_count() -> u32 {
 fn expand_tilde(path: &Path) -> PathBuf {
     let s = path.to_string_lossy();
     if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             return home.join(rest);
         }
     } else if s == "~" {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             return home;
         }
     }
     path.to_path_buf()
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var("HOME").ok().map(PathBuf::from)
+}
+
+fn xdg_config_dir() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("XDG_CONFIG_HOME") {
+        if !v.is_empty() { return Some(PathBuf::from(v)); }
+    }
+    home_dir().map(|h| h.join(".config"))
+}
+
+fn xdg_cache_dir() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("XDG_CACHE_HOME") {
+        if !v.is_empty() { return Some(PathBuf::from(v)); }
+    }
+    home_dir().map(|h| h.join(".cache"))
+}
+
+fn xdg_data_local_dir() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("XDG_DATA_HOME") {
+        if !v.is_empty() { return Some(PathBuf::from(v)); }
+    }
+    home_dir().map(|h| h.join(".local/share"))
 }
 
 #[cfg(test)]
