@@ -522,6 +522,8 @@ impl KabekamiApp {
                     count: 10,
                     subreddit: None,
                     interval_hours: None,
+                    locale: None,
+                    quality: None,
                 });
             }
         });
