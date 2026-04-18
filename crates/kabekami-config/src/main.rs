@@ -23,8 +23,40 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "kabekami-config",
         options,
-        Box::new(|_cc| Ok(Box::new(KabekamiApp::new()))),
+        Box::new(|cc| {
+            setup_fonts(&cc.egui_ctx);
+            Ok(Box::new(KabekamiApp::new()))
+        }),
     )
+}
+
+// Common installation paths for noto-fonts-cjk on Linux distributions.
+// Latin characters use the default egui font; CJK is appended as fallback.
+fn setup_fonts(ctx: &egui::Context) {
+    const FONT_PATHS: &[&str] = &[
+        "/usr/share/fonts/noto-cjk/NotoSansCJKjp-Regular.otf",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/OTF/NotoSansCJKjp-Regular.otf",
+        "/usr/share/fonts/noto/NotoSansCJKjp-Regular.otf",
+        "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
+    ];
+
+    let Some(data) = FONT_PATHS.iter().find_map(|p| std::fs::read(p).ok()) else {
+        return;
+    };
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts
+        .font_data
+        .insert("NotoSansCJK".to_owned(), egui::FontData::from_owned(data));
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("NotoSansCJK".to_owned());
+    }
+    ctx.set_fonts(fonts);
 }
 
 // ---------------------------------------------------------------------------
