@@ -9,6 +9,7 @@
 //! 超えていれば更新日時の古いファイルから削除する。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -21,6 +22,8 @@ pub struct Cache {
     pub directory: PathBuf,
     /// LRU 退避の容量上限（バイト）。0 なら無制限。
     max_size_bytes: u64,
+    /// キャッシュの推定合計サイズ（バイト）。u64::MAX は未初期化（フルスキャン要）。
+    tracked_size: AtomicU64,
 }
 
 /// キャッシュのルックアップ・格納に使うキー。
@@ -39,6 +42,7 @@ impl Cache {
         Self {
             directory,
             max_size_bytes: max_size_mb.saturating_mul(1024 * 1024),
+            tracked_size: AtomicU64::new(u64::MAX), // u64::MAX = 未初期化
         }
     }
 
@@ -69,13 +73,22 @@ impl Cache {
             return Ok(path);
         }
 
-        // WebP 可逆圧縮（アルファ保持・品質劣化なし）
-        image::DynamicImage::ImageRgba8(img.clone())
-            .save_with_format(&path, image::ImageFormat::WebP)
+        // WebP 可逆圧縮（アルファ保持・品質劣化なし）。clone 不要で直接書き出す。
+        img.save_with_format(&path, image::ImageFormat::WebP)
             .with_context(|| format!("WebP encode failed: {}", path.display()))?;
 
         tracing::debug!("cached: {}", path.display());
-        self.evict_if_needed()?;
+
+        if self.max_size_bytes > 0 {
+            let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let current = self.tracked_size.load(Ordering::Relaxed);
+            // 未初期化 or 上限超過の場合のみフルスキャン（通常はインクリメントのみ）
+            if current == u64::MAX || current.saturating_add(file_size) > self.max_size_bytes {
+                self.evict_if_needed()?;
+            } else {
+                self.tracked_size.fetch_add(file_size, Ordering::Relaxed);
+            }
+        }
         Ok(path)
     }
 
@@ -87,6 +100,7 @@ impl Cache {
         let entries = cache_entries_by_mtime(&self.directory)?;
         let total: u64 = entries.iter().map(|(_, size, _)| size).sum();
         if total <= self.max_size_bytes {
+            self.tracked_size.store(total, Ordering::Relaxed);
             return Ok(());
         }
 
@@ -105,7 +119,7 @@ impl Cache {
                 }
             }
         }
-        drop(entries);
+        self.tracked_size.store(remaining, Ordering::Relaxed);
         Ok(())
     }
 
@@ -122,8 +136,14 @@ impl Cache {
         h.write(b"\x00");
         h.write(&key.screen_w.to_le_bytes());
         h.write(&key.screen_h.to_le_bytes());
-        h.write(format!("{:?}", key.mode).as_bytes());
-        h.write(b"\x00");
+        let mode_tag: u8 = match key.mode {
+            DisplayMode::Fill => 0,
+            DisplayMode::Fit => 1,
+            DisplayMode::Stretch => 2,
+            DisplayMode::BlurPad => 3,
+            DisplayMode::Smart => 4,
+        };
+        h.write(&[mode_tag]);
         // f32 は bit-exact 比較のため整数化して保存（±0 や NaN の問題を回避）
         h.write(&key.blur_sigma.to_bits().to_le_bytes());
         h.write(&key.bg_darken.to_bits().to_le_bytes());

@@ -55,7 +55,7 @@ enum CliCmd {
     Quit,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() -> Result<()> {
     // CLI コマンドが指定されていればデーモンへ転送して終了する
     if let Some(cmd) = parse_cli()? {
@@ -176,8 +176,7 @@ async fn main() -> Result<()> {
                 update_tray_error(&tray_handle, msg).await;
             } else {
                 notifier.clear();
-                update_tray_clear_error(&tray_handle).await;
-                update_tray_current(&tray_handle, &path).await;
+                update_tray_ok(&tray_handle, &path).await;
                 start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
             }
         }
@@ -217,13 +216,14 @@ async fn main() -> Result<()> {
             Some(result) = online_rx.recv() => {
                 if !result.new_paths.is_empty() {
                     let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
-                    for path in &result.new_paths {
-                        scheduler.add_image(path.clone());
+                    let added = result.new_paths.len();
+                    for path in result.new_paths {
+                        scheduler.add_image(path);
                     }
                     tracing::info!(
                         "provider {}: {} new image(s) added to rotation",
                         result.provider,
-                        result.new_paths.len()
+                        added
                     );
                     // 壁紙が 1 枚も表示されていなければ即時適用
                     if was_empty {
@@ -235,8 +235,7 @@ async fn main() -> Result<()> {
                                 update_tray_error(&tray_handle, msg).await;
                             } else {
                                 notifier.clear();
-                                update_tray_clear_error(&tray_handle).await;
-                                update_tray_current(&tray_handle, &path).await;
+                                update_tray_ok(&tray_handle, &path).await;
                                 start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                             }
                         }
@@ -256,8 +255,7 @@ async fn main() -> Result<()> {
                         update_tray_error(&tray_handle, msg).await;
                     } else {
                         notifier.clear();
-                        update_tray_clear_error(&tray_handle).await;
-                        update_tray_current(&tray_handle, &path).await;
+                        update_tray_ok(&tray_handle, &path).await;
                         start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                     }
                 }
@@ -275,8 +273,7 @@ async fn main() -> Result<()> {
                                 update_tray_error(&tray_handle, msg).await;
                             } else {
                                 notifier.clear();
-                                update_tray_clear_error(&tray_handle).await;
-                                update_tray_current(&tray_handle, &path).await;
+                                update_tray_ok(&tray_handle, &path).await;
                                 start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                             }
                         }
@@ -292,8 +289,7 @@ async fn main() -> Result<()> {
                                 update_tray_error(&tray_handle, msg).await;
                             } else {
                                 notifier.clear();
-                                update_tray_clear_error(&tray_handle).await;
-                                update_tray_current(&tray_handle, &path).await;
+                                update_tray_ok(&tray_handle, &path).await;
                                 start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                             }
                         }
@@ -429,8 +425,7 @@ async fn main() -> Result<()> {
                                         update_tray_error(&tray_handle, msg).await;
                                     } else {
                                         notifier.clear();
-                                        update_tray_clear_error(&tray_handle).await;
-                                        update_tray_current(&tray_handle, &cur).await;
+                                        update_tray_ok(&tray_handle, &cur).await;
                                         start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
                                     }
                                 }
@@ -804,18 +799,11 @@ async fn update_tray_clear_error(tray_handle: &Option<ksni::Handle<tray::Kabekam
     }
 }
 
-/// トレイアイコンの `current_name` を更新する。
-async fn update_tray_current(
-    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
-    path: &Path,
-) {
+/// 壁紙切り替え成功時に `last_error` クリアと `current_name` 更新を 1 回の IPC で行う。
+async fn update_tray_ok(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>, path: &Path) {
     if let Some(ref h) = tray_handle {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        h.update(|t| t.current_name = name).await;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        h.update(|t| { t.last_error = None; t.current_name = name; }).await;
     }
 }
 

@@ -193,7 +193,7 @@ impl Scheduler {
     }
 }
 
-/// Fisher-Yates シャッフル（rand クレート不使用版、設計書 §5a "全画像一巡"）。
+/// Fisher-Yates シャッフル（設計書 §5a "全画像一巡"）。
 fn fisher_yates<T>(slice: &mut [T]) {
     let mut rng = rand::rng();
     use rand::Rng;
