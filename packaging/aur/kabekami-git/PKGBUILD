@@ -35,13 +35,14 @@ build() {
     cd "$pkgname"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-    cargo build --frozen --release
+    cargo build --release --locked
 }
 
 check() {
     cd "$pkgname"
     export RUSTUP_TOOLCHAIN=stable
-    cargo test --frozen --release
+    export CARGO_TARGET_DIR=target
+    cargo test --release --locked
 }
 
 package() {
