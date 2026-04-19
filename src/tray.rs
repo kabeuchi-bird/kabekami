@@ -126,7 +126,7 @@ impl ksni::Tray for KabekamiTray {
         let interval_selected = INTERVAL_PRESETS
             .iter()
             .position(|&s| s == self.interval_secs)
-            .unwrap_or(3);
+            .unwrap_or(usize::MAX); // プリセット外の場合は全ボタン非選択
 
         vec![
             Self::tray_item(self.strings.next_wallpaper, "", true, TrayCmd::Next),
