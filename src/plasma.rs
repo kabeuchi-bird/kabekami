@@ -1,4 +1,4 @@
-//! KDE Plasma への壁紙反映。設計書 §6 に準拠。
+//! KDE Plasma への壁紙反映。
 //!
 //! D-Bus の `org.kde.PlasmaShell::evaluateScript` を一次手段とし、
 //! 失敗した場合は `plasma-apply-wallpaperimage` CLI にフォールバックする。
@@ -6,7 +6,7 @@
 //! ## D-Bus スクリプト
 //!
 //! `evaluateScript` に渡す JavaScript は全デスクトップをイテレートして
-//! 壁紙プラグインと画像パスを設定する（設計書 §6 より）:
+//! 壁紙プラグインと画像パスを設定する:
 //!
 //! ```js
 //! for (const desktop of desktops()) {
@@ -86,7 +86,6 @@ async fn set_wallpaper_dbus(path: &Path, conn: &zbus::Connection) -> Result<()> 
     // `\` と `"` をエスケープして JS 文字列インジェクションを防ぐ
     let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
 
-    // JS: 全デスクトップに壁紙を適用（設計書 §6）
     let script = format!(
         r#"for (const desktop of desktops()) {{
     if (desktop.screen === -1) continue;

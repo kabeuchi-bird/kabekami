@@ -1,14 +1,4 @@
-//! kabekami — KDE Plasma 向け壁紙ローテーションツール
-//!
-//! ## Phase 3 追加機能（設計書 §13 Phase 3）
-//! - 画面解像度の自動取得（`screen.rs`）: `kscreen-doctor --outputs` でプライマリ
-//!   モニタの解像度を自動検出。`KABEKAMI_SCREEN=WxH` 環境変数で上書き可能。
-//! - D-Bus 壁紙設定（`plasma.rs`）: `org.kde.PlasmaShell::evaluateScript` を
-//!   一次手段に、`plasma-apply-wallpaperimage` CLI をフォールバックとして使用。
-//! - 全表示モード実装（`display_mode.rs`）: Fill / Fit / Stretch / Smart。
-//!   BlurPad フォールバックを廃止し、全モードを正式実装。
-//! - ディレクトリ監視（`watcher.rs`）: `notify` で画像の追加・削除をリアルタイム検知
-//!   し、スケジューラに反映する。
+//! kabekami — KDE Plasma 向け壁紙ローテーションデーモン
 
 mod cache;
 mod config;
@@ -41,8 +31,7 @@ use crate::prefetch::Prefetcher;
 use crate::scheduler::Scheduler;
 use crate::tray::TrayCmd;
 
-/// `KABEKAMI_SCREEN` 環境変数が未設定かつ `kscreen-doctor` も使えない場合の
-/// フォールバック解像度。Phase 3 で kscreen-doctor 連携が入るため実際には滅多に使われない。
+/// `KABEKAMI_SCREEN` 環境変数が未設定かつ `kscreen-doctor` も使えない場合のフォールバック解像度。
 const FALLBACK_SCREEN_W: u32 = 1920;
 const FALLBACK_SCREEN_H: u32 = 1080;
 
@@ -55,7 +44,7 @@ enum CliCmd {
     Quit,
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() -> Result<()> {
     // CLI コマンドが指定されていればデーモンへ転送して終了する
     if let Some(cmd) = parse_cli()? {
@@ -169,17 +158,8 @@ async fn main() -> Result<()> {
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
-            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                tracing::error!(error = %e, "initial wallpaper apply failed");
-                let msg = e.to_string();
-                notifier.error(&msg).await;
-                update_tray_error(&tray_handle, msg).await;
-            } else {
-                notifier.clear();
-                update_tray_clear_error(&tray_handle).await;
-                update_tray_current(&tray_handle, &path).await;
-                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-            }
+            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "initial apply failed").await;
         }
     }
 
@@ -217,28 +197,20 @@ async fn main() -> Result<()> {
             Some(result) = online_rx.recv() => {
                 if !result.new_paths.is_empty() {
                     let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
-                    for path in &result.new_paths {
-                        scheduler.add_image(path.clone());
+                    let added = result.new_paths.len();
+                    for path in result.new_paths {
+                        scheduler.add_image(path);
                     }
                     tracing::info!(
                         "provider {}: {} new image(s) added to rotation",
                         result.provider,
-                        result.new_paths.len()
+                        added
                     );
                     // 壁紙が 1 枚も表示されていなければ即時適用
                     if was_empty {
                         if let Some(path) = scheduler.next() {
-                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                                tracing::error!(error = %e, "online: initial apply failed");
-                                let msg = e.to_string();
-                                notifier.error(&msg).await;
-                                update_tray_error(&tray_handle, msg).await;
-                            } else {
-                                notifier.clear();
-                                update_tray_clear_error(&tray_handle).await;
-                                update_tray_current(&tray_handle, &path).await;
-                                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-                            }
+                            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "online: initial apply failed").await;
                         }
                     }
                 }
@@ -249,17 +221,8 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if let Some(path) = scheduler.next() {
-                    if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                        tracing::error!(error = %e, "auto apply failed");
-                        let msg = e.to_string();
-                        notifier.error(&msg).await;
-                        update_tray_error(&tray_handle, msg).await;
-                    } else {
-                        notifier.clear();
-                        update_tray_clear_error(&tray_handle).await;
-                        update_tray_current(&tray_handle, &path).await;
-                        start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-                    }
+                    apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "auto apply failed").await;
                 }
             }
 
@@ -268,34 +231,16 @@ async fn main() -> Result<()> {
                     TrayCmd::Next => {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
-                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                                tracing::error!(error = %e, "tray Next failed");
-                                let msg = e.to_string();
-                                notifier.error(&msg).await;
-                                update_tray_error(&tray_handle, msg).await;
-                            } else {
-                                notifier.clear();
-                                update_tray_clear_error(&tray_handle).await;
-                                update_tray_current(&tray_handle, &path).await;
-                                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-                            }
+                            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Next failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
 
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
-                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                                tracing::error!(error = %e, "tray Prev failed");
-                                let msg = e.to_string();
-                                notifier.error(&msg).await;
-                                update_tray_error(&tray_handle, msg).await;
-                            } else {
-                                notifier.clear();
-                                update_tray_clear_error(&tray_handle).await;
-                                update_tray_current(&tray_handle, &path).await;
-                                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-                            }
+                            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Prev failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -352,8 +297,6 @@ async fn main() -> Result<()> {
                     }
 
                     TrayCmd::ReloadConfig => {
-                        // Phase 5 でファイル監視 / SIGUSR1 / D-Bus によるリロードを追加する際は、
-                        // このブロックを async fn do_reload_config(...) に切り出して再利用する。
                         match Config::load() {
                             Err(e) => {
                                 tracing::error!(error = %e, "config reload failed");
@@ -422,17 +365,8 @@ async fn main() -> Result<()> {
 
                                 // 8. 現在の壁紙を新設定で再適用
                                 if let Some(cur) = prev_current {
-                                    if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                                        tracing::error!(error = %e, "reload: reapply failed");
-                                        let msg = e.to_string();
-                                        notifier.error(&msg).await;
-                                        update_tray_error(&tray_handle, msg).await;
-                                    } else {
-                                        notifier.clear();
-                                        update_tray_clear_error(&tray_handle).await;
-                                        update_tray_current(&tray_handle, &cur).await;
-                                        start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-                                    }
+                                    apply_and_notify(&cur, screen_w, screen_h, &config, &cache, &plasma_shell,
+                                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reload: reapply failed").await;
                                 }
 
                                 // 9. トレイ状態更新
@@ -787,6 +721,32 @@ async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache:
     plasma.set_wallpaper(&output).await
 }
 
+/// apply + 通知 + tray 更新 + prefetch 開始をまとめて行う。
+async fn apply_and_notify(
+    path: &Path,
+    screen_w: u32,
+    screen_h: u32,
+    config: &Config,
+    cache: &Arc<Cache>,
+    plasma: &plasma::PlasmaShell,
+    notifier: &mut notify::Notifier,
+    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
+    prefetcher: &mut Prefetcher,
+    scheduler: &Scheduler,
+    ctx: &str,
+) {
+    if let Err(e) = apply(path, screen_w, screen_h, config, cache, plasma).await {
+        tracing::error!(error = %e, "{}", ctx);
+        let msg = e.to_string();
+        notifier.error(&msg).await;
+        update_tray_error(tray_handle, msg).await;
+    } else {
+        notifier.clear();
+        update_tray_ok(tray_handle, path).await;
+        start_prefetch(prefetcher, scheduler, screen_w, screen_h, config, cache);
+    }
+}
+
 /// トレイアイコンに `last_error` をセットする。
 async fn update_tray_error(
     tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
@@ -804,18 +764,11 @@ async fn update_tray_clear_error(tray_handle: &Option<ksni::Handle<tray::Kabekam
     }
 }
 
-/// トレイアイコンの `current_name` を更新する。
-async fn update_tray_current(
-    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
-    path: &Path,
-) {
+/// 壁紙切り替え成功時に `last_error` クリアと `current_name` 更新を 1 回の IPC で行う。
+async fn update_tray_ok(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>, path: &Path) {
     if let Some(ref h) = tray_handle {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        h.update(|t| t.current_name = name).await;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        h.update(|t| { t.last_error = None; t.current_name = name; }).await;
     }
 }
 

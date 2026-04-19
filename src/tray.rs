@@ -1,4 +1,4 @@
-//! システムトレイアイコンとコンテキストメニュー。設計書 §10 に準拠。
+//! システムトレイアイコンとコンテキストメニュー。
 //!
 //! `ksni` クレートの SNI (StatusNotifierItem) プロトコルを使用する。
 //! KDE Plasma は SNI をネイティブサポートしているため、
@@ -16,7 +16,7 @@ use crate::config::DisplayMode;
 use crate::i18n::{Lang, UiStrings};
 
 /// メインループに送るトレイコマンド。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TrayCmd {
     /// 次の壁紙へ切り替え
     Next,
@@ -40,8 +40,7 @@ pub enum TrayCmd {
     Quit,
 }
 
-/// 設計書 §10 のメニューに表示する切り替え間隔プリセット（秒）。
-/// ラベル表示は `i18n::UiStrings::interval_labels` を使用する。
+/// 切り替え間隔プリセット（秒）。ラベル表示は `i18n::UiStrings::interval_labels` を使用する。
 pub const INTERVAL_PRESETS: &[u64] = &[10, 30, 300, 1800, 3600, 10800];
 
 /// トレイアイコンの表示状態。メインループが `Handle::update()` で書き込み、
@@ -60,6 +59,22 @@ pub struct KabekamiTray {
     pub last_error: Option<String>,
     /// UI 文字列テーブル（言語設定に応じて初期化）。
     pub strings: &'static UiStrings,
+}
+
+impl KabekamiTray {
+    fn tray_item(label: &str, icon: &str, enabled: bool, cmd: TrayCmd) -> ksni::MenuItem<Self> {
+        use ksni::menu::StandardItem;
+        StandardItem {
+            label: label.to_owned(),
+            icon_name: icon.to_owned(),
+            enabled,
+            activate: Box::new(move |this: &mut Self| {
+                let _ = this.notifier.send(cmd.clone());
+            }),
+            ..Default::default()
+        }
+        .into()
+    }
 }
 
 impl ksni::Tray for KabekamiTray {
@@ -91,7 +106,6 @@ impl ksni::Tray for KabekamiTray {
         }
     }
 
-    /// 設計書 §10 のメニュー構成を組み立てる。
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
 
@@ -112,27 +126,11 @@ impl ksni::Tray for KabekamiTray {
         let interval_selected = INTERVAL_PRESETS
             .iter()
             .position(|&s| s == self.interval_secs)
-            .unwrap_or(3);
+            .unwrap_or(usize::MAX); // プリセット外の場合は全ボタン非選択
 
         vec![
-            // ▶ 次の壁紙 / Next Wallpaper
-            StandardItem {
-                label: self.strings.next_wallpaper.into(),
-                activate: Box::new(|this: &mut Self| {
-                    let _ = this.notifier.send(TrayCmd::Next);
-                }),
-                ..Default::default()
-            }
-            .into(),
-            // ◀ 前の壁紙 / Previous Wallpaper
-            StandardItem {
-                label: self.strings.prev_wallpaper.into(),
-                activate: Box::new(|this: &mut Self| {
-                    let _ = this.notifier.send(TrayCmd::Prev);
-                }),
-                ..Default::default()
-            }
-            .into(),
+            Self::tray_item(self.strings.next_wallpaper, "", true, TrayCmd::Next),
+            Self::tray_item(self.strings.prev_wallpaper, "", true, TrayCmd::Prev),
             MenuItem::Separator,
             // ⏸ 一時停止 / ▶ 再開
             StandardItem {
@@ -200,58 +198,12 @@ impl ksni::Tray for KabekamiTray {
             }
             .into(),
             MenuItem::Separator,
-            // 現在の壁紙を開く / Open Current Wallpaper
-            StandardItem {
-                label: self.strings.open_current.into(),
-                icon_name: "document-open".into(),
-                enabled: !self.current_name.is_empty(),
-                activate: Box::new(|this: &mut Self| {
-                    let _ = this.notifier.send(TrayCmd::OpenCurrent);
-                }),
-                ..Default::default()
-            }
-            .into(),
-            // 設定を再読み込み / Reload Config
-            StandardItem {
-                label: self.strings.reload_config.into(),
-                icon_name: "view-refresh".into(),
-                activate: Box::new(|this: &mut Self| {
-                    let _ = this.notifier.send(TrayCmd::ReloadConfig);
-                }),
-                ..Default::default()
-            }
-            .into(),
-            // 設定を開く / Open Settings
-            StandardItem {
-                label: self.strings.open_settings.into(),
-                icon_name: "preferences-system".into(),
-                activate: Box::new(|this: &mut Self| {
-                    let _ = this.notifier.send(TrayCmd::OpenSettings);
-                }),
-                ..Default::default()
-            }
-            .into(),
-            // 今すぐ取得 / Fetch Wallpapers Now
-            StandardItem {
-                label: self.strings.fetch_now.into(),
-                icon_name: "download".into(),
-                activate: Box::new(|this: &mut Self| {
-                    let _ = this.notifier.send(TrayCmd::FetchNow);
-                }),
-                ..Default::default()
-            }
-            .into(),
+            Self::tray_item(self.strings.open_current, "document-open", !self.current_name.is_empty(), TrayCmd::OpenCurrent),
+            Self::tray_item(self.strings.reload_config, "view-refresh", true, TrayCmd::ReloadConfig),
+            Self::tray_item(self.strings.open_settings, "preferences-system", true, TrayCmd::OpenSettings),
+            Self::tray_item(self.strings.fetch_now, "download", true, TrayCmd::FetchNow),
             MenuItem::Separator,
-            // 終了 / Quit
-            StandardItem {
-                label: self.strings.quit.into(),
-                icon_name: "application-exit".into(),
-                activate: Box::new(|this: &mut Self| {
-                    let _ = this.notifier.send(TrayCmd::Quit);
-                }),
-                ..Default::default()
-            }
-            .into(),
+            Self::tray_item(self.strings.quit, "application-exit", true, TrayCmd::Quit),
         ]
     }
 }
