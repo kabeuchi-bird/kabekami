@@ -158,16 +158,8 @@ async fn main() -> Result<()> {
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
-            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                tracing::error!(error = %e, "initial wallpaper apply failed");
-                let msg = e.to_string();
-                notifier.error(&msg).await;
-                update_tray_error(&tray_handle, msg).await;
-            } else {
-                notifier.clear();
-                update_tray_ok(&tray_handle, &path).await;
-                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-            }
+            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "initial apply failed").await;
         }
     }
 
@@ -217,16 +209,8 @@ async fn main() -> Result<()> {
                     // 壁紙が 1 枚も表示されていなければ即時適用
                     if was_empty {
                         if let Some(path) = scheduler.next() {
-                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                                tracing::error!(error = %e, "online: initial apply failed");
-                                let msg = e.to_string();
-                                notifier.error(&msg).await;
-                                update_tray_error(&tray_handle, msg).await;
-                            } else {
-                                notifier.clear();
-                                update_tray_ok(&tray_handle, &path).await;
-                                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-                            }
+                            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "online: initial apply failed").await;
                         }
                     }
                 }
@@ -237,16 +221,8 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if let Some(path) = scheduler.next() {
-                    if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                        tracing::error!(error = %e, "auto apply failed");
-                        let msg = e.to_string();
-                        notifier.error(&msg).await;
-                        update_tray_error(&tray_handle, msg).await;
-                    } else {
-                        notifier.clear();
-                        update_tray_ok(&tray_handle, &path).await;
-                        start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-                    }
+                    apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "auto apply failed").await;
                 }
             }
 
@@ -255,32 +231,16 @@ async fn main() -> Result<()> {
                     TrayCmd::Next => {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
-                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                                tracing::error!(error = %e, "tray Next failed");
-                                let msg = e.to_string();
-                                notifier.error(&msg).await;
-                                update_tray_error(&tray_handle, msg).await;
-                            } else {
-                                notifier.clear();
-                                update_tray_ok(&tray_handle, &path).await;
-                                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-                            }
+                            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Next failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
 
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
-                            if let Err(e) = apply(&path, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                                tracing::error!(error = %e, "tray Prev failed");
-                                let msg = e.to_string();
-                                notifier.error(&msg).await;
-                                update_tray_error(&tray_handle, msg).await;
-                            } else {
-                                notifier.clear();
-                                update_tray_ok(&tray_handle, &path).await;
-                                start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-                            }
+                            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Prev failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -405,16 +365,8 @@ async fn main() -> Result<()> {
 
                                 // 8. 現在の壁紙を新設定で再適用
                                 if let Some(cur) = prev_current {
-                                    if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache, &plasma_shell).await {
-                                        tracing::error!(error = %e, "reload: reapply failed");
-                                        let msg = e.to_string();
-                                        notifier.error(&msg).await;
-                                        update_tray_error(&tray_handle, msg).await;
-                                    } else {
-                                        notifier.clear();
-                                        update_tray_ok(&tray_handle, &cur).await;
-                                        start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
-                                    }
+                                    apply_and_notify(&cur, screen_w, screen_h, &config, &cache, &plasma_shell,
+                                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reload: reapply failed").await;
                                 }
 
                                 // 9. トレイ状態更新
@@ -767,6 +719,32 @@ async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache:
     };
 
     plasma.set_wallpaper(&output).await
+}
+
+/// apply + 通知 + tray 更新 + prefetch 開始をまとめて行う。
+async fn apply_and_notify(
+    path: &Path,
+    screen_w: u32,
+    screen_h: u32,
+    config: &Config,
+    cache: &Arc<Cache>,
+    plasma: &plasma::PlasmaShell,
+    notifier: &mut notify::Notifier,
+    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
+    prefetcher: &mut Prefetcher,
+    scheduler: &Scheduler,
+    ctx: &str,
+) {
+    if let Err(e) = apply(path, screen_w, screen_h, config, cache, plasma).await {
+        tracing::error!(error = %e, "{}", ctx);
+        let msg = e.to_string();
+        notifier.error(&msg).await;
+        update_tray_error(tray_handle, msg).await;
+    } else {
+        notifier.clear();
+        update_tray_ok(tray_handle, path).await;
+        start_prefetch(prefetcher, scheduler, screen_w, screen_h, config, cache);
+    }
 }
 
 /// トレイアイコンに `last_error` をセットする。

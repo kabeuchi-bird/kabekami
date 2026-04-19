@@ -60,6 +60,31 @@ fn setup_fonts(ctx: &egui::Context) {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn opt_text_field(
+    ui: &mut egui::Ui,
+    label: &str,
+    hint: &str,
+    width: f32,
+    password: bool,
+    val: &mut Option<String>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut s = val.clone().unwrap_or_default();
+        let edit = egui::TextEdit::singleline(&mut s)
+            .hint_text(hint)
+            .desired_width(width)
+            .password(password);
+        if ui.add(edit).changed() {
+            *val = if s.is_empty() { None } else { Some(s) };
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Preview background thread
 // ---------------------------------------------------------------------------
 
@@ -476,35 +501,12 @@ impl KabekamiApp {
                 });
 
                 ui.indent(format!("online_{}", i), |ui| {
-                    // API キー（Unsplash / Wallhaven）
                     if matches!(oc.provider, ProviderKind::Unsplash | ProviderKind::Wallhaven) {
-                        ui.horizontal(|ui| {
-                            ui.label("API Key:");
-                            let mut key = oc.api_key.clone().unwrap_or_default();
-                            if ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(300.0)).changed() {
-                                oc.api_key = if key.is_empty() { None } else { Some(key) };
-                            }
-                        });
+                        opt_text_field(ui, "API Key:", "", 300.0, true, &mut oc.api_key);
+                        opt_text_field(ui, "Query:", "nature", 200.0, false, &mut oc.query);
                     }
-                    // クエリ（Unsplash / Wallhaven）
-                    if matches!(oc.provider, ProviderKind::Unsplash | ProviderKind::Wallhaven) {
-                        ui.horizontal(|ui| {
-                            ui.label("Query:");
-                            let mut q = oc.query.clone().unwrap_or_default();
-                            if ui.add(egui::TextEdit::singleline(&mut q).hint_text("nature").desired_width(200.0)).changed() {
-                                oc.query = if q.is_empty() { None } else { Some(q) };
-                            }
-                        });
-                    }
-                    // サブレディット（Reddit）
                     if oc.provider == ProviderKind::Reddit {
-                        ui.horizontal(|ui| {
-                            ui.label("Subreddit:");
-                            let mut sub = oc.subreddit.clone().unwrap_or_default();
-                            if ui.add(egui::TextEdit::singleline(&mut sub).hint_text("wallpapers").desired_width(200.0)).changed() {
-                                oc.subreddit = if sub.is_empty() { None } else { Some(sub) };
-                            }
-                        });
+                        opt_text_field(ui, "Subreddit:", "wallpapers", 200.0, false, &mut oc.subreddit);
                     }
                     // 保持枚数
                     ui.horizontal(|ui| {
