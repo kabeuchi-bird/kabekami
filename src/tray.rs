@@ -67,8 +67,8 @@ impl KabekamiTray {
     fn tray_item(label: &str, icon: &str, enabled: bool, cmd: TrayCmd) -> ksni::MenuItem<Self> {
         use ksni::menu::StandardItem;
         StandardItem {
-            label: label.to_owned(),
-            icon_name: icon.to_owned(),
+            label: label.into(),
+            icon_name: icon.into(),
             enabled,
             activate: Box::new(move |this: &mut Self| {
                 let _ = this.notifier.send(cmd.clone());
