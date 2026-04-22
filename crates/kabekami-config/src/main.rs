@@ -63,6 +63,17 @@ fn setup_fonts(ctx: &egui::Context) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn compute_dir_size(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().ok())
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .sum()
+}
+
 fn opt_text_field(
     ui: &mut egui::Ui,
     label: &str,
@@ -179,6 +190,9 @@ struct KabekamiApp {
 
     // Online sources tab: editing
     new_online_provider: ProviderKind,
+
+    // Cache tab: computed size (None = not yet measured)
+    cache_size_bytes: Option<u64>,
 }
 
 impl KabekamiApp {
@@ -205,6 +219,7 @@ impl KabekamiApp {
             preview_last: None,
             new_dir_input: String::new(),
             new_online_provider: ProviderKind::Bing,
+            cache_size_bytes: None,
         }
     }
 
@@ -472,6 +487,7 @@ impl KabekamiApp {
             let mut dir_str = self.config.cache.directory.to_string_lossy().into_owned();
             if ui.text_edit_singleline(&mut dir_str).changed() {
                 self.config.cache.directory = PathBuf::from(dir_str);
+                self.cache_size_bytes = None; // ディレクトリ変更時はリセット
             }
         });
 
@@ -480,6 +496,25 @@ impl KabekamiApp {
             ui.add(egui::DragValue::new(&mut self.config.cache.max_size_mb).range(0..=100_000));
         });
         ui.label("0 = 無制限 / unlimited");
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button("更新 / Refresh").clicked() {
+                self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
+            }
+            match self.cache_size_bytes {
+                None => { ui.label("現在のサイズ / Current size: (Refresh をクリック)"); }
+                Some(bytes) => {
+                    let mb = bytes as f64 / (1024.0 * 1024.0);
+                    let max = self.config.cache.max_size_mb;
+                    if max > 0 {
+                        ui.label(format!("現在のサイズ / Current size: {:.1} MB / {} MB", mb, max));
+                    } else {
+                        ui.label(format!("現在のサイズ / Current size: {:.1} MB (無制限 / unlimited)", mb));
+                    }
+                }
+            }
+        });
     }
 
     fn ui_online(&mut self, ui: &mut egui::Ui) {
@@ -508,6 +543,20 @@ impl KabekamiApp {
                     if oc.provider == ProviderKind::Reddit {
                         opt_text_field(ui, "Subreddit:", "wallpapers", 200.0, false, &mut oc.subreddit);
                     }
+                    // Bing: ロケール
+                    if oc.provider == ProviderKind::Bing {
+                        opt_text_field(ui, "Locale:", "en-US (default)", 150.0, false, &mut oc.locale);
+                    }
+                    // Unsplash: 画質
+                    if oc.provider == ProviderKind::Unsplash {
+                        ui.horizontal(|ui| {
+                            ui.label("Quality:");
+                            let mut q = oc.quality.clone().unwrap_or_else(|| "regular".to_string());
+                            ui.radio_value(&mut q, "regular".to_string(), "regular (default)");
+                            ui.radio_value(&mut q, "full".to_string(), "full");
+                            oc.quality = if q == "regular" { None } else { Some(q) };
+                        });
+                    }
                     // 保持枚数
                     ui.horizontal(|ui| {
                         ui.label("保持枚数 / Count:");
@@ -515,11 +564,32 @@ impl KabekamiApp {
                     });
                     // 再取得間隔
                     ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "再取得間隔 / Interval: {}h (default: {}h)",
-                            oc.interval_hours.unwrap_or(oc.provider.default_interval_hours()),
-                            oc.provider.default_interval_hours()
-                        ));
+                        ui.label("再取得間隔 / Interval (h, 0=default):");
+                        let mut hours = oc.interval_hours.unwrap_or(0);
+                        let resp = ui.add(egui::DragValue::new(&mut hours).range(0..=8760));
+                        ui.label(format!("(default: {}h)", oc.provider.default_interval_hours()));
+                        if resp.changed() {
+                            oc.interval_hours = if hours == 0 { None } else { Some(hours) };
+                        }
+                    });
+                    // ダウンロード先ディレクトリ
+                    ui.horizontal(|ui| {
+                        ui.label("Download dir:");
+                        let mut dir_str = oc.download_dir.as_deref()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let hint = format!("~/.local/share/kabekami/{} (default)", oc.provider);
+                        if ui.add(
+                            egui::TextEdit::singleline(&mut dir_str)
+                                .hint_text(hint)
+                                .desired_width(300.0)
+                        ).changed() {
+                            oc.download_dir = if dir_str.is_empty() {
+                                None
+                            } else {
+                                Some(PathBuf::from(dir_str))
+                            };
+                        }
                     });
                 });
             });

@@ -63,6 +63,8 @@ pub struct UiStrings {
     pub open_settings: &'static str,
     /// トレイメニュー: オンライン壁紙を今すぐ取得
     pub fetch_now: &'static str,
+    /// ツールチップ: 画像枚数の単位（`"images"` / `"枚"`）
+    pub images: &'static str,
 }
 
 /// 日本語文字列テーブル。
@@ -83,6 +85,7 @@ pub static JA: UiStrings = UiStrings {
     reload_config:   "設定を再読み込み",
     open_settings:   "設定を開く",
     fetch_now:       "今すぐ取得",
+    images:          "枚",
 };
 
 /// 英語文字列テーブル。
@@ -103,6 +106,7 @@ pub static EN: UiStrings = UiStrings {
     reload_config:   "Reload Config",
     open_settings:   "Open Settings",
     fetch_now:       "Fetch Wallpapers Now",
+    images:          "images",
 };
 
 /// `Lang` から対応する `UiStrings` 参照を返す。
