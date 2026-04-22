@@ -38,19 +38,12 @@ sudo install -m755 target/release/kabekami        /usr/local/bin/
 sudo install -m755 target/release/kabekami-config /usr/local/bin/
 ```
 
-### cargo install (after crates.io release)
-
-```bash
-cargo install kabekami kabekami-config
-```
-
 ### AUR (Arch Linux)
 
 ```bash
-# After release
-paru -S kabekami
+paru -S kabekami-git
 # or
-yay -S kabekami
+yay -S kabekami-git
 ```
 
 ## Quick Start
@@ -169,7 +162,7 @@ kabekami-config
 | **Sources** | Add/remove wallpaper directories, toggle recursive scan |
 | **Rotation** | Interval, sequential/random order, change-on-start, prefetch |
 | **Display** | Mode selector (BlurPad / Fill / Fit / Stretch / Smart), blur sigma and background darkness sliders with **real-time preview** |
-| **Cache** | Cache directory path, maximum size (MB) |
+| **Cache** | Cache directory path, maximum size (MB), Clear Cache button |
 | **UI** | Display language (`en` / `ja`), desktop notification for warnings |
 | **Online** | Add/remove online providers (Bing / Unsplash / Wallhaven / Reddit), API keys, fetch interval, download directory |
 
@@ -370,6 +363,7 @@ kabekami --next           # Switch to next wallpaper
 kabekami --prev           # Switch to previous wallpaper
 kabekami --toggle-pause   # Pause / resume automatic rotation
 kabekami --reload-config  # Reload config.toml without restarting
+kabekami --fetch-now      # Trigger online wallpaper fetch immediately
 kabekami --quit           # Quit the daemon
 ```
 
@@ -409,7 +403,7 @@ Processed images are stored as WebP (lossless) under `~/.cache/kabekami/`. The c
 
 **The cache persists across restarts**, so subsequent switches of the same image with the same settings are nearly instant.
 
-To clear the cache manually:
+To clear the cache, use the **Clear Cache** button in the Cache tab of `kabekami-config`, or manually:
 
 ```bash
 rm -rf ~/.cache/kabekami/

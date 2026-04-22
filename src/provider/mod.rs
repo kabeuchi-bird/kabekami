@@ -196,7 +196,14 @@ async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Resul
         );
     }
 
+    const MAX_BYTES: u64 = 50 * 1024 * 1024; // 50 MB
+    if resp.content_length().unwrap_or(0) > MAX_BYTES {
+        anyhow::bail!("response too large for {}", url);
+    }
     let bytes = resp.bytes().await?;
+    if bytes.len() as u64 > MAX_BYTES {
+        anyhow::bail!("response too large ({} bytes) for {}", bytes.len(), url);
+    }
     let tmp = dest.with_extension("tmp");
     tokio::fs::write(&tmp, &bytes).await?;
     tokio::fs::rename(&tmp, dest).await?;

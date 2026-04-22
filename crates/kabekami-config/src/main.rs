@@ -502,6 +502,14 @@ impl KabekamiApp {
             if ui.button("更新 / Refresh").clicked() {
                 self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
             }
+            if ui.button("クリア / Clear Cache").clicked() {
+                if let Ok(entries) = std::fs::read_dir(&self.config.cache.directory) {
+                    for entry in entries.flatten() {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+                self.cache_size_bytes = Some(0);
+            }
             match self.cache_size_bytes {
                 None => { ui.label("現在のサイズ / Current size: (Refresh をクリック)"); }
                 Some(bytes) => {
