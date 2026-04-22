@@ -173,6 +173,9 @@ async fn main() -> Result<()> {
     // タイマー: 最初の tick は 1 interval 後から。
     let mut ticker = make_ticker(config.rotation.interval_secs);
 
+    // コマンドスロットリング: 100ms 以内の重複コマンドを破棄する
+    let mut last_cmd_at: Option<std::time::Instant> = None;
+
     tracing::info!("entering main loop (interval={}s)", config.rotation.interval_secs);
 
     loop {
@@ -223,6 +226,12 @@ async fn main() -> Result<()> {
             }
 
             Some(cmd) = cmd_rx.recv() => {
+                let now = std::time::Instant::now();
+                if last_cmd_at.map_or(false, |t| now.duration_since(t) < Duration::from_millis(100)) {
+                    tracing::debug!("command throttled (< 100ms): {:?}", cmd);
+                    continue;
+                }
+                last_cmd_at = Some(now);
                 match cmd {
                     TrayCmd::Next => {
                         prefetcher.abort();
