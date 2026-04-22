@@ -59,7 +59,9 @@ pub async fn fetch(
     let mut available = Vec::new();
 
     for img in &resp.data {
-        let ext = img.path.rsplit('.').next().unwrap_or("jpg");
+        let raw_ext = img.path.rsplit('.').next().unwrap_or("jpg");
+        let ext: String = raw_ext.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let ext = if ext.is_empty() { "jpg".to_owned() } else { ext };
         let filename = format!("wallhaven_{}.{}", img.id, ext);
         let dest = dir.join(&filename);
 

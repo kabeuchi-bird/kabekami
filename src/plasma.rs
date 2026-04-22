@@ -83,8 +83,12 @@ impl PlasmaShell {
 /// D-Bus `org.kde.PlasmaShell::evaluateScript` 経由で壁紙を設定する。
 async fn set_wallpaper_dbus(path: &Path, conn: &zbus::Connection) -> Result<()> {
     let path_str = path.to_string_lossy();
-    // `\` と `"` をエスケープして JS 文字列インジェクションを防ぐ
-    let escaped = path_str.replace('\\', "\\\\").replace('"', "\\\"");
+    // JS 文字列として安全にエスケープ（`\` `"` `\n` `\r` が対象）
+    let escaped = path_str
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
 
     let script = format!(
         r#"for (const desktop of desktops()) {{

@@ -94,6 +94,8 @@ pub async fn fetch(
         }
 
         let ext = post.url.rsplit('.').next().unwrap_or("jpg");
+        let ext: String = ext.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let ext = if ext.is_empty() { "jpg".to_owned() } else { ext };
         let id = post.name.trim_start_matches("t3_");
         let filename = format!("reddit_{}.{}", id, ext);
         let dest = dir.join(&filename);
