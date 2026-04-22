@@ -57,6 +57,8 @@ pub struct KabekamiTray {
     pub current_name: String,
     /// 直近のエラーメッセージ。`None` = 正常動作中。
     pub last_error: Option<String>,
+    /// ソース画像の総数（ツールチップに表示）。
+    pub image_count: usize,
     /// UI 文字列テーブル（言語設定に応じて初期化）。
     pub strings: &'static UiStrings,
 }
@@ -100,6 +102,12 @@ impl ksni::Tray for KabekamiTray {
             description: match &self.last_error {
                 Some(e) => self.strings.tooltip_error.replacen("{}", e, 1),
                 None if self.current_name.is_empty() => String::new(),
+                None if self.image_count > 0 => format!(
+                    "{} ({} {})",
+                    self.strings.tooltip_current.replacen("{}", &self.current_name, 1),
+                    self.image_count,
+                    self.strings.images,
+                ),
                 None => self.strings.tooltip_current.replacen("{}", &self.current_name, 1),
             },
             ..Default::default()
@@ -227,6 +235,7 @@ pub async fn spawn_tray(
         interval_secs,
         current_name: String::new(),
         last_error: None,
+        image_count: 0,
         strings: crate::i18n::strings(lang),
     };
 

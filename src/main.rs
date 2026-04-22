@@ -41,6 +41,7 @@ enum CliCmd {
     Prev,
     TogglePause,
     ReloadConfig,
+    FetchNow,
     Quit,
 }
 
@@ -95,7 +96,7 @@ async fn main() -> Result<()> {
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
     let (mut watch_rx, mut _watcher_handle) =
-        match watcher::spawn(&config.sources.directories, config.sources.recursive) {
+        match watcher::spawn(&collect_watch_dirs(&config), config.sources.recursive) {
             Some((w, rx)) => (rx, Some(w)),
             None => {
                 // ウォッチャーが使えない場合は即座に閉じるチャンネルを用意する。
@@ -155,6 +156,12 @@ async fn main() -> Result<()> {
     // 同時フェッチを防ぐフラグ（前のタスクが終わる前に次の tick が来ても無視する）
     let fetch_in_progress = Arc::new(AtomicBool::new(false));
 
+    // トレイに初期画像枚数を反映
+    if let Some(ref h) = tray_handle {
+        let count = scheduler.image_count();
+        h.update(|t| t.image_count = count).await;
+    }
+
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
@@ -206,6 +213,10 @@ async fn main() -> Result<()> {
                         result.provider,
                         added
                     );
+                    if let Some(ref h) = tray_handle {
+                        let count = scheduler.image_count();
+                        h.update(|t| t.image_count = count).await;
+                    }
                     // 壁紙が 1 枚も表示されていなければ即時適用
                     if was_empty {
                         if let Some(path) = scheduler.next() {
@@ -322,7 +333,7 @@ async fn main() -> Result<()> {
 
                                 // 3. ウォッチャー再起動
                                 (watch_rx, _watcher_handle) =
-                                    match watcher::spawn(&new_cfg.sources.directories, new_cfg.sources.recursive) {
+                                    match watcher::spawn(&collect_watch_dirs(&new_cfg), new_cfg.sources.recursive) {
                                         Some((w, rx)) => (rx, Some(w)),
                                         None => {
                                             let (tx, rx) =
@@ -374,10 +385,12 @@ async fn main() -> Result<()> {
                                     let mode = config.display.mode;
                                     let secs = config.rotation.interval_secs;
                                     let strings = crate::i18n::strings(lang);
+                                    let count = scheduler.image_count();
                                     h.update(|t| {
                                         t.mode = mode;
                                         t.interval_secs = secs;
                                         t.strings = strings;
+                                        t.image_count = count;
                                     }).await;
                                 }
 
@@ -437,6 +450,10 @@ async fn main() -> Result<()> {
                         scheduler.remove_image(&path);
                     }
                 }
+                if let Some(ref h) = tray_handle {
+                    let count = scheduler.image_count();
+                    h.update(|t| t.image_count = count).await;
+                }
             }
 
             msg = next_warn(&mut warn_rx) => {
@@ -494,6 +511,7 @@ fn parse_cli() -> Result<Option<CliCmd>> {
         "--prev"          => CliCmd::Prev,
         "--toggle-pause"  => CliCmd::TogglePause,
         "--reload-config" => CliCmd::ReloadConfig,
+        "--fetch-now"     => CliCmd::FetchNow,
         "--quit"          => CliCmd::Quit,
         "--help" | "-h" => {
             println!("kabekami — KDE Plasma wallpaper rotation daemon\n");
@@ -503,6 +521,7 @@ fn parse_cli() -> Result<Option<CliCmd>> {
             println!("  kabekami --prev         switch to previous wallpaper");
             println!("  kabekami --toggle-pause pause / resume rotation");
             println!("  kabekami --reload-config reload config.toml");
+            println!("  kabekami --fetch-now    trigger online wallpaper fetch");
             println!("  kabekami --quit         quit the daemon");
             std::process::exit(0);
         }
@@ -520,6 +539,7 @@ async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
         CliCmd::Prev         => "Prev",
         CliCmd::TogglePause  => "TogglePause",
         CliCmd::ReloadConfig => "ReloadConfig",
+        CliCmd::FetchNow     => "FetchNow",
         CliCmd::Quit         => "Quit",
     };
 
@@ -669,6 +689,20 @@ fn resolve_screen_size() -> (u32, u32) {
         FALLBACK_SCREEN_H
     );
     (FALLBACK_SCREEN_W, FALLBACK_SCREEN_H)
+}
+
+/// ウォッチャーに渡すディレクトリ一覧を返す。
+///
+/// ローカルソースディレクトリに加え、有効なオンラインソースの
+/// ダウンロードディレクトリも含める。
+fn collect_watch_dirs(config: &Config) -> Vec<std::path::PathBuf> {
+    let mut dirs = config.sources.directories.clone();
+    for oc in &config.online_sources {
+        if oc.enabled {
+            dirs.push(oc.resolved_download_dir());
+        }
+    }
+    dirs
 }
 
 /// 「1 interval 後に最初の tick」が来る Interval を生成する。
