@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
         tracing::info!("discovered {} image(s)", images.len());
     }
 
-    let (screen_w, screen_h) = resolve_screen_size();
+    let (screen_w, screen_h) = resolve_screen_size().await;
     tracing::info!("using screen size {}x{}", screen_w, screen_h);
 
     // キャッシュ・スケジューラ・先読みを初期化
@@ -632,9 +632,9 @@ fn resolve_lang(config: &Config) -> i18n::Lang {
 /// 画面解像度を解決する。優先順位:
 ///
 /// 1. `KABEKAMI_SCREEN=WxH` 環境変数
-/// 2. `kscreen-doctor --outputs` による自動検出
+/// 2. `kscreen-doctor --outputs` による自動検出（最大4回、指数バックオフ）
 /// 3. フォールバック（1920×1080）
-fn resolve_screen_size() -> (u32, u32) {
+async fn resolve_screen_size() -> (u32, u32) {
     // 1. 環境変数による手動指定
     if let Ok(val) = std::env::var("KABEKAMI_SCREEN") {
         if let Some((w, h)) = val.split_once('x') {
@@ -648,14 +648,26 @@ fn resolve_screen_size() -> (u32, u32) {
         tracing::warn!("invalid KABEKAMI_SCREEN='{}', expected WxH (e.g. 2560x1440)", val);
     }
 
-    // 2. kscreen-doctor による自動検出
-    if let Some((w, h)) = screen::detect() {
-        tracing::info!("screen size from kscreen-doctor: {}x{}", w, h);
-        return (w, h);
+    // 2. kscreen-doctor による自動検出（自動起動時の起動競合に備えてリトライ）
+    // 遅延: 即時 → 1s → 2s → 4s（計4回）
+    let mut delay_secs = 0u64;
+    for attempt in 1..=4u32 {
+        if delay_secs > 0 {
+            tracing::info!(
+                "screen detection: kscreen not ready, retrying in {}s (attempt {}/4)...",
+                delay_secs, attempt
+            );
+            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+        }
+        if let Some((w, h)) = screen::detect() {
+            tracing::info!("screen size from kscreen-doctor: {}x{}", w, h);
+            return (w, h);
+        }
+        if delay_secs == 0 { delay_secs = 1; } else { delay_secs *= 2; }
     }
 
     tracing::warn!(
-        "could not detect screen size, using fallback {}x{}",
+        "could not detect screen size after 4 attempts, using fallback {}x{}",
         FALLBACK_SCREEN_W,
         FALLBACK_SCREEN_H
     );
