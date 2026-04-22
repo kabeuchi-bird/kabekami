@@ -13,7 +13,7 @@
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::DisplayMode;
-use crate::i18n::{Lang, UiStrings};
+use kabekami_common::i18n::{Lang, UiStrings};
 
 /// メインループに送るトレイコマンド。
 #[derive(Debug, Clone)]
@@ -67,8 +67,8 @@ impl KabekamiTray {
     fn tray_item(label: &str, icon: &str, enabled: bool, cmd: TrayCmd) -> ksni::MenuItem<Self> {
         use ksni::menu::StandardItem;
         StandardItem {
-            label: label.to_owned(),
-            icon_name: icon.to_owned(),
+            label: label.into(),
+            icon_name: icon.into(),
             enabled,
             activate: Box::new(move |this: &mut Self| {
                 let _ = this.notifier.send(cmd.clone());

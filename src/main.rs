@@ -4,7 +4,7 @@ mod cache;
 mod config;
 mod daemon_iface;
 mod display_mode;
-mod i18n;
+use kabekami_common::i18n;
 mod notify;
 mod plasma;
 mod prefetch;
@@ -181,22 +181,7 @@ async fn main() -> Result<()> {
             _ = fetch_ticker.tick() => {
                 if let Some(ref client) = online_client {
                     let configs = online_configs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    if !configs.is_empty()
-                        && !fetch_in_progress.load(Ordering::Acquire)
-                    {
-                        fetch_in_progress.store(true, Ordering::Release);
-                        let tx = online_tx.clone();
-                        let client = client.clone();
-                        let ctx = fetch_ctx;
-                        let in_progress = fetch_in_progress.clone();
-                        tokio::spawn(async move {
-                            let results = provider::fetch_all_due(&configs, &client, ctx, false).await;
-                            for r in results {
-                                let _ = tx.send(r);
-                            }
-                            in_progress.store(false, Ordering::Release);
-                        });
-                    }
+                    try_spawn_fetch(client, configs, online_tx.clone(), fetch_in_progress.clone(), fetch_ctx, false);
                 }
             }
 
@@ -409,21 +394,7 @@ async fn main() -> Result<()> {
                     TrayCmd::FetchNow => {
                         if let Some(ref client) = online_client {
                             let configs = online_configs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                            if !configs.is_empty()
-                                && !fetch_in_progress.load(Ordering::Acquire)
-                            {
-                                fetch_in_progress.store(true, Ordering::Release);
-                                let tx = online_tx.clone();
-                                let client = client.clone();
-                                let ctx = fetch_ctx;
-                                let in_progress = fetch_in_progress.clone();
-                                tokio::spawn(async move {
-                                    let results = provider::fetch_all_due(&configs, &client, ctx, true).await;
-                                    for r in results {
-                                        let _ = tx.send(r);
-                                    }
-                                    in_progress.store(false, Ordering::Release);
-                                });
+                            if try_spawn_fetch(client, configs, online_tx.clone(), fetch_in_progress.clone(), fetch_ctx, true) {
                                 tracing::info!("manual fetch triggered");
                             } else {
                                 tracing::info!("fetch already in progress, skipping");
@@ -807,6 +778,31 @@ async fn update_tray_ok(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>, 
 }
 
 /// 先読みを開始する。`scheduler.peek_next()` の画像を対象にする。
+/// オンラインフェッチタスクをスポーンする。
+/// 既にフェッチ中かソース未設定なら何もせず `false` を返す。
+fn try_spawn_fetch(
+    client: &reqwest::Client,
+    configs: Vec<crate::config::OnlineSourceConfig>,
+    tx: tokio::sync::mpsc::UnboundedSender<provider::FetchResult>,
+    in_progress: Arc<AtomicBool>,
+    ctx: provider::FetchContext,
+    force: bool,
+) -> bool {
+    if configs.is_empty() || in_progress.load(Ordering::Acquire) {
+        return false;
+    }
+    in_progress.store(true, Ordering::Release);
+    let client = client.clone();
+    tokio::spawn(async move {
+        let results = provider::fetch_all_due(&configs, &client, ctx, force).await;
+        for r in results {
+            let _ = tx.send(r);
+        }
+        in_progress.store(false, Ordering::Release);
+    });
+    true
+}
+
 fn start_prefetch(
     prefetcher: &mut Prefetcher,
     scheduler: &Scheduler,
