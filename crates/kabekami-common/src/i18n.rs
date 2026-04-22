@@ -14,9 +14,8 @@ pub enum Lang {
     #[default]
     En,
     Ja,
-    /// イースターエッグ: 関西弁。GUI 言語選択には表示されない。
-    /// `KABEKAMI_LANG=kansai` または `language = "kansai"` で有効化できる。
     Kansai,
+    Ohogoe,
 }
 
 impl Lang {
@@ -49,9 +48,10 @@ pub struct LangEntry {
 ///
 /// GUI は `gui_visible: true` のエントリのみを表示する。
 pub static REGISTRY: &[LangEntry] = &[
-    LangEntry { id: "en",     display_name: "English", gui_visible: true,  variant: Lang::En,     strings: &EN },
-    LangEntry { id: "ja",     display_name: "日本語",  gui_visible: true,  variant: Lang::Ja,     strings: &JA },
-    LangEntry { id: "kansai", display_name: "関西弁",  gui_visible: false, variant: Lang::Kansai, strings: &KANSAI },
+    LangEntry { id: "en", display_name: "English", gui_visible: true, variant: Lang::En, strings: &EN },
+    LangEntry { id: "ja", display_name: "日本語", gui_visible: true, variant: Lang::Ja, strings: &JA },
+    LangEntry { id: "kansai", display_name: "日本語（関西弁）",  gui_visible: true, variant: Lang::Kansai, strings: &KANSAI },
+    LangEntry { id: "ohogoe", display_name: "お゛っ♡", gui_visible: false, variant: Lang::Ohogoe, strings: &OHOGOE },
 ];
 
 /// `Lang` から対応する `UiStrings` 参照を返す。
@@ -137,7 +137,7 @@ pub static JA: UiStrings = UiStrings {
     images:          "枚",
 };
 
-// ── 関西弁（イースターエッグ） ────────────────────────────────────────────────
+// ── 関西弁 ────────────────────────────────────────────────────────────────────
 
 pub static KANSAI: UiStrings = UiStrings {
     next_wallpaper:  "次の壁紙にしたるわ",
@@ -151,12 +151,34 @@ pub static KANSAI: UiStrings = UiStrings {
     tooltip_current: "今はこれや: {}",
     tooltip_error:   "あかんわ: {}",
     notify_failed:   "壁紙の設定、うまいことできへんかったわ",
-    notify_warning:  "kabekami からのお知らせやで",
+    notify_warning:  "kabekamiくん何か言うとるで！",
     interval_labels: &["10秒", "30秒", "5分", "30分", "1時間", "3時間"],
     reload_config:   "設定、読み直したるわ",
     open_settings:   "設定開けるで",
     fetch_now:       "今すぐ取ってきたるわ",
     images:          "枚",
+};
+
+// ── 関西弁 ────────────────────────────────────────────────────────────────────
+
+pub static OHOGOE: UiStrings = UiStrings {
+    next_wallpaper:  "イグぅっ♡♡♡",
+    prev_wallpaper:  "またイキますっ♡♡♡",
+    pause:           "おマンコ壊れて戻らないよぉおっ♡♡♡",
+    resume:          "一突き毎にアクメくるぅっ♡♡♡",
+    display_mode:    "あへぇぇえっ♡♡♡中出しっ♡♡♡中出し来てりゅううっ♡♡♡",
+    interval:        "おマンコ壊れるっ♡♡♡おマンコ溶けるっ♡♡♡おマンコ蒸発するぅうっ♡♡",
+    open_current:    "ザーメン欲しくて発情した脳みそピースサイン出してますぅっ♡♡♡",
+    quit:            "これからはご主人様だけのおマンコで生涯忠誠を誓いますぅうっ♡♡♡",
+    tooltip_current: "おっほっ♡♡♡きたっ♡♡♡: {}",
+    tooltip_error:   "子宮口開いてザーメン待ってるっ♡♡♡ {}",
+    notify_failed:   "チンポきもちぃっ……♡",
+    notify_warning:  "孕むっ♡絶対孕むっ♡♡",
+    interval_labels: &["んぐっ♡", "ぢゅるっ♡", "ちゅぱっ♡", "ごきゅんっ♡", "じゅるるぅっ♡", "ぢゅぞぞぞぞぉぉっ♡♡♡"],
+    reload_config:   "ご主人様の赤ちゃん産む準備できてますよぉっ♡♡♡",
+    open_settings:   "私のことぉっ♡♡♡いつでもどこでもご自由にお使いくださいぃっ♡♡♡",
+    fetch_now:       "おチンポ欲しさに尻尾振って媚び媚びオナホメスに躾けてくださぃっ♡♡♡",
+    images:          "発",
 };
 
 // ── テスト ────────────────────────────────────────────────────────────────────
@@ -189,10 +211,19 @@ mod tests {
     }
 
     #[test]
+    fn from_str_ohogoe() {
+        assert_eq!(Lang::from_str("ohogoe"), Lang::Ohogoe);
+        assert_eq!(Lang::from_str("OHOGOE"), Lang::Ohogoe);
+        assert_eq!(Lang::from_str(" ohogoe "), Lang::Ohogoe);
+    }
+
+
+    #[test]
     fn strings_returns_correct_table() {
         assert_eq!(strings(Lang::Ja).quit, "終了");
         assert_eq!(strings(Lang::En).quit, "Quit");
         assert_eq!(strings(Lang::Kansai).quit, "さいなら");
+        assert_eq!(strings(Lang::Ohogoe).quit, "これからはご主人様だけのおマンコで生涯忠誠を誓いますぅうっ♡♡♡");
     }
 
     #[test]
@@ -201,12 +232,13 @@ mod tests {
         assert_eq!(EN.interval_labels.len(), 6);
         assert_eq!(JA.interval_labels.len(), 6);
         assert_eq!(KANSAI.interval_labels.len(), 6);
+        assert_eq!(OHOGOE.interval_labels.len(), 6);
     }
 
     #[test]
     fn registry_covers_all_variants() {
         // 全 variant が REGISTRY に登録されていることを確認
-        for variant in [Lang::En, Lang::Ja, Lang::Kansai] {
+        for variant in [Lang::En, Lang::Ja, Lang::Kansai, Lang::Ohogoe] {
             assert!(
                 REGISTRY.iter().any(|e| e.variant == variant),
                 "{:?} not found in REGISTRY",
@@ -214,4 +246,5 @@ mod tests {
             );
         }
     }
+}
 }
