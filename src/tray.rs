@@ -13,7 +13,7 @@
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::DisplayMode;
-use crate::i18n::{Lang, UiStrings};
+use kabekami_common::i18n::{Lang, UiStrings};
 
 /// メインループに送るトレイコマンド。
 #[derive(Debug, Clone)]

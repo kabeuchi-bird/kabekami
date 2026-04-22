@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::i18n::Lang;
+use kabekami_common::i18n::Lang;
 
 /// デスクトップ通知の状態を保持する。
 ///

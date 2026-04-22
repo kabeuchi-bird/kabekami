@@ -4,7 +4,7 @@ mod cache;
 mod config;
 mod daemon_iface;
 mod display_mode;
-mod i18n;
+use kabekami_common::i18n;
 mod notify;
 mod plasma;
 mod prefetch;
