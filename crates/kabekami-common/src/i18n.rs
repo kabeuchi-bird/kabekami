@@ -159,7 +159,7 @@ pub static KANSAI: UiStrings = UiStrings {
     images:          "枚",
 };
 
-// ── 関西弁 ────────────────────────────────────────────────────────────────────
+// ── おほ声（イースターエッグ） ───────────────────────────────────────────────
 
 pub static OHOGOE: UiStrings = UiStrings {
     next_wallpaper:  "イグぅっ♡♡♡",
@@ -246,5 +246,4 @@ mod tests {
             );
         }
     }
-}
 }
