@@ -39,19 +39,12 @@ sudo install -m755 target/release/kabekami        /usr/local/bin/
 sudo install -m755 target/release/kabekami-config /usr/local/bin/
 ```
 
-### cargo install（crates.io 公開後）
-
-```bash
-cargo install kabekami kabekami-config
-```
-
 ### AUR（Arch Linux）
 
 ```bash
-# 公開後
-paru -S kabekami
+paru -S kabekami-git
 # または
-yay -S kabekami
+yay -S kabekami-git
 ```
 
 ## クイックスタート
@@ -179,8 +172,8 @@ kabekami-config
 | **Sources** | 壁紙ディレクトリの追加 / 削除、再帰スキャンの切り替え |
 | **Rotation** | 切り替え間隔、順次 / ランダム順、起動時即時切り替え、先読み |
 | **Display** | 表示モード選択（BlurPad / Fill / Fit / Stretch / Smart）、ぼかし強度・背景暗さのスライダー（**リアルタイムプレビュー付き**） |
-| **Cache** | キャッシュディレクトリのパス、最大サイズ（MB） |
-| **UI** | 表示言語（`en` / `ja`）、警告のデスクトップ通知 |
+| **Cache** | キャッシュディレクトリのパス、最大サイズ（MB）、キャッシュクリア |
+| **UI** | 表示言語（`en` / `ja` / `kansai`）、警告のデスクトップ通知 |
 | **Online** | オンラインプロバイダーの追加 / 削除（Bing / Unsplash / Wallhaven / Reddit）、API キー、取得間隔、ダウンロード先ディレクトリ |
 
 「**保存 / Save**」ボタンをクリックすると `~/.config/kabekami/config.toml` に書き出されます。
@@ -265,7 +258,7 @@ max_size_mb = 500
 
 ```toml
 [ui]
-# 表示言語: "en"（英語、デフォルト） または "ja"（日本語）
+# 表示言語: "en"（英語、デフォルト）、"ja"（日本語）、または "kansai"
 # 環境変数 KABEKAMI_LANG で実行時に上書き可能
 language = "en"
 # WARN レベルのログをデスクトップ通知として表示する（デフォルト: false）
@@ -381,6 +374,7 @@ kabekami --next           # 次の壁紙へ切り替え
 kabekami --prev           # 前の壁紙に戻る
 kabekami --toggle-pause   # 自動切り替えの一時停止 / 再開
 kabekami --reload-config  # config.toml を再読み込み（再起動不要）
+kabekami --fetch-now      # オンラインソースを即時取得
 kabekami --quit           # デーモンを終了
 ```
 
@@ -423,7 +417,7 @@ RUST_LOG=debug kabekami
 **同じ画像・同じ設定であれば再起動後もキャッシュがヒット**するため、
 2 回目以降の切り替えは非常に高速です。
 
-キャッシュを手動でクリアする場合:
+キャッシュのクリアは `kabekami-config` の Cache タブの **クリア / Clear Cache** ボタン、または手動で行えます:
 
 ```bash
 rm -rf ~/.cache/kabekami/
