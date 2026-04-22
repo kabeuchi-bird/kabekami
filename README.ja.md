@@ -173,7 +173,7 @@ kabekami-config
 | **Rotation** | 切り替え間隔、順次 / ランダム順、起動時即時切り替え、先読み |
 | **Display** | 表示モード選択（BlurPad / Fill / Fit / Stretch / Smart）、ぼかし強度・背景暗さのスライダー（**リアルタイムプレビュー付き**） |
 | **Cache** | キャッシュディレクトリのパス、最大サイズ（MB）、キャッシュクリア |
-| **UI** | 表示言語（`en` / `ja` / `kansai`）、警告のデスクトップ通知 |
+| **UI** | 表示言語（`en` / `ja`）、警告のデスクトップ通知 |
 | **Online** | オンラインプロバイダーの追加 / 削除（Bing / Unsplash / Wallhaven / Reddit）、API キー、取得間隔、ダウンロード先ディレクトリ |
 
 「**保存 / Save**」ボタンをクリックすると `~/.config/kabekami/config.toml` に書き出されます。
@@ -258,7 +258,7 @@ max_size_mb = 500
 
 ```toml
 [ui]
-# 表示言語: "en"（英語、デフォルト）、"ja"（日本語）、または "kansai"
+# 表示言語: "en"（英語、デフォルト） または "ja"（日本語）
 # 環境変数 KABEKAMI_LANG で実行時に上書き可能
 language = "en"
 # WARN レベルのログをデスクトップ通知として表示する（デフォルト: false）
