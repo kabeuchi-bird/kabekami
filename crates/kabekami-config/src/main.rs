@@ -640,9 +640,27 @@ impl KabekamiApp {
         ui.separator();
 
         ui.label("表示言語 / Language:");
-        ui.radio_value(&mut self.config.ui.language, String::new(), "English (default)");
-        ui.radio_value(&mut self.config.ui.language, "en".to_string(), "English (explicit)");
-        ui.radio_value(&mut self.config.ui.language, "ja".to_string(), "日本語");
+        let selected_label = if self.config.ui.language.is_empty() {
+            "(default)"
+        } else {
+            kabekami_common::i18n::REGISTRY
+                .iter()
+                .find(|e| e.id == self.config.ui.language.as_str())
+                .map(|e| e.display_name)
+                .unwrap_or("(unknown)")
+        };
+        egui::ComboBox::from_id_salt("language")
+            .selected_text(selected_label)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.config.ui.language, String::new(), "(default)");
+                for entry in kabekami_common::i18n::REGISTRY.iter().filter(|e| e.gui_visible) {
+                    ui.selectable_value(
+                        &mut self.config.ui.language,
+                        entry.id.to_string(),
+                        entry.display_name,
+                    );
+                }
+            });
         ui.add_space(8.0);
 
         ui.checkbox(
