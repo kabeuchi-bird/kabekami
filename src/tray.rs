@@ -30,6 +30,8 @@ pub enum TrayCmd {
     SetInterval(u64),
     /// 現在の壁紙ファイルを xdg-open で開く
     OpenCurrent,
+    /// 現在の壁紙ファイルをソースフォルダから削除する
+    DeleteCurrent,
     /// 設定ファイルを再読み込みする
     ReloadConfig,
     /// 設定 GUI を開く
@@ -206,7 +208,8 @@ impl ksni::Tray for KabekamiTray {
             }
             .into(),
             MenuItem::Separator,
-            Self::tray_item(self.strings.open_current, "document-open", !self.current_name.is_empty(), TrayCmd::OpenCurrent),
+            Self::tray_item(self.strings.open_current,   "document-open", !self.current_name.is_empty(), TrayCmd::OpenCurrent),
+            Self::tray_item(self.strings.delete_current, "edit-delete",    !self.current_name.is_empty(), TrayCmd::DeleteCurrent),
             Self::tray_item(self.strings.reload_config, "view-refresh", true, TrayCmd::ReloadConfig),
             Self::tray_item(self.strings.open_settings, "preferences-system", true, TrayCmd::OpenSettings),
             Self::tray_item(self.strings.fetch_now, "download", true, TrayCmd::FetchNow),
