@@ -303,18 +303,23 @@ async fn main() -> Result<()> {
 
                     TrayCmd::DeleteCurrent => {
                         if let Some(path) = scheduler.current().cloned() {
-                            match std::fs::remove_file(&path) {
-                                Err(e) => tracing::error!(
-                                    "failed to delete wallpaper {}: {}", path.display(), e
+                            let result = tokio::task::spawn_blocking({
+                                let path = path.clone();
+                                move || trash::delete(&path)
+                            }).await;
+                            match result {
+                                Ok(Err(e)) => tracing::error!(
+                                    "failed to trash wallpaper {}: {}", path.display(), e
                                 ),
-                                Ok(()) => {
-                                    tracing::info!("deleted wallpaper: {}", path.display());
+                                Err(e) => tracing::error!("trash task panicked: {}", e),
+                                Ok(Ok(())) => {
+                                    tracing::info!("moved to trash: {}", path.display());
                                     scheduler.remove_image(&path);
                                     prefetcher.abort();
                                     if let Some(next) = scheduler.next() {
                                         apply_and_notify(&next, screen_w, screen_h, &config, &cache,
                                             &plasma_shell, &mut notifier, &tray_handle,
-                                            &mut prefetcher, &scheduler, "apply after delete failed").await;
+                                            &mut prefetcher, &scheduler, "apply after trash failed").await;
                                     }
                                     if let Some(ref h) = tray_handle {
                                         h.update(|t| t.image_count = scheduler.image_count()).await;
