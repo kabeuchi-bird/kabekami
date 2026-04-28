@@ -173,7 +173,7 @@ pub static OHOGOE: UiStrings = UiStrings {
     display_mode:    "あへぇぇえっ♡♡♡中出しっ♡♡♡中出し来てりゅううっ♡♡♡",
     interval:        "おマンコ壊れるっ♡♡♡おマンコ溶けるっ♡♡♡おマンコ蒸発するぅうっ♡♡",
     open_current:    "ザーメン欲しくて発情した脳みそピースサイン出してますぅっ♡♡♡",
-    delete_current:  "イカせてくれた壁紙、供養したるわ♡",
+    delete_current:  "おマンコイきすぎて脳みそ壊れまひゅうぅぅ♡",
     quit:            "これからはご主人様だけのおマンコで生涯忠誠を誓いますぅうっ♡♡♡",
     tooltip_current: "おっほっ♡♡♡きたっ♡♡♡: {}",
     tooltip_error:   "子宮口開いてザーメン待ってるっ♡♡♡ {}",
