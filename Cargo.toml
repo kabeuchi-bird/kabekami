@@ -12,7 +12,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "avif", "bmp", "tiff", "gif"] }
 kabekami-common = { path = "crates/kabekami-common" }
 ksni = "0.3.4"
 notify = "7"
