@@ -1817,11 +1817,11 @@ name = "kabekami"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "fastrand",
  "image",
  "kabekami-common",
  "ksni",
  "notify",
- "rand",
  "reqwest",
  "serde",
  "tokio",
