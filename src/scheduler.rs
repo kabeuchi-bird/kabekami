@@ -190,10 +190,8 @@ impl Scheduler {
 
 /// Fisher-Yates シャッフル（設計書 §5a "全画像一巡"）。
 fn fisher_yates<T>(slice: &mut [T]) {
-    let mut rng = rand::rng();
-    use rand::Rng;
     for i in (1..slice.len()).rev() {
-        let j = rng.random_range(0..=i);
+        let j = fastrand::usize(0..=i);
         slice.swap(i, j);
     }
 }
