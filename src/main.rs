@@ -42,6 +42,7 @@ enum CliCmd {
     TogglePause,
     ReloadConfig,
     FetchNow,
+    TrashCurrent,
     Quit,
 }
 
@@ -516,22 +517,24 @@ fn parse_cli() -> Result<Option<CliCmd>> {
     let Some(arg) = args.next() else { return Ok(None) };
 
     let cmd = match arg.as_str() {
-        "--next"          => CliCmd::Next,
-        "--prev"          => CliCmd::Prev,
-        "--toggle-pause"  => CliCmd::TogglePause,
-        "--reload-config" => CliCmd::ReloadConfig,
-        "--fetch-now"     => CliCmd::FetchNow,
-        "--quit"          => CliCmd::Quit,
+        "--next"           => CliCmd::Next,
+        "--prev"           => CliCmd::Prev,
+        "--toggle-pause"   => CliCmd::TogglePause,
+        "--reload-config"  => CliCmd::ReloadConfig,
+        "--fetch-now"      => CliCmd::FetchNow,
+        "--trash-current"  => CliCmd::TrashCurrent,
+        "--quit"           => CliCmd::Quit,
         "--help" | "-h" => {
             println!("kabekami — KDE Plasma wallpaper rotation daemon\n");
             println!("USAGE:");
-            println!("  kabekami                start the daemon");
-            println!("  kabekami --next         switch to next wallpaper");
-            println!("  kabekami --prev         switch to previous wallpaper");
-            println!("  kabekami --toggle-pause pause / resume rotation");
+            println!("  kabekami                 start the daemon");
+            println!("  kabekami --next          switch to next wallpaper");
+            println!("  kabekami --prev          switch to previous wallpaper");
+            println!("  kabekami --toggle-pause  pause / resume rotation");
             println!("  kabekami --reload-config reload config.toml");
-            println!("  kabekami --fetch-now    trigger online wallpaper fetch");
-            println!("  kabekami --quit         quit the daemon");
+            println!("  kabekami --fetch-now     trigger online wallpaper fetch");
+            println!("  kabekami --trash-current move current wallpaper to trash");
+            println!("  kabekami --quit          quit the daemon");
             std::process::exit(0);
         }
         other => anyhow::bail!("unknown option '{}'. Try --help.", other),
@@ -544,12 +547,13 @@ async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
     use daemon_iface::{BUS_NAME, OBJECT_PATH};
 
     let method = match cmd {
-        CliCmd::Next         => "Next",
-        CliCmd::Prev         => "Prev",
-        CliCmd::TogglePause  => "TogglePause",
-        CliCmd::ReloadConfig => "ReloadConfig",
-        CliCmd::FetchNow     => "FetchNow",
-        CliCmd::Quit         => "Quit",
+        CliCmd::Next          => "Next",
+        CliCmd::Prev          => "Prev",
+        CliCmd::TogglePause   => "TogglePause",
+        CliCmd::ReloadConfig  => "ReloadConfig",
+        CliCmd::FetchNow      => "FetchNow",
+        CliCmd::TrashCurrent  => "TrashCurrent",
+        CliCmd::Quit          => "Quit",
     };
 
     let conn = zbus::Connection::session()
