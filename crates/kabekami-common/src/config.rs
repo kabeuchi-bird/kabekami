@@ -44,6 +44,9 @@ pub struct Sources {
     pub directories: Vec<PathBuf>,
     #[serde(default = "default_true")]
     pub recursive: bool,
+    /// お気に入り壁紙のコピー先ディレクトリ。`None` の場合は機能無効。
+    #[serde(default)]
+    pub favorites_dir: Option<PathBuf>,
 }
 
 impl Default for Sources {
@@ -51,6 +54,7 @@ impl Default for Sources {
         Self {
             directories: Vec::new(),
             recursive: true,
+            favorites_dir: None,
         }
     }
 }
@@ -232,6 +236,9 @@ impl Config {
             .iter()
             .map(|p| expand_tilde(p))
             .collect();
+        if let Some(dir) = &self.sources.favorites_dir {
+            self.sources.favorites_dir = Some(expand_tilde(dir));
+        }
         self.cache.directory = expand_tilde(&self.cache.directory);
         for oc in &mut self.online_sources {
             if let Some(dir) = &oc.download_dir {

@@ -43,6 +43,7 @@ enum CliCmd {
     ReloadConfig,
     FetchNow,
     TrashCurrent,
+    CopyToFavorites,
     Quit,
 }
 
@@ -122,6 +123,7 @@ async fn main() -> Result<()> {
         config.display.mode,
         config.rotation.interval_secs,
         lang,
+        config.sources.favorites_dir.is_some(),
     )
     .await;
 
@@ -331,6 +333,29 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    TrayCmd::CopyToFavorites => {
+                        if let Some(path) = scheduler.current() {
+                            match &config.sources.favorites_dir {
+                                None => tracing::warn!("copy_to_favorites: favorites_dir not configured"),
+                                Some(fav_dir) => {
+                                    let fav_dir = fav_dir.clone();
+                                    let filename = path.file_name().map(|n| n.to_owned());
+                                    if let Some(filename) = filename {
+                                        let dest = fav_dir.join(&filename);
+                                        if let Err(e) = tokio::fs::create_dir_all(&fav_dir).await {
+                                            tracing::error!("favorites: failed to create dir {}: {}", fav_dir.display(), e);
+                                        } else {
+                                            match tokio::fs::copy(path, &dest).await {
+                                                Ok(_) => tracing::info!("copied to favorites: {}", dest.display()),
+                                                Err(e) => tracing::error!("favorites: failed to copy {}: {}", path.display(), e),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     TrayCmd::ReloadConfig => {
                         match Config::load() {
                             Err(e) => {
@@ -410,11 +435,13 @@ async fn main() -> Result<()> {
                                     let secs = config.rotation.interval_secs;
                                     let strings = crate::i18n::strings(lang);
                                     let count = scheduler.image_count();
+                                    let has_fav = config.sources.favorites_dir.is_some();
                                     h.update(|t| {
                                         t.mode = mode;
                                         t.interval_secs = secs;
                                         t.strings = strings;
                                         t.image_count = count;
+                                        t.has_favorites_dir = has_fav;
                                     }).await;
                                 }
 
@@ -517,24 +544,26 @@ fn parse_cli() -> Result<Option<CliCmd>> {
     let Some(arg) = args.next() else { return Ok(None) };
 
     let cmd = match arg.as_str() {
-        "--next"           => CliCmd::Next,
-        "--prev"           => CliCmd::Prev,
-        "--toggle-pause"   => CliCmd::TogglePause,
-        "--reload-config"  => CliCmd::ReloadConfig,
-        "--fetch-now"      => CliCmd::FetchNow,
-        "--trash-current"  => CliCmd::TrashCurrent,
-        "--quit"           => CliCmd::Quit,
+        "--next"               => CliCmd::Next,
+        "--prev"               => CliCmd::Prev,
+        "--toggle-pause"       => CliCmd::TogglePause,
+        "--reload-config"      => CliCmd::ReloadConfig,
+        "--fetch-now"          => CliCmd::FetchNow,
+        "--trash-current"      => CliCmd::TrashCurrent,
+        "--copy-to-favorites"  => CliCmd::CopyToFavorites,
+        "--quit"               => CliCmd::Quit,
         "--help" | "-h" => {
             println!("kabekami — KDE Plasma wallpaper rotation daemon\n");
             println!("USAGE:");
-            println!("  kabekami                 start the daemon");
-            println!("  kabekami --next          switch to next wallpaper");
-            println!("  kabekami --prev          switch to previous wallpaper");
-            println!("  kabekami --toggle-pause  pause / resume rotation");
-            println!("  kabekami --reload-config reload config.toml");
-            println!("  kabekami --fetch-now     trigger online wallpaper fetch");
-            println!("  kabekami --trash-current move current wallpaper to trash");
-            println!("  kabekami --quit          quit the daemon");
+            println!("  kabekami                      start the daemon");
+            println!("  kabekami --next               switch to next wallpaper");
+            println!("  kabekami --prev               switch to previous wallpaper");
+            println!("  kabekami --toggle-pause       pause / resume rotation");
+            println!("  kabekami --reload-config      reload config.toml");
+            println!("  kabekami --fetch-now          trigger online wallpaper fetch");
+            println!("  kabekami --trash-current      move current wallpaper to trash");
+            println!("  kabekami --copy-to-favorites  copy current wallpaper to favorites folder");
+            println!("  kabekami --quit               quit the daemon");
             std::process::exit(0);
         }
         other => anyhow::bail!("unknown option '{}'. Try --help.", other),
@@ -547,13 +576,14 @@ async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
     use daemon_iface::{BUS_NAME, OBJECT_PATH};
 
     let method = match cmd {
-        CliCmd::Next          => "Next",
-        CliCmd::Prev          => "Prev",
-        CliCmd::TogglePause   => "TogglePause",
-        CliCmd::ReloadConfig  => "ReloadConfig",
-        CliCmd::FetchNow      => "FetchNow",
-        CliCmd::TrashCurrent  => "TrashCurrent",
-        CliCmd::Quit          => "Quit",
+        CliCmd::Next             => "Next",
+        CliCmd::Prev             => "Prev",
+        CliCmd::TogglePause      => "TogglePause",
+        CliCmd::ReloadConfig     => "ReloadConfig",
+        CliCmd::FetchNow         => "FetchNow",
+        CliCmd::TrashCurrent     => "TrashCurrent",
+        CliCmd::CopyToFavorites  => "CopyToFavorites",
+        CliCmd::Quit             => "Quit",
     };
 
     let conn = zbus::Connection::session()

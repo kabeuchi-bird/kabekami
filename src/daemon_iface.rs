@@ -55,4 +55,9 @@ impl DaemonIface {
     async fn trash_current(&self) {
         let _ = self.tx.send(TrayCmd::DeleteCurrent);
     }
+
+    /// 現在の壁紙をお気に入りフォルダにコピーする。
+    async fn copy_to_favorites(&self) {
+        let _ = self.tx.send(TrayCmd::CopyToFavorites);
+    }
 }
