@@ -52,7 +52,7 @@ impl PlasmaShell {
         }
     }
 
-    /// 指定された画像ファイルを KDE Plasma の壁紙に設定する。
+    /// 指定された画像ファイルを KDE Plasma の壁紙に設定する（全スクリーン共通）。
     ///
     /// 1. D-Bus `evaluateScript` を試みる（高速・確実）
     /// 2. 失敗した場合は `plasma-apply-wallpaperimage` CLI にフォールバック
@@ -78,6 +78,49 @@ impl PlasmaShell {
 
         set_wallpaper_cli(&canonical)
     }
+
+    /// 複数モニターに個別の壁紙を設定する。
+    ///
+    /// `entries` は `(screen_index, image_path)` のスライス。
+    /// `screen_index` は KDE Plasma の `desktop.screen` 値（0 始まり）に対応する。
+    ///
+    /// 1 件の場合は `set_wallpaper()` と同等。
+    /// D-Bus 失敗時は最初のエントリで CLI フォールバック。
+    pub async fn set_wallpaper_multi(&self, entries: &[(usize, &Path)]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        if entries.len() == 1 {
+            return self.set_wallpaper(entries[0].1).await;
+        }
+
+        let canonical: Vec<(usize, std::path::PathBuf)> = entries
+            .iter()
+            .map(|(idx, p)| {
+                p.canonicalize()
+                    .with_context(|| format!("failed to canonicalize path: {}", p.display()))
+                    .map(|c| (*idx, c))
+            })
+            .collect::<Result<_>>()?;
+
+        if let Some(ref conn) = self.conn {
+            match set_wallpaper_multi_dbus(&canonical, conn).await {
+                Ok(()) => {
+                    tracing::info!("wallpaper set on {} screen(s) via D-Bus", canonical.len());
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("D-Bus multi-wallpaper failed ({}), falling back to CLI", e);
+                }
+            }
+        }
+
+        // CLI フォールバック: 最初のエントリを全スクリーンに適用
+        if let Some((_, path)) = canonical.first() {
+            set_wallpaper_cli(path)?;
+        }
+        Ok(())
+    }
 }
 
 /// D-Bus `org.kde.PlasmaShell::evaluateScript` 経由で壁紙を設定する。
@@ -98,6 +141,50 @@ async fn set_wallpaper_dbus(path: &Path, conn: &zbus::Connection) -> Result<()> 
     desktop.writeConfig("Image", "file://{}");
 }}"#,
         escaped
+    );
+
+    conn.call_method(
+        Some("org.kde.plasmashell"),
+        "/PlasmaShell",
+        Some("org.kde.PlasmaShell"),
+        "evaluateScript",
+        &(script.as_str(),),
+    )
+    .await
+    .context("evaluateScript D-Bus call failed")?;
+
+    Ok(())
+}
+
+/// D-Bus `org.kde.PlasmaShell::evaluateScript` 経由でスクリーンごとに壁紙を設定する。
+async fn set_wallpaper_multi_dbus(
+    entries: &[(usize, std::path::PathBuf)],
+    conn: &zbus::Connection,
+) -> Result<()> {
+    let map_entries: String = entries
+        .iter()
+        .map(|(idx, path)| {
+            let escaped = path
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r");
+            format!("\"{idx}\": \"file://{escaped}\"")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let script = format!(
+        r#"const wallpapers = {{{map_entries}}};
+for (const desktop of desktops()) {{
+    if (desktop.screen === -1) continue;
+    const p = wallpapers[String(desktop.screen)];
+    if (!p) continue;
+    desktop.wallpaperPlugin = "org.kde.image";
+    desktop.currentConfigGroup = ["Wallpaper", "org.kde.image", "General"];
+    desktop.writeConfig("Image", p);
+}}"#
     );
 
     conn.call_method(

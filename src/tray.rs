@@ -32,6 +32,8 @@ pub enum TrayCmd {
     OpenCurrent,
     /// 現在の壁紙ファイルをソースフォルダから削除する
     DeleteCurrent,
+    /// 現在の壁紙をお気に入りフォルダにコピーする
+    CopyToFavorites,
     /// 設定ファイルを再読み込みする
     ReloadConfig,
     /// 設定 GUI を開く
@@ -40,6 +42,8 @@ pub enum TrayCmd {
     FetchNow,
     /// アプリ終了
     Quit,
+    /// KDE Plasma が再起動した（壁紙を再適用する）
+    PlasmaRestarted,
 }
 
 /// 切り替え間隔プリセット（秒）。ラベル表示は `i18n::UiStrings::interval_labels` を使用する。
@@ -63,6 +67,8 @@ pub struct KabekamiTray {
     pub image_count: usize,
     /// UI 文字列テーブル（言語設定に応じて初期化）。
     pub strings: &'static UiStrings,
+    /// お気に入りフォルダが設定されているか（メニュー項目の有効/無効に使う）。
+    pub has_favorites_dir: bool,
 }
 
 impl KabekamiTray {
@@ -208,8 +214,9 @@ impl ksni::Tray for KabekamiTray {
             }
             .into(),
             MenuItem::Separator,
-            Self::tray_item(self.strings.open_current,   "document-open", !self.current_name.is_empty(), TrayCmd::OpenCurrent),
-            Self::tray_item(self.strings.delete_current, "edit-delete",    !self.current_name.is_empty(), TrayCmd::DeleteCurrent),
+            Self::tray_item(self.strings.open_current,      "document-open",      !self.current_name.is_empty(), TrayCmd::OpenCurrent),
+            Self::tray_item(self.strings.copy_to_favorites, "emblem-favorite",     !self.current_name.is_empty() && self.has_favorites_dir, TrayCmd::CopyToFavorites),
+            Self::tray_item(self.strings.delete_current,    "edit-delete",         !self.current_name.is_empty(), TrayCmd::DeleteCurrent),
             Self::tray_item(self.strings.reload_config, "view-refresh", true, TrayCmd::ReloadConfig),
             Self::tray_item(self.strings.open_settings, "preferences-system", true, TrayCmd::OpenSettings),
             Self::tray_item(self.strings.fetch_now, "download", true, TrayCmd::FetchNow),
@@ -228,6 +235,7 @@ pub async fn spawn_tray(
     mode: DisplayMode,
     interval_secs: u64,
     lang: Lang,
+    has_favorites_dir: bool,
 ) -> Option<ksni::Handle<KabekamiTray>> {
     use ksni::TrayMethods;
 
@@ -240,6 +248,7 @@ pub async fn spawn_tray(
         last_error: None,
         image_count: 0,
         strings: crate::i18n::strings(lang),
+        has_favorites_dir,
     };
 
     // `assume_sni_available(true)` にすることで、デスクトップ環境の起動が
