@@ -42,6 +42,8 @@ pub enum TrayCmd {
     FetchNow,
     /// アプリ終了
     Quit,
+    /// KDE Plasma が再起動した（壁紙を再適用する）
+    PlasmaRestarted,
 }
 
 /// 切り替え間隔プリセット（秒）。ラベル表示は `i18n::UiStrings::interval_labels` を使用する。
