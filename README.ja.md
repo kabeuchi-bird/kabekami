@@ -9,7 +9,11 @@ KDE Plasma 向け壁紙ローテーションツール。Rust 製。
 - システムトレイ常駐（SNI プロトコル）＋コンテキストメニュー操作
 - 加工済み画像のキャッシュ（SHA256 キー、LRU 退避）で短い間隔でも高速
 - 次の画像を事前にバックグラウンド加工しておく先読み機構
+- **マルチモニター対応**: `kscreen-doctor` で全モニターを自動検出し、各画面の解像度に最適化した画像を個別に適用
 - **オンライン壁紙ソース**: Bing Daily・Unsplash・Wallhaven・Reddit から指定間隔で自動ダウンロード
+- **お気に入りフォルダ**: 現在の壁紙をワンクリックで指定フォルダにコピー
+- **ゴミ箱に移動**: 現在の壁紙をシステムのゴミ箱に送り、次の壁紙へ自動遷移
+- **セッション管理**: `logind` でグレースフルシャットダウン検知・Plasma 再起動時に壁紙を自動再適用
 - **GUI 設定ツール**（`kabekami-config`）: egui 製の 6 タブ設定画面。BlurPad のリアルタイムプレビュー付き
 
 ## 動作要件
@@ -21,10 +25,14 @@ KDE Plasma 向け壁紙ローテーションツール。Rust 製。
 | Rust | 1.75 以降（edition 2021） |
 | 外部コマンド | `plasma-apply-wallpaperimage`（Plasma 付属） |
 | D-Bus | セッションバスへのアクセス（トレイ表示に必要） |
+| `kscreen-doctor` | 任意 — マルチモニター自動検出に必要 |
 
 > **Note** `plasma-apply-wallpaperimage` は KDE パッケージに同梱されています。
 > Arch Linux では `plasma-workspace`、Fedora/Debian では `plasma-workspace` または
 > `kde-plasma-desktop` に含まれています。
+>
+> `kscreen-doctor` は `kscreen` パッケージに含まれています。インストールされていない場合は
+> 1920×1080、または `KABEKAMI_SCREEN` で指定した解像度にフォールバックします。
 
 ## インストール
 
@@ -77,7 +85,7 @@ yay -S kabekami-git
    max_size_mb = 500
 
    [ui]
-   language = "en"        # "en"（英語、デフォルト）または "ja"（日本語）
+   language = "ja"        # "en"（英語）/ "ja"（日本語）/ "kansai"（関西弁）
    ```
 
    TOML を直接編集せずに設定したい場合は GUI 設定ツールをお使いください:
@@ -108,7 +116,6 @@ yay -S kabekami-git
    または `.desktop` ファイルを直接配置する方法もあります:
 
    ```bash
-   # ~/.config/autostart/ に .desktop ファイルを作成する
    cat > ~/.config/autostart/kabekami.desktop <<'EOF'
    [Desktop Entry]
    Name=kabekami
@@ -169,11 +176,11 @@ kabekami-config
 
 | タブ | 内容 |
 |------|------|
-| **Sources** | 壁紙ディレクトリの追加 / 削除、再帰スキャンの切り替え |
+| **Sources** | 壁紙ディレクトリの追加 / 削除、再帰スキャンの切り替え、お気に入りフォルダの設定 |
 | **Rotation** | 切り替え間隔、順次 / ランダム順、起動時即時切り替え、先読み |
 | **Display** | 表示モード選択（BlurPad / Fill / Fit / Stretch / Smart）、ぼかし強度・背景暗さのスライダー（**リアルタイムプレビュー付き**） |
 | **Cache** | キャッシュディレクトリのパス、最大サイズ（MB）、キャッシュクリア |
-| **UI** | 表示言語（`en` / `ja`）、警告のデスクトップ通知 |
+| **UI** | 表示言語（`en` / `ja` / `kansai`）、警告のデスクトップ通知 |
 | **Online** | オンラインプロバイダーの追加 / 削除（Bing / Unsplash / Wallhaven / Reddit）、API キー、取得間隔、ダウンロード先ディレクトリ |
 
 「**保存 / Save**」ボタンをクリックすると `~/.config/kabekami/config.toml` に書き出されます。
@@ -199,6 +206,10 @@ directories = [
 ]
 # サブディレクトリを再帰的に走査するか（デフォルト: true）
 recursive = true
+
+# お気に入りフォルダ — トレイメニューまたは --copy-to-favorites で現在の壁紙をここにコピー
+# 未設定の場合は「お気に入りに追加」メニュー項目が無効になります
+# favorites_dir = "~/Pictures/Favorites"
 ```
 
 対応拡張子: `jpg` / `jpeg` / `png` / `webp` / `bmp` / `tiff` / `gif`
@@ -258,9 +269,9 @@ max_size_mb = 500
 
 ```toml
 [ui]
-# 表示言語: "en"（英語、デフォルト） または "ja"（日本語）
+# 表示言語: "en"（英語、デフォルト）/ "ja"（日本語）/ "kansai"（関西弁）
 # 環境変数 KABEKAMI_LANG で実行時に上書き可能
-language = "en"
+language = "ja"
 # WARN レベルのログをデスクトップ通知として表示する（デフォルト: false）
 warn_notify = false
 ```
@@ -324,7 +335,7 @@ interval_hours = 1              # 取得間隔の上書き（省略時は Reddit
 | 環境変数 | 説明 |
 |---|---|
 | `KABEKAMI_SCREEN=2560x1440` | 画面解像度を手動指定（`kscreen-doctor` で自動取得できない場合） |
-| `KABEKAMI_LANG=en` | 表示言語を実行時に上書き（`ja` または `en`） |
+| `KABEKAMI_LANG=ja` | 表示言語を実行時に上書き（`en` / `ja` / `kansai`） |
 | `RUST_LOG=kabekami=debug` | デバッグログを有効化 |
 
 **例:**
@@ -355,8 +366,9 @@ kabekami
 ├── 切り替え間隔 ▶        — 10秒 / 30秒 / 5分 / 30分 / 1時間 / 3時間
 ├── ─────────────────────
 ├── 現在の壁紙を開く       — xdg-open で現在の壁紙ファイルを開く
+├── お気に入りに追加       — 現在の壁紙を favorites_dir にコピー（未設定時は無効）
+├── ゴミ箱に移動          — 現在の壁紙をゴミ箱へ移動し次の壁紙へ
 ├── 設定を再読み込み       — 再起動なしで config.toml を再読み込み
-├── ─────────────────────
 ├── 設定を開く            — kabekami-config GUI を起動
 ├── 今すぐ取得            — オンラインソースを即時取得（インターバル無視）
 ├── ─────────────────────
@@ -370,12 +382,14 @@ kabekami
 デーモン起動中はコマンドラインから操作できます:
 
 ```bash
-kabekami --next           # 次の壁紙へ切り替え
-kabekami --prev           # 前の壁紙に戻る
-kabekami --toggle-pause   # 自動切り替えの一時停止 / 再開
-kabekami --reload-config  # config.toml を再読み込み（再起動不要）
-kabekami --fetch-now      # オンラインソースを即時取得
-kabekami --quit           # デーモンを終了
+kabekami --next               # 次の壁紙へ切り替え
+kabekami --prev               # 前の壁紙に戻る
+kabekami --toggle-pause       # 自動切り替えの一時停止 / 再開
+kabekami --reload-config      # config.toml を再読み込み（再起動不要）
+kabekami --fetch-now          # オンラインソースを即時取得
+kabekami --trash-current      # 現在の壁紙をゴミ箱に移動して次へ
+kabekami --copy-to-favorites  # 現在の壁紙をお気に入りフォルダにコピー
+kabekami --quit               # デーモンを終了
 ```
 
 コマンドは D-Bus（`org.kabekami.Daemon`）経由でデーモンに転送されます。
@@ -390,6 +404,31 @@ kabekami --quit
 # フォアグラウンドで起動中の場合
 Ctrl-C
 ```
+
+## マルチモニター対応
+
+kabekami は `kscreen-doctor --outputs` で接続・有効なモニターを自動検出し、各画面の解像度に最適化した加工済み画像を個別に適用します。キャッシュキーには画面解像度が含まれるため、モニターごとに個別にキャッシュされます。
+
+`kscreen-doctor` が利用できない場合はプライマリ解像度（または `KABEKAMI_SCREEN` の値）にフォールバックします。
+
+起動時に検出されたモニターを確認するには:
+
+```bash
+RUST_LOG=kabekami=info kabekami 2>&1 | grep "monitor detected"
+# monitor detected: DP-1 2560x1440
+# monitor detected: HDMI-1 1920x1080
+```
+
+## セッション管理
+
+kabekami は以下の D-Bus シグナルでシステムセッションと連携します:
+
+| シグナル | 動作 |
+|--------|------|
+| `org.freedesktop.login1.Manager::PrepareForShutdown(true)` | グレースフルシャットダウン — セッション終了前に状態を保存して終了 |
+| `org.freedesktop.DBus::NameOwnerChanged`（`org.kde.plasmashell`） | Plasma 再起動検知 — Plasma の再起動後に現在の壁紙を自動再適用 |
+
+これにより、Plasma がクラッシュした場合や `plasmashell --replace` を実行した場合も壁紙が正しく復元されます。
 
 ## ログ
 
@@ -410,7 +449,7 @@ RUST_LOG=debug kabekami
 キャッシュキーは以下の組み合わせの SHA256 ハッシュです:
 
 - 元画像の絶対パス
-- 画面解像度
+- 画面解像度（マルチモニター時はモニターごとに個別）
 - 表示モード
 - `blur_sigma` / `bg_darken` の値
 
@@ -431,6 +470,9 @@ kabekami/
 │   ├── main.rs
 │   ├── config.rs            # kabekami-common::config の再エクスポート
 │   ├── display_mode.rs      # kabekami-common::display_mode の再エクスポート
+│   ├── plasma.rs            # KDE Plasma D-Bus / CLI 連携
+│   ├── screen.rs            # モニター検出（kscreen-doctor）
+│   ├── session.rs           # logind + NameOwnerChanged ウォッチャー
 │   └── ...
 ├── crates/
 │   ├── kabekami-common/     # 共有ライブラリ（設定型・画像処理）
@@ -471,6 +513,21 @@ sudo apt install plasma-workspace
 
 Plasma のウィジェットがロックされているときは `evaluateScript` が失敗することがあります。
 デスクトップのロックを解除してから再試行してください。
+
+### マルチモニター: 全画面に同じ画像が表示される
+
+`kscreen-doctor` が `PATH` にない場合、kabekami は個別のモニターを検出できず全画面に同一画像を適用します。`kscreen` をインストールしてください:
+
+```bash
+# Arch Linux
+sudo pacman -S kscreen
+
+# Fedora
+sudo dnf install kscreen
+
+# Debian / Ubuntu
+sudo apt install kscreen
+```
 
 ### 画像の加工が遅い（4K 環境）
 
