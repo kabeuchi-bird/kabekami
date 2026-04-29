@@ -171,7 +171,7 @@ kabekami-config
 | **Rotation** | Interval, sequential/random order, change-on-start, prefetch |
 | **Display** | Mode selector (BlurPad / Fill / Fit / Stretch / Smart), blur sigma and background darkness sliders with **real-time preview** |
 | **Cache** | Cache directory path, maximum size (MB), Clear Cache button |
-| **UI** | Display language (`en` / `ja` / `kansai`), desktop notification for warnings |
+| **UI** | Display language (`en` / `ja`), desktop notification for warnings |
 | **Online** | Add/remove online providers (Bing / Unsplash / Wallhaven / Reddit), API keys, fetch interval, download directory |
 
 Changes are saved to `~/.config/kabekami/config.toml` when you click **Save**. The running daemon detects the file change automatically via inotify and reloads without a restart.
@@ -259,7 +259,7 @@ max_size_mb = 500
 
 ```toml
 [ui]
-# Display language: "en" (English, default), "ja" (Japanese), or "kansai" (Kansai dialect)
+# Display language: "en" (English, default) or "ja" (Japanese)
 # Can be overridden at runtime with the KABEKAMI_LANG environment variable
 language = "en"
 # Show WARN-level log events as desktop notifications (default: false)
@@ -325,7 +325,7 @@ To trigger a fetch immediately, use **Fetch Wallpapers Now** in the tray menu.
 | Variable | Description |
 |----------|-------------|
 | `KABEKAMI_SCREEN=2560x1440` | Override screen resolution (auto-detected via `kscreen-doctor` by default) |
-| `KABEKAMI_LANG=en` | Override UI language at runtime (`en`, `ja`, or `kansai`) |
+| `KABEKAMI_LANG=en` | Override UI language at runtime (`en` or `ja`) |
 | `RUST_LOG=kabekami=debug` | Enable debug logging |
 
 **Examples:**
