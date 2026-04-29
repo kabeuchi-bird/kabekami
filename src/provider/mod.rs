@@ -88,6 +88,7 @@ async fn fetch_if_due(
 
     match fetch_one(cfg, &dir, client, ctx).await {
         Ok(paths) if !paths.is_empty() => {
+            prune_dir(&dir, &paths).await;
             mark_fetch_done(cfg).await;
             tracing::info!("provider {}: {} image(s) available", provider_name, paths.len());
             Some(FetchResult { provider: provider_name, new_paths: paths })
@@ -135,6 +136,28 @@ async fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let elapsed = SystemTime::now().duration_since(modified).unwrap_or_default();
     elapsed.as_secs() >= interval_secs
+}
+
+/// ダウンロードディレクトリから `keep` に含まれないファイルを削除する。
+///
+/// `.last_fetch` タイムスタンプと `.tmp` 一時ファイルは `keep` にないが残す。
+/// フェッチ成功後に呼び出すことで、`count` を超えた古い画像を自動的に除去する。
+async fn prune_dir(dir: &Path, keep: &[PathBuf]) {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name == ".last_fetch" || name.ends_with(".tmp") {
+            continue;
+        }
+        if !keep.contains(&path) {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                tracing::warn!("provider: failed to prune {}: {}", path.display(), e);
+            } else {
+                tracing::debug!("provider: pruned old image {}", path.display());
+            }
+        }
+    }
 }
 
 /// `.last_fetch` タイムスタンプを更新する（画像を 1 枚以上取得できたときのみ呼ぶこと）。
