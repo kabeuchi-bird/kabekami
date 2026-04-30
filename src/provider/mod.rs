@@ -143,6 +143,7 @@ async fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
 /// `.last_fetch` タイムスタンプと `.tmp` 一時ファイルは `keep` にないが残す。
 /// フェッチ成功後に呼び出すことで、`count` を超えた古い画像を自動的に除去する。
 async fn prune_dir(dir: &Path, keep: &[PathBuf]) {
+    let keep_set: std::collections::HashSet<&PathBuf> = keep.iter().collect();
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
@@ -150,7 +151,7 @@ async fn prune_dir(dir: &Path, keep: &[PathBuf]) {
         if name == ".last_fetch" || name.ends_with(".tmp") {
             continue;
         }
-        if !keep.contains(&path) {
+        if !keep_set.contains(&path) {
             if let Err(e) = tokio::fs::remove_file(&path).await {
                 tracing::warn!("provider: failed to prune {}: {}", path.display(), e);
             } else {
