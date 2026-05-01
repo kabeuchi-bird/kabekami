@@ -123,15 +123,17 @@ impl PlasmaShell {
     }
 }
 
-/// D-Bus `org.kde.PlasmaShell::evaluateScript` 経由で壁紙を設定する。
-async fn set_wallpaper_dbus(path: &Path, conn: &zbus::Connection) -> Result<()> {
-    let path_str = path.to_string_lossy();
-    // JS 文字列として安全にエスケープ（`\` `"` `\n` `\r` が対象）
-    let escaped = path_str
-        .replace('\\', "\\\\")
+/// パスを JS 文字列リテラル内で安全に使えるようエスケープする。
+fn escape_js_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
-        .replace('\r', "\\r");
+        .replace('\r', "\\r")
+}
+
+/// D-Bus `org.kde.PlasmaShell::evaluateScript` 経由で壁紙を設定する。
+async fn set_wallpaper_dbus(path: &Path, conn: &zbus::Connection) -> Result<()> {
+    let escaped = escape_js_string(&path.to_string_lossy());
 
     let script = format!(
         r#"for (const desktop of desktops()) {{
@@ -164,12 +166,7 @@ async fn set_wallpaper_multi_dbus(
     let map_entries: String = entries
         .iter()
         .map(|(idx, path)| {
-            let escaped = path
-                .to_string_lossy()
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r");
+            let escaped = escape_js_string(&path.to_string_lossy());
             format!("\"{idx}\": \"file://{escaped}\"")
         })
         .collect::<Vec<_>>()

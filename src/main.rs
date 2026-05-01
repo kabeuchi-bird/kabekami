@@ -806,11 +806,15 @@ async fn apply(
         let output = process_image(src, w, h, config, cache).await?;
         plasma.set_wallpaper(&output).await
     } else {
-        let mut entries: Vec<(usize, std::path::PathBuf)> = Vec::new();
-        for (idx, monitor) in screens.iter().enumerate() {
-            let output = process_image(src, monitor.width, monitor.height, config, cache).await?;
-            entries.push((idx, output));
-        }
+        let entries: Vec<(usize, std::path::PathBuf)> =
+            futures_util::future::try_join_all(screens.iter().enumerate().map(
+                |(idx, monitor)| async move {
+                    process_image(src, monitor.width, monitor.height, config, cache)
+                        .await
+                        .map(|p| (idx, p))
+                },
+            ))
+            .await?;
         let entry_refs: Vec<(usize, &Path)> = entries.iter().map(|(i, p)| (*i, p.as_path())).collect();
         plasma.set_wallpaper_multi(&entry_refs).await
     }
