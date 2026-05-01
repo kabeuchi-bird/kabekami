@@ -124,27 +124,6 @@ impl ksni::Tray for KabekamiTray {
         }
     }
 
-    /// Builds the tray context menu reflecting the current tray state.
-    ///
-    /// The returned menu contains navigation items (Next/Prev), a pause/resume toggle that
-    /// updates local state optimistically, a Display Mode radio submenu, a Rotation Interval
-    /// radio submenu, actions for the current wallpaper (Open, Copy to Favorites, Delete, Blacklist)
-    /// which are enabled only when a current name is present (Copy to Favorites also requires a
-    /// favorites directory), utility actions (Reload Config, Open Settings, Fetch Now) and Quit.
-    /// Activating menu options sends corresponding `TrayCmd` messages to the notifier; selection
-    /// changes also update the tray's in-memory state so the UI reflects the change immediately.
-    ///
-    /// # Returns
-    ///
-    /// A `Vec<ksni::MenuItem<Self>>` representing the full context menu for the tray.
-    ///
-    /// # Examples
-    ///
-    /// ```ignore
-    /// // Given a `tray: KabekamiTray`, obtain its menu items:
-    /// let items = tray.menu();
-    /// assert!(!items.is_empty());
-    /// ```
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
 
