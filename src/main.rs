@@ -90,7 +90,8 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let mut blacklist = blacklist::Blacklist::load(&kabekami_config_dir);
+    let mut blacklist = blacklist::Blacklist::load(&kabekami_config_dir)
+        .context("failed to load blacklist")?;
 
     // ローカルディレクトリ + オンラインソースのダウンロードディレクトリを統合してスキャン
     let mut scan_dirs = config.sources.directories.clone();
@@ -99,11 +100,8 @@ async fn main() -> Result<()> {
             scan_dirs.push(oc.resolved_download_dir());
         }
     }
-    let images: Vec<_> = crate::scanner::scan(&scan_dirs, config.sources.recursive)
-        .context("failed to scan source directories")?
-        .into_iter()
-        .filter(|p| !blacklist.contains(p))
-        .collect();
+    let images = build_filtered_images_list(&scan_dirs, config.sources.recursive, &blacklist)
+        .context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
     if images.is_empty() {
         if has_online {
@@ -377,13 +375,23 @@ async fn main() -> Result<()> {
                                 tracing::info!("blacklisted: {}", path.display());
                                 scheduler.remove_image(&path);
                                 prefetcher.abort();
-                                if let Some(next) = scheduler.next() {
-                                    apply_and_notify(&next, &screens, &config, &cache,
-                                        &plasma_shell, &mut notifier, &tray_handle,
-                                        &mut prefetcher, &scheduler, "apply after blacklist failed").await;
-                                }
-                                if let Some(ref h) = tray_handle {
-                                    h.update(|t| t.image_count = scheduler.image_count()).await;
+                                match scheduler.next() {
+                                    Some(next) => {
+                                        apply_and_notify(&next, &screens, &config, &cache,
+                                            &plasma_shell, &mut notifier, &tray_handle,
+                                            &mut prefetcher, &scheduler, "apply after blacklist failed").await;
+                                        if let Some(ref h) = tray_handle {
+                                            h.update(|t| t.image_count = scheduler.image_count()).await;
+                                        }
+                                    }
+                                    None => {
+                                        if let Some(ref h) = tray_handle {
+                                            h.update(|t| {
+                                                t.current_name = String::new();
+                                                t.image_count = scheduler.image_count();
+                                            }).await;
+                                        }
+                                    }
                                 }
                                 ticker = make_ticker(config.rotation.interval_secs);
                             }
@@ -421,7 +429,13 @@ async fn main() -> Result<()> {
 
                                 let prev_current = scheduler.current().cloned();
 
-                                match scanner::scan(&new_cfg.sources.directories, new_cfg.sources.recursive) {
+                                let mut reload_scan_dirs = new_cfg.sources.directories.clone();
+                                for oc in &new_cfg.online_sources {
+                                    if oc.enabled {
+                                        reload_scan_dirs.push(oc.resolved_download_dir());
+                                    }
+                                }
+                                match build_filtered_images_list(&reload_scan_dirs, new_cfg.sources.recursive, &blacklist) {
                                     Ok(images) if !images.is_empty() => {
                                         tracing::info!("reload: {} image(s) found", images.len());
                                         scheduler = Scheduler::new(images, new_cfg.rotation.order);
@@ -567,6 +581,25 @@ async fn main() -> Result<()> {
 }
 
 // ── ヘルパー関数 ─────────────────────────────────────────────────────────────
+
+/// Scan directories for images and filter out blacklisted paths.
+///
+/// This helper ensures consistent blacklist filtering both at startup and during config reload.
+///
+/// # Returns
+///
+/// A vector of non-blacklisted image paths.
+fn build_filtered_images_list(
+    scan_dirs: &[std::path::PathBuf],
+    recursive: bool,
+    blacklist: &blacklist::Blacklist,
+) -> Result<Vec<std::path::PathBuf>> {
+    let images: Vec<_> = crate::scanner::scan(scan_dirs, recursive)?
+        .into_iter()
+        .filter(|p| !blacklist.contains(p))
+        .collect();
+    Ok(images)
+}
 
 fn init_tracing(warn_notify: bool) -> Option<tokio::sync::mpsc::UnboundedReceiver<String>> {
     use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};

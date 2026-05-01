@@ -4,6 +4,7 @@
 //! ファイルが存在しない場合は空のブラックリストとして動作する。
 
 use std::collections::HashSet;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -25,16 +26,27 @@ impl Blacklist {
     /// let cfg_dir = std::path::Path::new("/home/user/.config/kabekami");
     /// let _blacklist = crate::blacklist::Blacklist::load(cfg_dir);
     /// ```
-    pub fn load(kabekami_config_dir: &Path) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the file fails with an IO error other than `NotFound`.
+    pub fn load(kabekami_config_dir: &Path) -> Result<Self, io::Error> {
         let file_path = kabekami_config_dir.join("blacklist.txt");
-        let paths = std::fs::read_to_string(&file_path)
-            .unwrap_or_default()
+        let content = match std::fs::read_to_string(&file_path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                tracing::warn!("failed to read blacklist at {}: {}", file_path.display(), e);
+                return Err(e);
+            }
+        };
+        let paths = content
             .lines()
-            .map(str::trim)
+            .map(|line| line.trim_end_matches('\r'))
             .filter(|l| !l.is_empty())
             .map(PathBuf::from)
             .collect();
-        Self { paths, file_path }
+        Ok(Self { paths, file_path })
     }
 
     /// Check whether a path is present in the blacklist.
@@ -78,8 +90,12 @@ impl Blacklist {
     /// assert!(bl.contains(Path::new("some/path")));
     /// ```
     pub fn add(&mut self, path: &Path) -> Result<()> {
-        if self.paths.insert(path.to_path_buf()) {
-            self.save()?;
+        let path_buf = path.to_path_buf();
+        if self.paths.insert(path_buf.clone()) {
+            if let Err(e) = self.save() {
+                self.paths.remove(&path_buf);
+                return Err(e);
+            }
         }
         Ok(())
     }
