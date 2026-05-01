@@ -79,30 +79,10 @@ impl PlasmaShell {
         set_wallpaper_cli(&canonical)
     }
 
-    /// Set per-screen wallpapers for multiple monitors.
+    /// 複数モニターに個別の壁紙を設定する。
     ///
-    /// The `entries` slice contains `(screen_index, image_path)` pairs where `screen_index` corresponds to KDE Plasma's `desktop.screen` (0-based).
-    ///
-    /// If `entries` is empty the function does nothing. If it contains exactly one entry the call behaves like `set_wallpaper()` for that path. When a D-Bus session is available the function attempts to apply each path to its corresponding screen via Plasma's `evaluateScript`; if that D-Bus attempt fails the function falls back to applying the first entry's image to all screens using the `plasma-apply-wallpaperimage` CLI.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` on success; `Err(_)` if path canonicalization fails or if the CLI fallback fails.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use std::path::Path;
-    /// # use crate::PlasmaShell;
-    ///
-    /// # async fn doc_example() -> anyhow::Result<()> {
-    /// let shell = PlasmaShell::new().await?;
-    /// let entries = [ (0usize, Path::new("/usr/share/wallpapers/a.jpg")),
-    ///                 (1usize, Path::new("/usr/share/wallpapers/b.jpg")) ];
-    /// shell.set_wallpaper_multi(&entries).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
+    /// `entries` は `(screen_index, image_path)` のスライス。
+    /// D-Bus 失敗時は最初のエントリで CLI フォールバック。
     pub async fn set_wallpaper_multi(&self, entries: &[(usize, &Path)]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
@@ -140,41 +120,7 @@ impl PlasmaShell {
     }
 }
 
-/// Escape a string for safe embedding inside a JavaScript double-quoted string literal.
-
-///
-
-/// This returns a new `String` where:
-
-/// - backslash (`\`) is replaced with `\\`
-
-/// - double quote (`"`) is replaced with `\"`
-
-/// - newline (`\n`) is replaced with `\n`
-
-/// - carriage return (`\r`) is replaced with `\r`
-
-///
-
-/// # Examples
-
-///
-
-/// ```
-
-/// let raw = "C:\\Images\\wall\"paper.png\nline2\r";
-
-/// let escaped = escape_js_string(raw);
-
-/// assert!(escaped.contains("\\\\"));
-
-/// assert!(escaped.contains("\\\""));
-
-/// assert!(escaped.contains("\\n"));
-
-/// assert!(escaped.contains("\\r"));
-
-/// ```
+/// パスを JS 文字列リテラル内で安全に使えるようエスケープする。
 fn escape_js_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
@@ -182,20 +128,7 @@ fn escape_js_string(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
-/// Sets the same wallpaper for all Plasma desktops by calling `org.kde.PlasmaShell::evaluateScript` over D-Bus.
-///
-/// The provided `path` is embedded into a JavaScript snippet (as a `file://` URL) and passed to Plasma Shell to update each desktop's wallpaper settings. Returns an error if the D-Bus call fails.
-///
-/// # Examples
-///
-/// ```
-/// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-/// use std::path::Path;
-/// let conn = zbus::Connection::session().await?;
-/// set_wallpaper_dbus(Path::new("/usr/share/wallpapers/example.jpg"), &conn).await?;
-/// # Ok(())
-/// # }
-/// ```
+/// D-Bus `org.kde.PlasmaShell::evaluateScript` 経由で壁紙を設定する。
 async fn set_wallpaper_dbus(path: &Path, conn: &zbus::Connection) -> Result<()> {
     let escaped = escape_js_string(&path.to_string_lossy());
 
@@ -222,26 +155,7 @@ async fn set_wallpaper_dbus(path: &Path, conn: &zbus::Connection) -> Result<()> 
     Ok(())
 }
 
-/// Apply wallpapers to specific screens using Plasma Shell's `evaluateScript` D-Bus method.
-///
-/// Each tuple in `entries` is (screen_index, image_path); the function builds a JavaScript
-/// object mapping screen indices to `file://` URLs and invokes `org.kde.PlasmaShell.evaluateScript`.
-/// Only desktops whose `desktop.screen` matches an entry receive the corresponding image.
-///
-/// # Errors
-///
-/// Returns an error if the D-Bus `evaluateScript` call fails (context: "evaluateScript D-Bus call failed").
-///
-/// # Examples
-///
-/// ```no_run
-/// use std::path::PathBuf;
-/// # async fn example(conn: &zbus::Connection) -> anyhow::Result<()> {
-/// let entries = vec![(0usize, PathBuf::from("/usr/share/wallpapers/img0.jpg")),
-///                    (1usize, PathBuf::from("/usr/share/wallpapers/img1.jpg"))];
-/// set_wallpaper_multi_dbus(&entries, conn).await?;
-/// # Ok(()) }
-/// ```
+/// D-Bus `org.kde.PlasmaShell::evaluateScript` 経由でスクリーンごとに壁紙を設定する。
 async fn set_wallpaper_multi_dbus(
     entries: &[(usize, std::path::PathBuf)],
     conn: &zbus::Connection,

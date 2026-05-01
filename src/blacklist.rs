@@ -15,21 +15,9 @@ pub struct Blacklist {
 }
 
 impl Blacklist {
-    /// Load the blacklist from `kabekami_config_dir/blacklist.txt`.
-    ///
-    /// If the file does not exist, initialize an empty blacklist. `kabekami_config_dir`
-    /// is the path to the kabekami configuration directory (for example, `~/.config/kabekami`).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let cfg_dir = std::path::Path::new("/home/user/.config/kabekami");
-    /// let _blacklist = crate::blacklist::Blacklist::load(cfg_dir);
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if reading the file fails with an IO error other than `NotFound`.
+    /// `kabekami_config_dir/blacklist.txt` からブラックリストを読み込む。
+    /// ファイルが存在しない場合は空リストで初期化する。
+    /// `NotFound` 以外の IO エラーは `Err` として返す。
     pub fn load(kabekami_config_dir: &Path) -> Result<Self, io::Error> {
         let file_path = kabekami_config_dir.join("blacklist.txt");
         let content = match std::fs::read_to_string(&file_path) {
@@ -49,46 +37,13 @@ impl Blacklist {
         Ok(Self { paths, file_path })
     }
 
-    /// Check whether a path is present in the blacklist.
-    ///
-    /// # Returns
-    ///
-    /// `true` if the given `path` is present in the blacklist, `false` otherwise.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::path::Path;
-    /// # use kabekami::blacklist::Blacklist;
-    ///
-    /// let mut bl = Blacklist::load(&std::env::temp_dir());
-    /// let p = Path::new("/tmp/example-path-for-blacklist");
-    /// assert!(!bl.contains(p));
-    /// bl.add(p).unwrap();
-    /// assert!(bl.contains(p));
-    /// ```
+    /// パスがブラックリストに含まれるか判定する（O(1)）。
     pub fn contains(&self, path: &Path) -> bool {
         self.paths.contains(path)
     }
 
-    /// Adds `path` to the blacklist and persists the updated list to the configured file.
-    ///
-    /// If `path` was already present, this method does nothing.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if writing the blacklist file or creating its parent directory fails.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::path::Path;
-    /// // Initialize a blacklist rooted at a temporary directory (example only).
-    /// let tmp_dir = std::env::temp_dir().join(format!("kabekami_example_{}", std::process::id()));
-    /// let mut bl = Blacklist::load(&tmp_dir);
-    /// bl.add(Path::new("some/path")).unwrap();
-    /// assert!(bl.contains(Path::new("some/path")));
-    /// ```
+    /// パスをブラックリストに追加してファイルに永続化する。
+    /// すでに登録済みの場合は何もしない。保存失敗時はロールバックして `Err` を返す。
     pub fn add(&mut self, path: &Path) -> Result<()> {
         let path_buf = path.to_path_buf();
         if self.paths.insert(path_buf.clone()) {
@@ -100,27 +55,6 @@ impl Blacklist {
         Ok(())
     }
 
-    /// Persist the stored blacklist paths to the configured file on disk.
-    ///
-    /// This will create the file's parent directory if it does not exist and overwrite the file
-    /// with one path per line using the paths' display representation.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use std::path::PathBuf;
-    /// // create a temporary config dir
-    /// let tmp = tempfile::tempdir().unwrap();
-    /// let config_dir = tmp.path();
-    /// let mut bl = crate::blacklist::Blacklist::load(config_dir);
-    /// bl.add(&PathBuf::from("/some/path")).unwrap();
-    /// // `add` calls `save`, so the file should now exist
-    /// assert!(config_dir.join("blacklist.txt").exists());
-    /// ```
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` on success, or an `Err` propagated from underlying file-system operations.
     fn save(&self) -> Result<()> {
         if let Some(dir) = self.file_path.parent() {
             std::fs::create_dir_all(dir)?;
