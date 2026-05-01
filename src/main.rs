@@ -1,5 +1,6 @@
 //! kabekami — KDE Plasma 向け壁紙ローテーションデーモン
 
+mod blacklist;
 mod cache;
 mod config;
 mod daemon_iface;
@@ -13,6 +14,7 @@ mod scanner;
 mod scheduler;
 mod screen;
 mod session;
+mod shortcuts;
 mod tray;
 mod watcher;
 
@@ -44,6 +46,7 @@ enum CliCmd {
     ReloadConfig,
     FetchNow,
     TrashCurrent,
+    BlacklistCurrent,
     CopyToFavorites,
     Quit,
 }
@@ -63,6 +66,13 @@ async fn main() -> Result<()> {
 
     tracing::info!(?config, "loaded config");
 
+    // ブラックリストを起動時に読み込む
+    let kabekami_config_dir = Config::config_path()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut blacklist = blacklist::Blacklist::load(&kabekami_config_dir);
+
     // ローカルディレクトリ + オンラインソースのダウンロードディレクトリを統合してスキャン
     let mut scan_dirs = config.sources.directories.clone();
     for oc in &config.online_sources {
@@ -70,8 +80,11 @@ async fn main() -> Result<()> {
             scan_dirs.push(oc.resolved_download_dir());
         }
     }
-    let images = crate::scanner::scan(&scan_dirs, config.sources.recursive)
-        .context("failed to scan source directories")?;
+    let images: Vec<_> = crate::scanner::scan(&scan_dirs, config.sources.recursive)
+        .context("failed to scan source directories")?
+        .into_iter()
+        .filter(|p| !blacklist.contains(p))
+        .collect();
     let has_online = config.online_sources.iter().any(|s| s.enabled);
     if images.is_empty() {
         if has_online {
@@ -135,7 +148,10 @@ async fn main() -> Result<()> {
     let _dbus_conn = spawn_dbus_iface(cmd_tx.clone()).await;
 
     // セッション管理ウォッチャーを起動（ログアウト検知・Plasma 再起動検知）
-    session::spawn_session_watcher(cmd_tx).await;
+    session::spawn_session_watcher(cmd_tx.clone()).await;
+
+    // KDE グローバルショートカットを登録・監視する
+    shortcuts::spawn_shortcut_watcher(cmd_tx).await;
 
     // Plasma への壁紙適用ハンドル（D-Bus 接続を保持して再利用）
     let plasma_shell = plasma::PlasmaShell::new().await;
@@ -194,8 +210,11 @@ async fn main() -> Result<()> {
             Some(result) = online_rx.recv() => {
                 if !result.new_paths.is_empty() {
                     let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
-                    let added = result.new_paths.len();
-                    for path in result.new_paths {
+                    let new_paths: Vec<_> = result.new_paths.into_iter()
+                        .filter(|p| !blacklist.contains(p))
+                        .collect();
+                    let added = new_paths.len();
+                    for path in new_paths {
                         scheduler.add_image(path);
                     }
                     tracing::info!(
@@ -327,6 +346,27 @@ async fn main() -> Result<()> {
                                     }
                                     ticker = make_ticker(config.rotation.interval_secs);
                                 }
+                            }
+                        }
+                    }
+
+                    TrayCmd::BlacklistCurrent => {
+                        if let Some(path) = scheduler.current().cloned() {
+                            if let Err(e) = blacklist.add(&path) {
+                                tracing::error!("blacklist: failed to save {}: {}", path.display(), e);
+                            } else {
+                                tracing::info!("blacklisted: {}", path.display());
+                                scheduler.remove_image(&path);
+                                prefetcher.abort();
+                                if let Some(next) = scheduler.next() {
+                                    apply_and_notify(&next, &screens, &config, &cache,
+                                        &plasma_shell, &mut notifier, &tray_handle,
+                                        &mut prefetcher, &scheduler, "apply after blacklist failed").await;
+                                }
+                                if let Some(ref h) = tray_handle {
+                                    h.update(|t| t.image_count = scheduler.image_count()).await;
+                                }
+                                ticker = make_ticker(config.rotation.interval_secs);
                             }
                         }
                     }
@@ -468,8 +508,12 @@ async fn main() -> Result<()> {
             Some(ev) = watch_rx.recv() => {
                 match ev {
                     watcher::WatchEvent::Added(path) => {
-                        tracing::info!("new image detected: {}", path.display());
-                        scheduler.add_image(path);
+                        if blacklist.contains(&path) {
+                            tracing::debug!("ignoring blacklisted image: {}", path.display());
+                        } else {
+                            tracing::info!("new image detected: {}", path.display());
+                            scheduler.add_image(path);
+                        }
                     }
                     watcher::WatchEvent::Removed(path) => {
                         tracing::info!("image removed: {}", path.display());
@@ -539,6 +583,7 @@ fn parse_cli() -> Result<Option<CliCmd>> {
         "--reload-config"      => CliCmd::ReloadConfig,
         "--fetch-now"          => CliCmd::FetchNow,
         "--trash-current"      => CliCmd::TrashCurrent,
+        "--blacklist-current"  => CliCmd::BlacklistCurrent,
         "--copy-to-favorites"  => CliCmd::CopyToFavorites,
         "--quit"               => CliCmd::Quit,
         "--help" | "-h" => {
@@ -551,6 +596,7 @@ fn parse_cli() -> Result<Option<CliCmd>> {
             println!("  kabekami --reload-config      reload config.toml");
             println!("  kabekami --fetch-now          trigger online wallpaper fetch");
             println!("  kabekami --trash-current      move current wallpaper to trash");
+            println!("  kabekami --blacklist-current  never show current wallpaper again");
             println!("  kabekami --copy-to-favorites  copy current wallpaper to favorites folder");
             println!("  kabekami --quit               quit the daemon");
             std::process::exit(0);
@@ -571,6 +617,7 @@ async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
         CliCmd::ReloadConfig     => "ReloadConfig",
         CliCmd::FetchNow         => "FetchNow",
         CliCmd::TrashCurrent     => "TrashCurrent",
+        CliCmd::BlacklistCurrent => "BlacklistCurrent",
         CliCmd::CopyToFavorites  => "CopyToFavorites",
         CliCmd::Quit             => "Quit",
     };

@@ -60,4 +60,9 @@ impl DaemonIface {
     async fn copy_to_favorites(&self) {
         let _ = self.tx.send(TrayCmd::CopyToFavorites);
     }
+
+    /// 現在の壁紙をブラックリストに追加して次へ進む。
+    async fn blacklist_current(&self) {
+        let _ = self.tx.send(TrayCmd::BlacklistCurrent);
+    }
 }
