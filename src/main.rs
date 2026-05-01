@@ -51,6 +51,25 @@ enum CliCmd {
     Quit,
 }
 
+/// Starts the kabekami daemon: initializes configuration and subsystems, then runs the main event loop.
+///
+/// This function performs startup (CLI forwarding, config load, tracing/init of warn notifications,
+/// blacklist load, scanning image sources, monitor resolution, cache/scheduler/prefetcher setup,
+/// tray/D-Bus/session/shortcut/watchers, and online fetch preparation), optionally applies an initial
+/// wallpaper, and then enters the async main loop that handles scheduled rotations, online fetch results,
+/// tray/D-Bus commands, directory watch events, warn notifications, and Ctrl-C. On shutdown it aborts
+/// prefetching and cleanly stops the tray if present.
+///
+/// # Returns
+///
+/// `Ok(())` on clean shutdown; an `Err` if initialization fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Start the daemon (normally invoked by the program binary)
+/// // cargo run --bin kabekami
+/// ```
 #[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() -> Result<()> {
     // CLI コマンドが指定されていればデーモンへ転送して終了する
@@ -571,7 +590,21 @@ fn init_tracing(warn_notify: bool) -> Option<tokio::sync::mpsc::UnboundedReceive
     }
 }
 
-/// CLI 引数を解析して `CliCmd` を返す。引数がなければ `None`（デーモンモード）。
+/// Parse command-line arguments and map a single recognized option to a `CliCmd`.
+///
+/// If no arguments are provided, the function indicates daemon mode by returning `Ok(None)`.
+///
+/// # Returns
+///
+/// `Ok(Some(cmd))` when a known one-shot CLI option is provided, `Ok(None)` when no arguments are present.
+/// Returns an `Err` when an unknown option is given. The `--help`/`-h` option prints usage and exits.
+///
+/// # Examples
+///
+/// ```no_run
+/// // When invoked as: `kabekami --next`
+/// // parse_cli() will return `Ok(Some(CliCmd::Next))`.
+/// ```
 fn parse_cli() -> Result<Option<CliCmd>> {
     let mut args = std::env::args().skip(1).peekable();
     let Some(arg) = args.next() else { return Ok(None) };
@@ -606,7 +639,26 @@ fn parse_cli() -> Result<Option<CliCmd>> {
     Ok(Some(cmd))
 }
 
-/// D-Bus 経由でデーモンにコマンドを送信する。
+/// Send a one-shot CLI command to the running daemon over the session D-Bus.
+///
+/// Attempts to connect to the session bus and invoke the daemon method that
+/// corresponds to `cmd`. Returns an error if connecting to D-Bus or calling
+/// the method fails.
+///
+/// # Examples
+///
+/// ```
+/// # use anyhow::Result;
+/// # use tokio::runtime::Runtime;
+/// # use crate::CliCmd;
+/// # fn main() -> Result<()> {
+/// #     let rt = Runtime::new()?;
+/// #     rt.block_on(async {
+/// send_to_daemon(CliCmd::Next).await?;
+/// #     Ok::<(), anyhow::Error>(())
+/// #     })
+/// # }
+/// ```
 async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
     use daemon_iface::{BUS_NAME, OBJECT_PATH};
 
@@ -822,9 +874,32 @@ async fn process_image(
     .context("image processing task panicked")?
 }
 
-/// 壁紙を加工してキャッシュし、Plasma に反映する。
+/// Process the source image for the given screen(s), cache the processed output(s), and apply them to Plasma.
 ///
-/// マルチモニター時は各モニターの解像度で個別に処理して `set_wallpaper_multi` を呼ぶ。
+/// For a single monitor (or when no monitors are provided) the image is processed at the primary monitor's resolution
+/// (or a 1920×1080 fallback) and applied with `set_wallpaper`. For multiple monitors the image is processed concurrently
+/// for each monitor's resolution and applied with `set_wallpaper_multi`.
+///
+/// # Returns
+///
+/// `Ok(())` on success, `Err(...)` if image processing or applying the wallpaper fails.
+///
+/// # Examples
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use anyhow::Result;
+/// # async fn example() -> Result<()> {
+/// #     // The following are placeholders; provide real instances in actual code.
+/// #     let src = std::path::Path::new("/tmp/example.jpg");
+/// #     let screens: Vec<screen::Monitor> = vec![];
+/// #     let config = crate::Config::load()?; // replace with a test config as needed
+/// #     let cache = Arc::new(crate::Cache::new(&config)?);
+/// #     let plasma = crate::plasma::PlasmaShell::new().await?;
+/// crate::apply(src, &screens, &config, &cache, &plasma).await?;
+/// #     Ok(())
+/// # }
+/// ```
 async fn apply(
     src: &Path,
     screens: &[screen::Monitor],
@@ -854,7 +929,56 @@ async fn apply(
     }
 }
 
-/// apply + 通知 + tray 更新 + prefetch 開始をまとめて行う。
+/// Applies a wallpaper, updates user notifications and the system tray, and starts prefetching the next image.
+///
+/// On failure the function records an error via tracing, sends an error notification (including the failing path),
+/// and updates the tray to show the error. On success it clears any existing error notification, updates the tray
+/// to reflect the applied wallpaper, and starts prefetching the next image using the first monitor's resolution
+/// (or a fallback resolution if no monitors are available).
+///
+/// # Parameters
+///
+/// - `path`: filesystem path of the image to apply.
+/// - `screens`: list of detected monitors; the first monitor's resolution is used to determine prefetch dimensions.
+/// - `config`: current configuration used for applying and prefetch behavior.
+/// - `cache`: shared image cache used during processing.
+/// - `plasma`: handle to the Plasma shell used to set the wallpaper.
+/// - `notifier`: user-facing notifier used to show errors or clear them.
+/// - `tray_handle`: optional tray handle; tray state is updated when present.
+/// - `prefetcher`: prefetch controller; started on successful apply.
+/// - `scheduler`: scheduler used to determine the next image to prefetch.
+/// - `ctx`: short context string included in logs on error.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # async fn doc() {
+/// use std::path::Path;
+/// use std::sync::Arc;
+/// // placeholders for complex types
+/// let path = Path::new("/tmp/wallpaper.jpg");
+/// let screens: Vec<screen::Monitor> = Vec::new();
+/// let config: Config = todo!();
+/// let cache: Arc<Cache> = todo!();
+/// let plasma: plasma::PlasmaShell = todo!();
+/// let mut notifier: notify::Notifier = todo!();
+/// let tray_handle: Option<ksni::Handle<tray::KabekamiTray>> = None;
+/// let mut prefetcher: Prefetcher = Prefetcher::new();
+/// let scheduler: Scheduler = todo!();
+/// apply_and_notify(
+///     path,
+///     &screens,
+///     &config,
+///     &cache,
+///     &plasma,
+///     &mut notifier,
+///     &tray_handle,
+///     &mut prefetcher,
+///     &scheduler,
+///     "manual apply",
+/// ).await;
+/// # }
+/// ```
 async fn apply_and_notify(
     path: &Path,
     screens: &[screen::Monitor],

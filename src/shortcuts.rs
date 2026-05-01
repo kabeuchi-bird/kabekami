@@ -55,10 +55,22 @@ const ACTIONS: &[(&str, &str)] = &[
     ("blacklist_current",  "Never Show Again"),
 ];
 
-/// グローバルショートカット監視をバックグラウンドタスクとして起動する。
+/// Start a background task that registers and monitors KDE global shortcuts.
 ///
-/// kglobalaccel が利用できない環境では警告を出してサイレントに無効化される。
-/// ショートカットが押されると対応する `TrayCmd` を `tx` に送信する。
+/// When shortcuts for the application are activated, the corresponding `TrayCmd` variants are sent through `tx`. If the session D-Bus or required KDE proxies/signals are unavailable, the watcher logs a warning and disables itself without panicking.
+///
+/// # Examples
+///
+/// ```
+/// # use tokio::sync::mpsc::unbounded_channel;
+/// # use kabekami::shortcuts::spawn_shortcut_watcher;
+/// # use kabekami::tray::TrayCmd;
+/// # tokio::runtime::Runtime::new().unwrap().block_on(async {
+/// let (tx, _rx) = unbounded_channel::<TrayCmd>();
+/// // Spawns a background task that will send `TrayCmd` to `tx` when shortcuts are pressed.
+/// spawn_shortcut_watcher(tx).await;
+/// # });
+/// ```
 pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>) {
     let conn = match zbus::Connection::session().await {
         Ok(c) => c,

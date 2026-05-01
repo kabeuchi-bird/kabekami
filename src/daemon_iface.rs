@@ -56,12 +56,30 @@ impl DaemonIface {
         let _ = self.tx.send(TrayCmd::DeleteCurrent);
     }
 
-    /// 現在の壁紙をお気に入りフォルダにコピーする。
+    /// Copies the current wallpaper into the favorites folder.
+    ///
+    /// Requests the daemon to add the currently active wallpaper to the user's favorites; the daemon performs the file operation.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// // given a `DaemonIface` instance `iface` in an async context
+    /// iface.copy_to_favorites().await;
+    /// ```
     async fn copy_to_favorites(&self) {
         let _ = self.tx.send(TrayCmd::CopyToFavorites);
     }
 
-    /// 現在の壁紙をブラックリストに追加して次へ進む。
+    /// Requests the daemon to blacklist the current wallpaper and proceed to the next.
+    ///
+    /// This enqueues a command to blacklist the current wallpaper and advance the active wallpaper.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // In an async context:
+    /// // iface.blacklist_current().await;
+    /// ```
     async fn blacklist_current(&self) {
         let _ = self.tx.send(TrayCmd::BlacklistCurrent);
     }
