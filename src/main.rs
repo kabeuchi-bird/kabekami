@@ -173,8 +173,7 @@ async fn main() -> Result<()> {
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                screen_w, screen_h, "initial apply failed").await;
+                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "initial apply failed").await;
         }
     }
 
@@ -211,8 +210,7 @@ async fn main() -> Result<()> {
                     if was_empty {
                         if let Some(path) = scheduler.next() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                                screen_w, screen_h, "online: initial apply failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "online: initial apply failed").await;
                         }
                     }
                 }
@@ -224,8 +222,7 @@ async fn main() -> Result<()> {
                 }
                 if let Some(path) = scheduler.next() {
                     apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                        screen_w, screen_h, "auto apply failed").await;
+                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "auto apply failed").await;
                 }
             }
 
@@ -241,8 +238,7 @@ async fn main() -> Result<()> {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                                screen_w, screen_h, "tray Next failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Next failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -250,8 +246,7 @@ async fn main() -> Result<()> {
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                                screen_w, screen_h, "tray Prev failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Prev failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -325,8 +320,7 @@ async fn main() -> Result<()> {
                                     if let Some(next) = scheduler.next() {
                                         apply_and_notify(&next, &screens, &config, &cache,
                                             &plasma_shell, &mut notifier, &tray_handle,
-                                            &mut prefetcher, &scheduler,
-                                            screen_w, screen_h, "apply after trash failed").await;
+                                            &mut prefetcher, &scheduler, "apply after trash failed").await;
                                     }
                                     if let Some(ref h) = tray_handle {
                                         h.update(|t| t.image_count = scheduler.image_count()).await;
@@ -337,26 +331,21 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    TrayCmd::CopyToFavorites => {
-                        if let Some(path) = scheduler.current() {
-                            match &config.sources.favorites_dir {
-                                None => tracing::warn!("copy_to_favorites: favorites_dir not configured"),
-                                Some(fav_dir) => {
-                                    let fav_dir = fav_dir.clone();
-                                    let filename = path.file_name().map(|n| n.to_owned());
-                                    if let Some(filename) = filename {
-                                        let dest = fav_dir.join(&filename);
-                                        if let Err(e) = tokio::fs::create_dir_all(&fav_dir).await {
-                                            tracing::error!("favorites: failed to create dir {}: {}", fav_dir.display(), e);
-                                        } else {
-                                            match tokio::fs::copy(path, &dest).await {
-                                                Ok(_) => tracing::info!("copied to favorites: {}", dest.display()),
-                                                Err(e) => tracing::error!("favorites: failed to copy {}: {}", path.display(), e),
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                    TrayCmd::CopyToFavorites => 'fav: {
+                        let Some(path) = scheduler.current().map(|p| p.to_owned()) else { break 'fav };
+                        let Some(fav_dir) = config.sources.favorites_dir.clone() else {
+                            tracing::warn!("copy_to_favorites: favorites_dir not configured");
+                            break 'fav;
+                        };
+                        let Some(filename) = path.file_name().map(|n| n.to_owned()) else { break 'fav };
+                        let dest = fav_dir.join(&filename);
+                        if let Err(e) = tokio::fs::create_dir_all(&fav_dir).await {
+                            tracing::error!("favorites: failed to create dir {}: {}", fav_dir.display(), e);
+                            break 'fav;
+                        }
+                        match tokio::fs::copy(&path, &dest).await {
+                            Ok(_) => tracing::info!("copied to favorites: {}", dest.display()),
+                            Err(e) => tracing::error!("favorites: failed to copy {}: {}", path.display(), e),
                         }
                     }
 
@@ -420,8 +409,7 @@ async fn main() -> Result<()> {
 
                                 if let Some(cur) = prev_current {
                                     apply_and_notify(&cur, &screens, &config, &cache, &plasma_shell,
-                                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                                        screen_w, screen_h, "reload: reapply failed").await;
+                                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reload: reapply failed").await;
                                 }
 
                                 if let Some(ref h) = tray_handle {
@@ -466,8 +454,7 @@ async fn main() -> Result<()> {
                         tracing::info!("Plasma restarted, re-applying wallpaper");
                         if let Some(path) = scheduler.current().cloned() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                                screen_w, screen_h, "reapply after Plasma restart failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reapply after Plasma restart failed").await;
                         }
                     }
 
@@ -831,8 +818,6 @@ async fn apply_and_notify(
     tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
     prefetcher: &mut Prefetcher,
     scheduler: &Scheduler,
-    screen_w: u32,
-    screen_h: u32,
     ctx: &str,
 ) {
     if let Err(e) = apply(path, screens, config, cache, plasma).await {
@@ -843,7 +828,11 @@ async fn apply_and_notify(
     } else {
         notifier.clear();
         update_tray_ok(tray_handle, path).await;
-        start_prefetch(prefetcher, scheduler, screen_w, screen_h, config, cache);
+        let (w, h) = screens
+            .first()
+            .map(|m| (m.width, m.height))
+            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
+        start_prefetch(prefetcher, scheduler, w, h, config, cache);
     }
 }
 
