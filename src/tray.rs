@@ -32,6 +32,8 @@ pub enum TrayCmd {
     OpenCurrent,
     /// 現在の壁紙ファイルをソースフォルダから削除する
     DeleteCurrent,
+    /// 現在の壁紙を二度と表示しないリストに追加する
+    BlacklistCurrent,
     /// 現在の壁紙をお気に入りフォルダにコピーする
     CopyToFavorites,
     /// 設定ファイルを再読み込みする
@@ -122,6 +124,27 @@ impl ksni::Tray for KabekamiTray {
         }
     }
 
+    /// Builds the tray context menu reflecting the current tray state.
+    ///
+    /// The returned menu contains navigation items (Next/Prev), a pause/resume toggle that
+    /// updates local state optimistically, a Display Mode radio submenu, a Rotation Interval
+    /// radio submenu, actions for the current wallpaper (Open, Copy to Favorites, Delete, Blacklist)
+    /// which are enabled only when a current name is present (Copy to Favorites also requires a
+    /// favorites directory), utility actions (Reload Config, Open Settings, Fetch Now) and Quit.
+    /// Activating menu options sends corresponding `TrayCmd` messages to the notifier; selection
+    /// changes also update the tray's in-memory state so the UI reflects the change immediately.
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<ksni::MenuItem<Self>>` representing the full context menu for the tray.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Given a `tray: KabekamiTray`, obtain its menu items:
+    /// let items = tray.menu();
+    /// assert!(!items.is_empty());
+    /// ```
     fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
         use ksni::menu::*;
 
@@ -214,9 +237,10 @@ impl ksni::Tray for KabekamiTray {
             }
             .into(),
             MenuItem::Separator,
-            Self::tray_item(self.strings.open_current,      "document-open",      !self.current_name.is_empty(), TrayCmd::OpenCurrent),
+            Self::tray_item(self.strings.open_current,       "document-open",      !self.current_name.is_empty(), TrayCmd::OpenCurrent),
             Self::tray_item(self.strings.copy_to_favorites, "emblem-favorite",     !self.current_name.is_empty() && self.has_favorites_dir, TrayCmd::CopyToFavorites),
             Self::tray_item(self.strings.delete_current,    "edit-delete",         !self.current_name.is_empty(), TrayCmd::DeleteCurrent),
+            Self::tray_item(self.strings.blacklist_current, "dialog-cancel",       !self.current_name.is_empty(), TrayCmd::BlacklistCurrent),
             Self::tray_item(self.strings.reload_config, "view-refresh", true, TrayCmd::ReloadConfig),
             Self::tray_item(self.strings.open_settings, "preferences-system", true, TrayCmd::OpenSettings),
             Self::tray_item(self.strings.fetch_now, "download", true, TrayCmd::FetchNow),

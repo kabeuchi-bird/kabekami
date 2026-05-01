@@ -1,5 +1,6 @@
 //! kabekami — KDE Plasma 向け壁紙ローテーションデーモン
 
+mod blacklist;
 mod cache;
 mod config;
 mod daemon_iface;
@@ -13,6 +14,7 @@ mod scanner;
 mod scheduler;
 mod screen;
 mod session;
+mod shortcuts;
 mod tray;
 mod watcher;
 
@@ -44,10 +46,30 @@ enum CliCmd {
     ReloadConfig,
     FetchNow,
     TrashCurrent,
+    BlacklistCurrent,
     CopyToFavorites,
     Quit,
 }
 
+/// Starts the kabekami daemon: initializes configuration and subsystems, then runs the main event loop.
+///
+/// This function performs startup (CLI forwarding, config load, tracing/init of warn notifications,
+/// blacklist load, scanning image sources, monitor resolution, cache/scheduler/prefetcher setup,
+/// tray/D-Bus/session/shortcut/watchers, and online fetch preparation), optionally applies an initial
+/// wallpaper, and then enters the async main loop that handles scheduled rotations, online fetch results,
+/// tray/D-Bus commands, directory watch events, warn notifications, and Ctrl-C. On shutdown it aborts
+/// prefetching and cleanly stops the tray if present.
+///
+/// # Returns
+///
+/// `Ok(())` on clean shutdown; an `Err` if initialization fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// // Start the daemon (normally invoked by the program binary)
+/// // cargo run --bin kabekami
+/// ```
 #[tokio::main(flavor = "multi_thread", worker_threads = 1)]
 async fn main() -> Result<()> {
     // CLI コマンドが指定されていればデーモンへ転送して終了する
@@ -63,6 +85,14 @@ async fn main() -> Result<()> {
 
     tracing::info!(?config, "loaded config");
 
+    // ブラックリストを起動時に読み込む
+    let kabekami_config_dir = Config::config_path()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut blacklist = blacklist::Blacklist::load(&kabekami_config_dir)
+        .context("failed to load blacklist")?;
+
     // ローカルディレクトリ + オンラインソースのダウンロードディレクトリを統合してスキャン
     let mut scan_dirs = config.sources.directories.clone();
     for oc in &config.online_sources {
@@ -70,7 +100,7 @@ async fn main() -> Result<()> {
             scan_dirs.push(oc.resolved_download_dir());
         }
     }
-    let images = crate::scanner::scan(&scan_dirs, config.sources.recursive)
+    let images = build_filtered_images_list(&scan_dirs, config.sources.recursive, &blacklist)
         .context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
     if images.is_empty() {
@@ -135,7 +165,10 @@ async fn main() -> Result<()> {
     let _dbus_conn = spawn_dbus_iface(cmd_tx.clone()).await;
 
     // セッション管理ウォッチャーを起動（ログアウト検知・Plasma 再起動検知）
-    session::spawn_session_watcher(cmd_tx).await;
+    session::spawn_session_watcher(cmd_tx.clone()).await;
+
+    // KDE グローバルショートカットを登録・監視する
+    shortcuts::spawn_shortcut_watcher(cmd_tx).await;
 
     // Plasma への壁紙適用ハンドル（D-Bus 接続を保持して再利用）
     let plasma_shell = plasma::PlasmaShell::new().await;
@@ -173,8 +206,7 @@ async fn main() -> Result<()> {
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                screen_w, screen_h, "initial apply failed").await;
+                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "initial apply failed").await;
         }
     }
 
@@ -195,8 +227,11 @@ async fn main() -> Result<()> {
             Some(result) = online_rx.recv() => {
                 if !result.new_paths.is_empty() {
                     let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
-                    let added = result.new_paths.len();
-                    for path in result.new_paths {
+                    let new_paths: Vec<_> = result.new_paths.into_iter()
+                        .filter(|p| !blacklist.contains(p))
+                        .collect();
+                    let added = new_paths.len();
+                    for path in new_paths {
                         scheduler.add_image(path);
                     }
                     tracing::info!(
@@ -211,8 +246,7 @@ async fn main() -> Result<()> {
                     if was_empty {
                         if let Some(path) = scheduler.next() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                                screen_w, screen_h, "online: initial apply failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "online: initial apply failed").await;
                         }
                     }
                 }
@@ -224,8 +258,7 @@ async fn main() -> Result<()> {
                 }
                 if let Some(path) = scheduler.next() {
                     apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                        screen_w, screen_h, "auto apply failed").await;
+                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "auto apply failed").await;
                 }
             }
 
@@ -241,8 +274,7 @@ async fn main() -> Result<()> {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                                screen_w, screen_h, "tray Next failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Next failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -250,8 +282,7 @@ async fn main() -> Result<()> {
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                                screen_w, screen_h, "tray Prev failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Prev failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -325,8 +356,7 @@ async fn main() -> Result<()> {
                                     if let Some(next) = scheduler.next() {
                                         apply_and_notify(&next, &screens, &config, &cache,
                                             &plasma_shell, &mut notifier, &tray_handle,
-                                            &mut prefetcher, &scheduler,
-                                            screen_w, screen_h, "apply after trash failed").await;
+                                            &mut prefetcher, &scheduler, "apply after trash failed").await;
                                     }
                                     if let Some(ref h) = tray_handle {
                                         h.update(|t| t.image_count = scheduler.image_count()).await;
@@ -337,26 +367,52 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    TrayCmd::CopyToFavorites => {
-                        if let Some(path) = scheduler.current() {
-                            match &config.sources.favorites_dir {
-                                None => tracing::warn!("copy_to_favorites: favorites_dir not configured"),
-                                Some(fav_dir) => {
-                                    let fav_dir = fav_dir.clone();
-                                    let filename = path.file_name().map(|n| n.to_owned());
-                                    if let Some(filename) = filename {
-                                        let dest = fav_dir.join(&filename);
-                                        if let Err(e) = tokio::fs::create_dir_all(&fav_dir).await {
-                                            tracing::error!("favorites: failed to create dir {}: {}", fav_dir.display(), e);
-                                        } else {
-                                            match tokio::fs::copy(path, &dest).await {
-                                                Ok(_) => tracing::info!("copied to favorites: {}", dest.display()),
-                                                Err(e) => tracing::error!("favorites: failed to copy {}: {}", path.display(), e),
-                                            }
+                    TrayCmd::BlacklistCurrent => {
+                        if let Some(path) = scheduler.current().cloned() {
+                            if let Err(e) = blacklist.add(&path) {
+                                tracing::error!("blacklist: failed to save {}: {}", path.display(), e);
+                            } else {
+                                tracing::info!("blacklisted: {}", path.display());
+                                scheduler.remove_image(&path);
+                                prefetcher.abort();
+                                match scheduler.next() {
+                                    Some(next) => {
+                                        apply_and_notify(&next, &screens, &config, &cache,
+                                            &plasma_shell, &mut notifier, &tray_handle,
+                                            &mut prefetcher, &scheduler, "apply after blacklist failed").await;
+                                        if let Some(ref h) = tray_handle {
+                                            h.update(|t| t.image_count = scheduler.image_count()).await;
+                                        }
+                                    }
+                                    None => {
+                                        if let Some(ref h) = tray_handle {
+                                            h.update(|t| {
+                                                t.current_name = String::new();
+                                                t.image_count = scheduler.image_count();
+                                            }).await;
                                         }
                                     }
                                 }
+                                ticker = make_ticker(config.rotation.interval_secs);
                             }
+                        }
+                    }
+
+                    TrayCmd::CopyToFavorites => 'fav: {
+                        let Some(path) = scheduler.current().map(|p| p.to_owned()) else { break 'fav };
+                        let Some(fav_dir) = config.sources.favorites_dir.clone() else {
+                            tracing::warn!("copy_to_favorites: favorites_dir not configured");
+                            break 'fav;
+                        };
+                        let Some(filename) = path.file_name().map(|n| n.to_owned()) else { break 'fav };
+                        let dest = fav_dir.join(&filename);
+                        if let Err(e) = tokio::fs::create_dir_all(&fav_dir).await {
+                            tracing::error!("favorites: failed to create dir {}: {}", fav_dir.display(), e);
+                            break 'fav;
+                        }
+                        match tokio::fs::copy(&path, &dest).await {
+                            Ok(_) => tracing::info!("copied to favorites: {}", dest.display()),
+                            Err(e) => tracing::error!("favorites: failed to copy {}: {}", path.display(), e),
                         }
                     }
 
@@ -373,7 +429,13 @@ async fn main() -> Result<()> {
 
                                 let prev_current = scheduler.current().cloned();
 
-                                match scanner::scan(&new_cfg.sources.directories, new_cfg.sources.recursive) {
+                                let mut reload_scan_dirs = new_cfg.sources.directories.clone();
+                                for oc in &new_cfg.online_sources {
+                                    if oc.enabled {
+                                        reload_scan_dirs.push(oc.resolved_download_dir());
+                                    }
+                                }
+                                match build_filtered_images_list(&reload_scan_dirs, new_cfg.sources.recursive, &blacklist) {
                                     Ok(images) if !images.is_empty() => {
                                         tracing::info!("reload: {} image(s) found", images.len());
                                         scheduler = Scheduler::new(images, new_cfg.rotation.order);
@@ -420,8 +482,7 @@ async fn main() -> Result<()> {
 
                                 if let Some(cur) = prev_current {
                                     apply_and_notify(&cur, &screens, &config, &cache, &plasma_shell,
-                                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                                        screen_w, screen_h, "reload: reapply failed").await;
+                                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reload: reapply failed").await;
                                 }
 
                                 if let Some(ref h) = tray_handle {
@@ -466,8 +527,7 @@ async fn main() -> Result<()> {
                         tracing::info!("Plasma restarted, re-applying wallpaper");
                         if let Some(path) = scheduler.current().cloned() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
-                                screen_w, screen_h, "reapply after Plasma restart failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reapply after Plasma restart failed").await;
                         }
                     }
 
@@ -481,8 +541,12 @@ async fn main() -> Result<()> {
             Some(ev) = watch_rx.recv() => {
                 match ev {
                     watcher::WatchEvent::Added(path) => {
-                        tracing::info!("new image detected: {}", path.display());
-                        scheduler.add_image(path);
+                        if blacklist.contains(&path) {
+                            tracing::debug!("ignoring blacklisted image: {}", path.display());
+                        } else {
+                            tracing::info!("new image detected: {}", path.display());
+                            scheduler.add_image(path);
+                        }
                     }
                     watcher::WatchEvent::Removed(path) => {
                         tracing::info!("image removed: {}", path.display());
@@ -518,6 +582,25 @@ async fn main() -> Result<()> {
 
 // ── ヘルパー関数 ─────────────────────────────────────────────────────────────
 
+/// Scan directories for images and filter out blacklisted paths.
+///
+/// This helper ensures consistent blacklist filtering both at startup and during config reload.
+///
+/// # Returns
+///
+/// A vector of non-blacklisted image paths.
+fn build_filtered_images_list(
+    scan_dirs: &[std::path::PathBuf],
+    recursive: bool,
+    blacklist: &blacklist::Blacklist,
+) -> Result<Vec<std::path::PathBuf>> {
+    let images: Vec<_> = crate::scanner::scan(scan_dirs, recursive)?
+        .into_iter()
+        .filter(|p| !blacklist.contains(p))
+        .collect();
+    Ok(images)
+}
+
 fn init_tracing(warn_notify: bool) -> Option<tokio::sync::mpsc::UnboundedReceiver<String>> {
     use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
     let filter = EnvFilter::try_from_default_env()
@@ -540,7 +623,21 @@ fn init_tracing(warn_notify: bool) -> Option<tokio::sync::mpsc::UnboundedReceive
     }
 }
 
-/// CLI 引数を解析して `CliCmd` を返す。引数がなければ `None`（デーモンモード）。
+/// Parse command-line arguments and map a single recognized option to a `CliCmd`.
+///
+/// If no arguments are provided, the function indicates daemon mode by returning `Ok(None)`.
+///
+/// # Returns
+///
+/// `Ok(Some(cmd))` when a known one-shot CLI option is provided, `Ok(None)` when no arguments are present.
+/// Returns an `Err` when an unknown option is given. The `--help`/`-h` option prints usage and exits.
+///
+/// # Examples
+///
+/// ```no_run
+/// // When invoked as: `kabekami --next`
+/// // parse_cli() will return `Ok(Some(CliCmd::Next))`.
+/// ```
 fn parse_cli() -> Result<Option<CliCmd>> {
     let mut args = std::env::args().skip(1).peekable();
     let Some(arg) = args.next() else { return Ok(None) };
@@ -552,6 +649,7 @@ fn parse_cli() -> Result<Option<CliCmd>> {
         "--reload-config"      => CliCmd::ReloadConfig,
         "--fetch-now"          => CliCmd::FetchNow,
         "--trash-current"      => CliCmd::TrashCurrent,
+        "--blacklist-current"  => CliCmd::BlacklistCurrent,
         "--copy-to-favorites"  => CliCmd::CopyToFavorites,
         "--quit"               => CliCmd::Quit,
         "--help" | "-h" => {
@@ -564,6 +662,7 @@ fn parse_cli() -> Result<Option<CliCmd>> {
             println!("  kabekami --reload-config      reload config.toml");
             println!("  kabekami --fetch-now          trigger online wallpaper fetch");
             println!("  kabekami --trash-current      move current wallpaper to trash");
+            println!("  kabekami --blacklist-current  never show current wallpaper again");
             println!("  kabekami --copy-to-favorites  copy current wallpaper to favorites folder");
             println!("  kabekami --quit               quit the daemon");
             std::process::exit(0);
@@ -573,7 +672,26 @@ fn parse_cli() -> Result<Option<CliCmd>> {
     Ok(Some(cmd))
 }
 
-/// D-Bus 経由でデーモンにコマンドを送信する。
+/// Send a one-shot CLI command to the running daemon over the session D-Bus.
+///
+/// Attempts to connect to the session bus and invoke the daemon method that
+/// corresponds to `cmd`. Returns an error if connecting to D-Bus or calling
+/// the method fails.
+///
+/// # Examples
+///
+/// ```
+/// # use anyhow::Result;
+/// # use tokio::runtime::Runtime;
+/// # use crate::CliCmd;
+/// # fn main() -> Result<()> {
+/// #     let rt = Runtime::new()?;
+/// #     rt.block_on(async {
+/// send_to_daemon(CliCmd::Next).await?;
+/// #     Ok::<(), anyhow::Error>(())
+/// #     })
+/// # }
+/// ```
 async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
     use daemon_iface::{BUS_NAME, OBJECT_PATH};
 
@@ -584,6 +702,7 @@ async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
         CliCmd::ReloadConfig     => "ReloadConfig",
         CliCmd::FetchNow         => "FetchNow",
         CliCmd::TrashCurrent     => "TrashCurrent",
+        CliCmd::BlacklistCurrent => "BlacklistCurrent",
         CliCmd::CopyToFavorites  => "CopyToFavorites",
         CliCmd::Quit             => "Quit",
     };
@@ -788,9 +907,32 @@ async fn process_image(
     .context("image processing task panicked")?
 }
 
-/// 壁紙を加工してキャッシュし、Plasma に反映する。
+/// Process the source image for the given screen(s), cache the processed output(s), and apply them to Plasma.
 ///
-/// マルチモニター時は各モニターの解像度で個別に処理して `set_wallpaper_multi` を呼ぶ。
+/// For a single monitor (or when no monitors are provided) the image is processed at the primary monitor's resolution
+/// (or a 1920×1080 fallback) and applied with `set_wallpaper`. For multiple monitors the image is processed concurrently
+/// for each monitor's resolution and applied with `set_wallpaper_multi`.
+///
+/// # Returns
+///
+/// `Ok(())` on success, `Err(...)` if image processing or applying the wallpaper fails.
+///
+/// # Examples
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use anyhow::Result;
+/// # async fn example() -> Result<()> {
+/// #     // The following are placeholders; provide real instances in actual code.
+/// #     let src = std::path::Path::new("/tmp/example.jpg");
+/// #     let screens: Vec<screen::Monitor> = vec![];
+/// #     let config = crate::Config::load()?; // replace with a test config as needed
+/// #     let cache = Arc::new(crate::Cache::new(&config)?);
+/// #     let plasma = crate::plasma::PlasmaShell::new().await?;
+/// crate::apply(src, &screens, &config, &cache, &plasma).await?;
+/// #     Ok(())
+/// # }
+/// ```
 async fn apply(
     src: &Path,
     screens: &[screen::Monitor],
@@ -806,17 +948,70 @@ async fn apply(
         let output = process_image(src, w, h, config, cache).await?;
         plasma.set_wallpaper(&output).await
     } else {
-        let mut entries: Vec<(usize, std::path::PathBuf)> = Vec::new();
-        for (idx, monitor) in screens.iter().enumerate() {
-            let output = process_image(src, monitor.width, monitor.height, config, cache).await?;
-            entries.push((idx, output));
-        }
+        let entries: Vec<(usize, std::path::PathBuf)> =
+            futures_util::future::try_join_all(screens.iter().enumerate().map(
+                |(idx, monitor)| async move {
+                    process_image(src, monitor.width, monitor.height, config, cache)
+                        .await
+                        .map(|p| (idx, p))
+                },
+            ))
+            .await?;
         let entry_refs: Vec<(usize, &Path)> = entries.iter().map(|(i, p)| (*i, p.as_path())).collect();
         plasma.set_wallpaper_multi(&entry_refs).await
     }
 }
 
-/// apply + 通知 + tray 更新 + prefetch 開始をまとめて行う。
+/// Applies a wallpaper, updates user notifications and the system tray, and starts prefetching the next image.
+///
+/// On failure the function records an error via tracing, sends an error notification (including the failing path),
+/// and updates the tray to show the error. On success it clears any existing error notification, updates the tray
+/// to reflect the applied wallpaper, and starts prefetching the next image using the first monitor's resolution
+/// (or a fallback resolution if no monitors are available).
+///
+/// # Parameters
+///
+/// - `path`: filesystem path of the image to apply.
+/// - `screens`: list of detected monitors; the first monitor's resolution is used to determine prefetch dimensions.
+/// - `config`: current configuration used for applying and prefetch behavior.
+/// - `cache`: shared image cache used during processing.
+/// - `plasma`: handle to the Plasma shell used to set the wallpaper.
+/// - `notifier`: user-facing notifier used to show errors or clear them.
+/// - `tray_handle`: optional tray handle; tray state is updated when present.
+/// - `prefetcher`: prefetch controller; started on successful apply.
+/// - `scheduler`: scheduler used to determine the next image to prefetch.
+/// - `ctx`: short context string included in logs on error.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # async fn doc() {
+/// use std::path::Path;
+/// use std::sync::Arc;
+/// // placeholders for complex types
+/// let path = Path::new("/tmp/wallpaper.jpg");
+/// let screens: Vec<screen::Monitor> = Vec::new();
+/// let config: Config = todo!();
+/// let cache: Arc<Cache> = todo!();
+/// let plasma: plasma::PlasmaShell = todo!();
+/// let mut notifier: notify::Notifier = todo!();
+/// let tray_handle: Option<ksni::Handle<tray::KabekamiTray>> = None;
+/// let mut prefetcher: Prefetcher = Prefetcher::new();
+/// let scheduler: Scheduler = todo!();
+/// apply_and_notify(
+///     path,
+///     &screens,
+///     &config,
+///     &cache,
+///     &plasma,
+///     &mut notifier,
+///     &tray_handle,
+///     &mut prefetcher,
+///     &scheduler,
+///     "manual apply",
+/// ).await;
+/// # }
+/// ```
 async fn apply_and_notify(
     path: &Path,
     screens: &[screen::Monitor],
@@ -827,8 +1022,6 @@ async fn apply_and_notify(
     tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
     prefetcher: &mut Prefetcher,
     scheduler: &Scheduler,
-    screen_w: u32,
-    screen_h: u32,
     ctx: &str,
 ) {
     if let Err(e) = apply(path, screens, config, cache, plasma).await {
@@ -839,7 +1032,11 @@ async fn apply_and_notify(
     } else {
         notifier.clear();
         update_tray_ok(tray_handle, path).await;
-        start_prefetch(prefetcher, scheduler, screen_w, screen_h, config, cache);
+        let (w, h) = screens
+            .first()
+            .map(|m| (m.width, m.height))
+            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
+        start_prefetch(prefetcher, scheduler, w, h, config, cache);
     }
 }
 
