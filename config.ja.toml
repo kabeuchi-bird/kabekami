@@ -1,0 +1,140 @@
+# kabekami — 設定ファイルの全項目リファレンス
+# このファイルを ~/.config/kabekami/config.toml にコピーして編集してください。
+# すべてのキーは省略可能です。省略した場合はここに示すデフォルト値が使われます。
+
+# ── 画像ソース ────────────────────────────────────────────────────────────────
+
+[sources]
+# 壁紙画像を格納したディレクトリのリスト。
+# 複数指定できます。`~` はホームディレクトリに展開されます。
+directories = [
+    "~/Pictures/Wallpapers",
+]
+
+# true のとき、サブディレクトリを再帰的に走査します（デフォルト: true）。
+recursive = true
+
+# 「お気に入りにコピー」機能のコピー先フォルダ。
+# 未設定の場合はトレイのメニュー項目が無効になります。
+# favorites_dir = "~/Pictures/Favorites"
+
+# ── ローテーション ────────────────────────────────────────────────────────────
+
+[rotation]
+# 壁紙を切り替える間隔（秒）。
+# 最小値は 5 秒。それ未満の値は自動的に 5 に補正されます。
+interval_secs = 1800   # 30 分
+
+# 切り替え順序。
+#   "random"     — Fisher-Yates シャッフル。全画像を一巡してから再シャッフルする
+#                  ため、同じ画像が短時間に繰り返し表示されません（デフォルト）。
+#   "sequential" — ディレクトリのスキャン順に切り替えます。
+order = "random"
+
+# デーモン起動直後に壁紙をすぐ切り替えるか（デフォルト: true）。
+# false にすると、最初のインターバルが来るまで現在の壁紙を保持します。
+change_on_start = true
+
+# 現在の壁紙を表示している間に、次の画像をバックグラウンドで加工しておくか
+#（デフォルト: true）。間隔が短い場合に切り替えの遅延を減らせます。
+prefetch = true
+
+# ── 表示モード ────────────────────────────────────────────────────────────────
+
+[display]
+# 壁紙をどのように画面に表示するかを指定します。
+#
+#   "blur_pad"  — 元画像をぼかして暗くした背景の中央に元画像をオーバーレイします。
+#                 縦長の画像を横長画面に表示する場合などに特に効果的です（デフォルト）。
+#   "fill"      — 画面全体を埋めるようにスケール。はみ出た部分は切り取られます。
+#   "fit"       — 画面内に収まるようにスケール。余白は黒で塗りつぶされます。
+#   "stretch"   — アスペクト比を無視して画面サイズに引き伸ばします。
+#   "smart"     — 画像と画面のアスペクト比の差が小さければ "fill"、
+#                 大きければ "blur_pad" を自動選択します。
+mode = "blur_pad"
+
+# blur_pad モードのガウスぼかし半径（デフォルト: 25.0）。
+# 値が大きいほど背景がより柔らかくぼけます。推奨範囲: 15〜30。
+blur_sigma = 25.0
+
+# blur_pad モードの背景を暗くする割合（デフォルト: 0.1）。
+# 0.0 = 暗くしない、1.0 = 完全に黒。0.1 なら 10% 暗くなります。
+bg_darken = 0.1
+
+# ── 画像キャッシュ ────────────────────────────────────────────────────────────
+
+[cache]
+# 加工済み画像の保存先ディレクトリ。
+# デフォルトは ~/.cache/kabekami です。
+directory = "~/.cache/kabekami"
+
+# キャッシュの最大サイズ（MB）（デフォルト: 500）。
+# 上限を超えると、最も古いファイルから順に削除されます（LRU 退避）。
+# 0 を指定すると上限なし。
+max_size_mb = 500
+
+# ── ユーザーインターフェース ──────────────────────────────────────────────────
+
+[ui]
+# トレイメニューや通知の表示言語。
+#   "en"  — 英語（このキーが空または未設定の場合のデフォルト）
+#   "ja"  — 日本語
+# 環境変数 KABEKAMI_LANG を設定すると実行時に上書きできます。
+language = "ja"
+
+# WARN レベルのログイベントをデスクトップ通知として表示するか（デフォルト: false）。
+warn_notify = false
+
+# ── オンライン壁紙ソース ──────────────────────────────────────────────────────
+#
+# [[online_sources]] ブロックを追加するごとに 1 つのプロバイダーを設定できます。
+# 画像はプロバイダーごとのスケジュールで自動ダウンロードされます。
+# トレイの「今すぐ取得」でインターバルを無視してすぐにダウンロードできます。
+#
+# デフォルトのダウンロード先:
+#   ~/.local/share/kabekami/bing/
+#   ~/.local/share/kabekami/unsplash/
+#   ~/.local/share/kabekami/wallhaven/
+#   ~/.local/share/kabekami/reddit/
+
+# Bing Daily — API キー不要
+# Bing の「今日の壁紙」をダウンロードします。
+# 1 回の取得で最大 8 枚（Bing API の上限）。
+[[online_sources]]
+provider = "bing"
+enabled  = true
+count    = 8          # 保持する最新画像の枚数
+locale   = "ja-JP"   # 地域設定（例: "en-US", "en-GB"）。表示される画像が変わります
+# download_dir = "~/Pictures/Bing"   # カスタム保存先（省略可）
+# interval_hours = 24                # 再取得間隔（デフォルト 24 時間）
+
+# Unsplash — API キー必須（https://unsplash.com/developers で取得）
+[[online_sources]]
+provider = "unsplash"
+enabled  = true
+api_key  = "YOUR_UNSPLASH_ACCESS_KEY"
+query    = "nature landscape"   # 検索キーワード
+count    = 10                   # 保持する枚数。1 回の取得上限は 30 枚
+# quality = "regular"           # "regular"（デフォルト）または "full"（高解像度）
+# download_dir = "~/Pictures/Unsplash"
+# interval_hours = 24
+
+# Wallhaven — API キー任意（NSFW コンテンツの閲覧には必要）
+# API キーは https://wallhaven.cc/settings/account から取得できます。
+[[online_sources]]
+provider = "wallhaven"
+enabled  = true
+# api_key = "YOUR_WALLHAVEN_API_KEY"
+query    = "landscape"   # 検索キーワード
+count    = 10            # 保持する枚数。1 回の取得上限は 24 枚
+# download_dir = "~/Pictures/Wallhaven"
+# interval_hours = 24
+
+# Reddit — API キー不要
+[[online_sources]]
+provider   = "reddit"
+enabled    = true
+subreddit  = "wallpapers"   # サブレディット名（r/ は不要）
+count      = 10             # 保持する枚数。1 回の取得上限は 100 枚
+# download_dir = "~/Pictures/Reddit"
+# interval_hours = 1        # Reddit のデフォルトは 1 時間（投稿の更新が早いため）
