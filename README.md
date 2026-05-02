@@ -7,12 +7,14 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 - Rotates local images on a timer (sequential or random order)
 - **BlurPad** mode: overlays the original image centred on a blurred background (equivalent to [Variety](https://github.com/varietywalls/variety)'s blur-pad)
 - System tray resident (SNI protocol) with context menu controls
-- LRU cache of processed images (SHA256 keyed) for fast switching even at short intervals
+- LRU cache of processed images (FNV-1a keyed) for fast switching even at short intervals
 - Background prefetch: pre-processes the next image while the current one is displayed
 - **Multi-monitor support**: detects all connected monitors via `kscreen-doctor` and applies a resolution-optimised image to each screen independently
 - **Online wallpaper sources**: automatically download fresh wallpapers from Bing Daily, Unsplash, Wallhaven, and Reddit at configurable intervals
 - **Favorites folder**: copy the current wallpaper to a configured directory with one click
 - **Move to Trash**: send the current wallpaper to the system trash and advance to the next image
+- **Never Show Again**: permanently blacklist the current wallpaper so it is never shown again (persisted to `~/.config/kabekami/blacklist.txt`)
+- **Global shortcuts**: register system-wide keyboard shortcuts via **System Settings → Shortcuts → kabekami**
 - **Session management**: listens to `logind` for graceful shutdown and automatically re-applies the wallpaper when Plasma restarts
 - **GUI settings tool** (`kabekami-config`): six-tab egui interface with real-time BlurPad preview
 
@@ -358,6 +360,7 @@ kabekami
 ├── Open Current Wallpaper  — Open the current file with xdg-open
 ├── Copy to Favorites       — Copy the current wallpaper to favorites_dir (disabled if unset)
 ├── Move to Trash           — Send the current wallpaper to the system trash and advance
+├── Never Show Again        — Blacklist the current wallpaper permanently (saved to blacklist.txt)
 ├── Reload Config           — Reload config.toml without restarting
 ├── Open Settings           — Launch kabekami-config GUI
 ├── Fetch Wallpapers Now    — Trigger online provider fetch immediately (ignores interval)
@@ -378,6 +381,7 @@ kabekami --toggle-pause       # Pause / resume automatic rotation
 kabekami --reload-config      # Reload config.toml without restarting
 kabekami --fetch-now          # Trigger online wallpaper fetch immediately
 kabekami --trash-current      # Move current wallpaper to trash and advance
+kabekami --blacklist-current  # Never show current wallpaper again
 kabekami --copy-to-favorites  # Copy current wallpaper to favorites folder
 kabekami --quit               # Quit the daemon
 ```
@@ -408,6 +412,22 @@ RUST_LOG=kabekami=info kabekami 2>&1 | grep "monitor detected"
 # monitor detected: DP-1 2560x1440
 # monitor detected: HDMI-1 1920x1080
 ```
+
+## Global Shortcuts
+
+kabekami registers the following actions with KDE's global shortcut system (`org.kde.KGlobalAccel`).
+No default keys are assigned — configure them yourself via **System Settings → Shortcuts → kabekami**.
+
+| Action | Default key | Description |
+|--------|-------------|-------------|
+| Next Wallpaper | *(none)* | Switch to the next wallpaper immediately |
+| Previous Wallpaper | *(none)* | Go back to the previous wallpaper |
+| Pause / Resume | *(none)* | Toggle automatic rotation on/off |
+| Move to Trash | *(none)* | Send the current wallpaper to the system trash and advance |
+| Never Show Again | *(none)* | Blacklist the current wallpaper permanently |
+
+> If `kglobalaccel` is not available (non-KDE environments), kabekami logs a warning
+> and runs without shortcuts — all other functionality is unaffected.
 
 ## Session Management
 
@@ -440,6 +460,8 @@ Processed images are stored as WebP (lossless) under `~/.cache/kabekami/`. The c
 - Screen resolution (per monitor in multi-monitor setups)
 - Display mode
 - `blur_sigma` and `bg_darken` values
+
+> Cache keys are computed using FNV-1a 64-bit hashing (no external crate dependency).
 
 **The cache persists across restarts**, so subsequent switches of the same image with the same settings are nearly instant.
 

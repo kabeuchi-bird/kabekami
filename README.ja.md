@@ -7,12 +7,14 @@ KDE Plasma 向け壁紙ローテーションツール。Rust 製。
 - ローカル画像をタイマーで順次 / ランダム切り替え
 - **BlurPad** モード: 元画像をぼかした背景の中央に原画をオーバーレイ（[Variety](https://github.com/varietywalls/variety) の blur-pad に相当）
 - システムトレイ常駐（SNI プロトコル）＋コンテキストメニュー操作
-- 加工済み画像のキャッシュ（SHA256 キー、LRU 退避）で短い間隔でも高速
+- 加工済み画像のキャッシュ（FNV-1a キー、LRU 退避）で短い間隔でも高速
 - 次の画像を事前にバックグラウンド加工しておく先読み機構
 - **マルチモニター対応**: `kscreen-doctor` で全モニターを自動検出し、各画面の解像度に最適化した画像を個別に適用
 - **オンライン壁紙ソース**: Bing Daily・Unsplash・Wallhaven・Reddit から指定間隔で自動ダウンロード
 - **お気に入りフォルダ**: 現在の壁紙をワンクリックで指定フォルダにコピー
 - **ゴミ箱に移動**: 現在の壁紙をシステムのゴミ箱に送り、次の壁紙へ自動遷移
+- **二度と表示しない**: 現在の壁紙を永続的にブラックリスト登録（`~/.config/kabekami/blacklist.txt` に保存）
+- **グローバルショートカット**: **システム設定 → ショートカット → kabekami** でシステム全体のキーボードショートカットを設定可能
 - **セッション管理**: `logind` でグレースフルシャットダウン検知・Plasma 再起動時に壁紙を自動再適用
 - **GUI 設定ツール**（`kabekami-config`）: egui 製の 6 タブ設定画面。BlurPad のリアルタイムプレビュー付き
 
@@ -368,6 +370,7 @@ kabekami
 ├── 現在の壁紙を開く       — xdg-open で現在の壁紙ファイルを開く
 ├── お気に入りに追加       — 現在の壁紙を favorites_dir にコピー（未設定時は無効）
 ├── ゴミ箱に移動          — 現在の壁紙をゴミ箱へ移動し次の壁紙へ
+├── 二度と表示しない       — 現在の壁紙を永続ブラックリスト登録（blacklist.txt に保存）
 ├── 設定を再読み込み       — 再起動なしで config.toml を再読み込み
 ├── 設定を開く            — kabekami-config GUI を起動
 ├── 今すぐ取得            — オンラインソースを即時取得（インターバル無視）
@@ -388,6 +391,7 @@ kabekami --toggle-pause       # 自動切り替えの一時停止 / 再開
 kabekami --reload-config      # config.toml を再読み込み（再起動不要）
 kabekami --fetch-now          # オンラインソースを即時取得
 kabekami --trash-current      # 現在の壁紙をゴミ箱に移動して次へ
+kabekami --blacklist-current  # 現在の壁紙を二度と表示しないリストに追加
 kabekami --copy-to-favorites  # 現在の壁紙をお気に入りフォルダにコピー
 kabekami --quit               # デーモンを終了
 ```
@@ -418,6 +422,22 @@ RUST_LOG=kabekami=info kabekami 2>&1 | grep "monitor detected"
 # monitor detected: DP-1 2560x1440
 # monitor detected: HDMI-1 1920x1080
 ```
+
+## グローバルショートカット
+
+kabekami は KDE のグローバルショートカットシステム（`org.kde.KGlobalAccel`）に以下のアクションを登録します。
+デフォルトキーは割り当てられていません。**システム設定 → ショートカット → kabekami** から任意のキーを設定してください。
+
+| アクション | デフォルトキー | 説明 |
+|-----------|-------------|------|
+| Next Wallpaper | *(なし)* | 次の壁紙へ即座に切り替え |
+| Previous Wallpaper | *(なし)* | 前の壁紙に戻る |
+| Pause / Resume | *(なし)* | 自動切り替えのオン / オフをトグル |
+| Move to Trash | *(なし)* | 現在の壁紙をゴミ箱へ移動して次へ |
+| Never Show Again | *(なし)* | 現在の壁紙を永続ブラックリスト登録 |
+
+> `kglobalaccel` が利用できない環境（KDE 以外の DE）では警告を出してサイレントに無効化されます。
+> 他の機能への影響はありません。
 
 ## セッション管理
 
@@ -452,6 +472,8 @@ RUST_LOG=debug kabekami
 - 画面解像度（マルチモニター時はモニターごとに個別）
 - 表示モード
 - `blur_sigma` / `bg_darken` の値
+
+> キャッシュキーのハッシュには FNV-1a 64 ビットを使用しています（外部クレート不要）。
 
 **同じ画像・同じ設定であれば再起動後もキャッシュがヒット**するため、
 2 回目以降の切り替えは非常に高速です。
