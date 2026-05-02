@@ -19,9 +19,12 @@ pkgbase = kabekami-git
 	provides = kabekami-config
 	conflicts = kabekami
 	conflicts = kabekami-config
+	install = kabekami.install
 	source = kabekami-git::git+https://github.com/kabeuchi-bird/kabekami.git
 	source = kabekami-config.desktop
+	source = kabekami.install
 	sha256sums = SKIP
 	sha256sums = c5448fc1733c37ce87f24bcdddc732f1bf524cf4c1c94d4ef8735987d01df62d
+	sha256sums = 98f2a4c185312a68910e300ce428ad793481b893194ecbf86f12f5fec91313e1
 
 pkgname = kabekami-git
