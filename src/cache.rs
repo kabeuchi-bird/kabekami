@@ -80,7 +80,10 @@ impl Cache {
         tracing::debug!("cached: {}", path.display());
 
         if self.max_size_bytes > 0 {
-            let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let file_size = std::fs::metadata(&path)
+            .inspect_err(|e| tracing::debug!("cache: metadata failed for {}: {}", path.display(), e))
+            .map(|m| m.len())
+            .unwrap_or(0);
             let current = self.tracked_size.load(Ordering::Relaxed);
             // 未初期化 or 上限超過の場合のみフルスキャン（通常はインクリメントのみ）
             if current == u64::MAX || current.saturating_add(file_size) > self.max_size_bytes {

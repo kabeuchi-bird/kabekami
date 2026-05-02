@@ -361,7 +361,9 @@ fn expand_tilde(path: &Path) -> PathBuf {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+    let v = std::env::var("HOME").ok()?;
+    if v.is_empty() { return None; }
+    Some(PathBuf::from(v))
 }
 
 fn xdg_config_dir() -> Option<PathBuf> {

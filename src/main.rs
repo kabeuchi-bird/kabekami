@@ -245,7 +245,11 @@ async fn main() -> Result<()> {
 
             Some(cmd) = cmd_rx.recv() => {
                 let now = std::time::Instant::now();
-                if last_cmd_at.map_or(false, |t| now.duration_since(t) < Duration::from_millis(100)) {
+                // Quit と PlasmaRestarted はスロットリングをバイパスする
+                let throttle_exempt = matches!(cmd, TrayCmd::Quit | TrayCmd::PlasmaRestarted);
+                if !throttle_exempt
+                    && last_cmd_at.map_or(false, |t| now.duration_since(t) < Duration::from_millis(100))
+                {
                     tracing::debug!("command throttled (< 100ms): {:?}", cmd);
                     continue;
                 }
