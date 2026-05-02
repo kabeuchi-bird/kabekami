@@ -79,6 +79,30 @@ paru -S kabekami-git
    EOF
    ```
 
+   > `X-KDE-autostart-phase=2` ensures kabekami starts after Plasma has fully initialised.
+
+   Or use a **systemd user unit** for automatic restart on crash:
+
+   ```ini
+   # ~/.config/systemd/user/kabekami.service
+   [Unit]
+   Description=kabekami wallpaper rotator
+   After=graphical-session.target plasma-plasmashell.service
+
+   [Service]
+   ExecStart=%h/.local/bin/kabekami
+   Restart=on-failure
+   RestartSec=5
+
+   [Install]
+   WantedBy=graphical-session.target
+   ```
+
+   ```bash
+   systemctl --user enable --now kabekami.service
+   journalctl --user -u kabekami.service -f   # view logs
+   ```
+
 ## Usage
 
 ### Tray Menu
@@ -139,34 +163,54 @@ Register shortcuts in **System Settings → Shortcuts → kabekami** (no default
 
 Config file: `~/.config/kabekami/config.toml` (all values optional, defaults shown)
 
-### `[sources]`
+### `[sources]` — Image Sources
 
 ```toml
 [sources]
-directories    = ["~/Pictures/Wallpapers"]
-recursive      = true
+# Directories containing wallpaper images (multiple entries allowed)
+directories = [
+    "~/Pictures/Wallpapers",
+    "~/Pictures/Photos",
+]
+# Recursively scan subdirectories (default: true)
+recursive = true
+
+# Favorites folder — copy current wallpaper here via tray menu or --copy-to-favorites
+# If unset, the "Copy to Favorites" menu item is disabled.
 # favorites_dir = "~/Pictures/Favorites"
 ```
 
-Supported extensions: `jpg` `jpeg` `png` `webp` `bmp` `tiff` `gif`
+Supported extensions: `jpg` / `jpeg` / `png` / `webp` / `bmp` / `tiff` / `gif`
 
-### `[rotation]`
+### `[rotation]` — Rotation Settings
 
 ```toml
 [rotation]
-interval_secs  = 1800      # minimum 5 s
-order          = "random"  # "random" or "sequential"
+# Rotation interval in seconds. Minimum is 5 s (lower values are clamped).
+interval_secs = 1800
+
+# Rotation order
+#   "random"     — Fisher-Yates shuffle (visits every image once before reshuffling)
+#   "sequential" — in directory scan order
+order = "random"
+
+# Change wallpaper immediately on startup (default: true)
 change_on_start = true
-prefetch       = true
+
+# Pre-process the next wallpaper in the background (default: true)
+prefetch = true
 ```
 
-### `[display]`
+### `[display]` — Display Mode
 
 ```toml
 [display]
-mode       = "blur_pad"  # blur_pad / fill / fit / stretch / smart
-blur_sigma = 25.0        # BlurPad blur intensity (15–30 recommended)
-bg_darken  = 0.1         # BlurPad background darkness (0.0–1.0)
+# Display mode (see table below)
+mode = "blur_pad"
+
+# BlurPad parameters
+blur_sigma = 25.0   # Blur intensity (higher = more blur, recommended: 15–30)
+bg_darken  = 0.1    # Darken background by this fraction (0.0–1.0, 0.1 = 10% darker)
 ```
 
 | Mode | Behaviour |
@@ -177,22 +221,27 @@ bg_darken  = 0.1         # BlurPad background darkness (0.0–1.0)
 | `stretch` | Stretch, ignoring aspect ratio |
 | `smart` | Auto-selects `fill` or `blur_pad` by aspect ratio |
 
-### `[cache]`
+### `[cache]` — Cache Settings
 
 ```toml
 [cache]
-directory   = "~/.cache/kabekami"
+# Directory for processed image cache (default: ~/.cache/kabekami)
+directory = "~/.cache/kabekami"
+# Maximum cache size in MB. Oldest files are evicted when exceeded (default: 500)
 max_size_mb = 500
 ```
 
 Clear cache: **kabekami-config → Cache → Clear Cache**, or `rm -rf ~/.cache/kabekami/`.
 
-### `[ui]`
+### `[ui]` — UI Language
 
 ```toml
 [ui]
-language     = "en"    # "en" or "ja"
-warn_notify  = false   # show WARN logs as desktop notifications
+# Display language: "en" (English, default) or "ja" (Japanese)
+# Can be overridden at runtime with the KABEKAMI_LANG environment variable
+language = "en"
+# Show WARN-level log events as desktop notifications (default: false)
+warn_notify = false
 ```
 
 ### `[[online_sources]]`
