@@ -79,6 +79,30 @@ paru -S kabekami-git
    EOF
    ```
 
+   > `X-KDE-autostart-phase=2` により Plasma の初期化完了後に起動するためトレイアイコンが確実に表示されます。
+
+   クラッシュ時の自動再起動が必要な場合は **systemd ユーザーユニット** を使用できます:
+
+   ```ini
+   # ~/.config/systemd/user/kabekami.service
+   [Unit]
+   Description=kabekami wallpaper rotator
+   After=graphical-session.target plasma-plasmashell.service
+
+   [Service]
+   ExecStart=%h/.local/bin/kabekami
+   Restart=on-failure
+   RestartSec=5
+
+   [Install]
+   WantedBy=graphical-session.target
+   ```
+
+   ```bash
+   systemctl --user enable --now kabekami.service
+   journalctl --user -u kabekami.service -f   # ログを確認
+   ```
+
 ## 使い方
 
 ### システムトレイメニュー
@@ -139,34 +163,54 @@ kabekami --quit
 
 設定ファイルのパス: `~/.config/kabekami/config.toml`（すべての値は省略可、省略時はデフォルト値を使用）
 
-### `[sources]`
+### `[sources]` — 画像ソース
 
 ```toml
 [sources]
-directories    = ["~/Pictures/Wallpapers"]
-recursive      = true
+# 壁紙画像を格納したディレクトリ（複数指定可）
+directories = [
+    "~/Pictures/Wallpapers",
+    "~/Pictures/Photos",
+]
+# サブディレクトリを再帰的に走査するか（デフォルト: true）
+recursive = true
+
+# お気に入りフォルダ — トレイメニューまたは --copy-to-favorites で現在の壁紙をここにコピー
+# 未設定の場合は「お気に入りに追加」メニュー項目が無効になります
 # favorites_dir = "~/Pictures/Favorites"
 ```
 
-対応拡張子: `jpg` `jpeg` `png` `webp` `bmp` `tiff` `gif`
+対応拡張子: `jpg` / `jpeg` / `png` / `webp` / `bmp` / `tiff` / `gif`
 
-### `[rotation]`
+### `[rotation]` — 切り替え設定
 
 ```toml
 [rotation]
-interval_secs   = 1800      # 最小 5 秒
-order           = "random"  # "random" または "sequential"
+# 切り替え間隔（秒）。最小値は 5 秒（下限未満は自動補正）
+interval_secs = 1800
+
+# 切り替え順序
+#   "random"     — Fisher-Yates シャッフル（全画像を一巡してから再シャッフル）
+#   "sequential" — ディレクトリ走査順に順次切り替え
+order = "random"
+
+# 起動直後に壁紙を即時切り替えるか（デフォルト: true）
 change_on_start = true
-prefetch        = true
+
+# 次の壁紙を事前加工しておくか（短い間隔のときに有効）（デフォルト: true）
+prefetch = true
 ```
 
-### `[display]`
+### `[display]` — 表示モード
 
 ```toml
 [display]
-mode       = "blur_pad"  # blur_pad / fill / fit / stretch / smart
-blur_sigma = 25.0        # BlurPad ぼかし強度（推奨: 15〜30）
-bg_darken  = 0.1         # BlurPad 背景の暗さ（0.0〜1.0）
+# 表示モード（詳細は下記参照）
+mode = "blur_pad"
+
+# BlurPad 用パラメータ
+blur_sigma = 25.0   # ぼかし強度（大きいほどぼける、推奨: 15〜30）
+bg_darken  = 0.1    # 背景を暗くする割合（0.0〜1.0、0.1 = 10%暗く）
 ```
 
 | モード | 動作 |
@@ -177,22 +221,27 @@ bg_darken  = 0.1         # BlurPad 背景の暗さ（0.0〜1.0）
 | `stretch` | アスペクト比無視で引き伸ばし |
 | `smart` | アスペクト比の差に応じて `fill` / `blur_pad` を自動選択 |
 
-### `[cache]`
+### `[cache]` — キャッシュ設定
 
 ```toml
 [cache]
-directory   = "~/.cache/kabekami"
+# 加工済み画像の保存先（デフォルト: ~/.cache/kabekami）
+directory = "~/.cache/kabekami"
+# キャッシュの最大サイズ（MB）。超えたら古いファイルから削除（デフォルト: 500）
 max_size_mb = 500
 ```
 
 キャッシュのクリアは **kabekami-config → Cache → Clear Cache**、または `rm -rf ~/.cache/kabekami/`。
 
-### `[ui]`
+### `[ui]` — 表示言語
 
 ```toml
 [ui]
-language    = "ja"    # "en" または "ja"
-warn_notify = false   # WARN ログをデスクトップ通知として表示
+# 表示言語: "en"（英語、デフォルト）/ "ja"（日本語）
+# 環境変数 KABEKAMI_LANG で実行時に上書き可能
+language = "ja"
+# WARN レベルのログをデスクトップ通知として表示する（デフォルト: false）
+warn_notify = false
 ```
 
 ### `[[online_sources]]`
