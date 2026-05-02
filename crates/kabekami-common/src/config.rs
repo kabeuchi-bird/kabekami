@@ -463,4 +463,26 @@ max_size_mb = 123
         assert_eq!(loaded.display.mode, DisplayMode::Fill);
         assert!((loaded.display.blur_sigma - 15.0).abs() < f32::EPSILON);
     }
+
+    /// Regression test: empty HOME env var should return None.
+    /// Note: This test modifies global environment state and should be run serially
+    /// to avoid interference with other tests. Run tests with `--test-threads=1` if flaky.
+    #[test]
+    fn home_dir_empty_string_returns_none() {
+        // Save original HOME value
+        let original_home = std::env::var("HOME").ok();
+
+        // Set HOME to empty string
+        std::env::set_var("HOME", "");
+
+        // home_dir() should return None for empty string
+        let result = home_dir();
+        assert_eq!(result, None, "home_dir() should return None when HOME is empty string");
+
+        // Restore original environment state to avoid test pollution
+        match original_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }
