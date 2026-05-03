@@ -108,7 +108,7 @@ enable_blacklist = true
 # Maximum 8 images per fetch (Bing API limit).
 [[online_sources]]
 provider = "bing"
-enabled  = true
+enabled  = false
 count    = 8          # number of recent Bing daily images to keep
 locale   = "en-US"    # e.g. "ja-JP", "en-GB" — controls the regional image
 # download_dir = "~/Pictures/Bing"   # custom save location (optional)
@@ -117,7 +117,7 @@ locale   = "en-US"    # e.g. "ja-JP", "en-GB" — controls the regional image
 # Unsplash — API key required (https://unsplash.com/developers)
 [[online_sources]]
 provider = "unsplash"
-enabled  = true
+enabled  = false
 api_key  = "YOUR_UNSPLASH_ACCESS_KEY"
 query    = "nature landscape"   # search keywords
 count    = 10                   # images to keep; max 30 per fetch
@@ -129,7 +129,7 @@ count    = 10                   # images to keep; max 30 per fetch
 # https://wallhaven.cc/settings/account — copy your API key from there.
 [[online_sources]]
 provider = "wallhaven"
-enabled  = true
+enabled  = false
 # api_key = "YOUR_WALLHAVEN_API_KEY"
 query    = "landscape"   # search keywords
 count    = 10            # images to keep; max 24 per fetch
@@ -139,7 +139,7 @@ count    = 10            # images to keep; max 24 per fetch
 # Reddit — no API key required
 [[online_sources]]
 provider   = "reddit"
-enabled    = true
+enabled    = false
 subreddit  = "wallpapers"   # subreddit name without the r/ prefix
 count      = 10             # images to keep; max 100 per fetch
 # download_dir = "~/Pictures/Reddit"
