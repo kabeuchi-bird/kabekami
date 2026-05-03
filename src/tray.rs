@@ -71,6 +71,8 @@ pub struct KabekamiTray {
     pub strings: &'static UiStrings,
     /// お気に入りフォルダが設定されているか（メニュー項目の有効/無効に使う）。
     pub has_favorites_dir: bool,
+    /// ブラックリスト機能が有効か（config.ui.enable_blacklist）。
+    pub blacklist_enabled: bool,
 }
 
 impl KabekamiTray {
@@ -219,7 +221,7 @@ impl ksni::Tray for KabekamiTray {
             Self::tray_item(self.strings.open_current,       "document-open",      !self.current_name.is_empty(), TrayCmd::OpenCurrent),
             Self::tray_item(self.strings.copy_to_favorites, "emblem-favorite",     !self.current_name.is_empty() && self.has_favorites_dir, TrayCmd::CopyToFavorites),
             Self::tray_item(self.strings.delete_current,    "edit-delete",         !self.current_name.is_empty(), TrayCmd::DeleteCurrent),
-            Self::tray_item(self.strings.blacklist_current, "dialog-cancel",       !self.current_name.is_empty(), TrayCmd::BlacklistCurrent),
+            Self::tray_item(self.strings.blacklist_current, "dialog-cancel",       !self.current_name.is_empty() && self.blacklist_enabled, TrayCmd::BlacklistCurrent),
             Self::tray_item(self.strings.reload_config, "view-refresh", true, TrayCmd::ReloadConfig),
             Self::tray_item(self.strings.open_settings, "preferences-system", true, TrayCmd::OpenSettings),
             Self::tray_item(self.strings.fetch_now, "download", true, TrayCmd::FetchNow),
@@ -239,6 +241,7 @@ pub async fn spawn_tray(
     interval_secs: u64,
     lang: Lang,
     has_favorites_dir: bool,
+    blacklist_enabled: bool,
 ) -> Option<ksni::Handle<KabekamiTray>> {
     use ksni::TrayMethods;
 
@@ -252,6 +255,7 @@ pub async fn spawn_tray(
         image_count: 0,
         strings: crate::i18n::strings(lang),
         has_favorites_dir,
+        blacklist_enabled,
     };
 
     // `assume_sni_available(true)` にすることで、デスクトップ環境の起動が
