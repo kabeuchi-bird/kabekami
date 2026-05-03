@@ -106,7 +106,7 @@ enable_blacklist = true
 # 1 回の取得で最大 8 枚（Bing API の上限）。
 [[online_sources]]
 provider = "bing"
-enabled  = true
+enabled  = false
 count    = 8          # 保持する最新画像の枚数
 locale   = "ja-JP"   # 地域設定（例: "en-US", "en-GB"）。表示される画像が変わります
 # download_dir = "~/Pictures/Bing"   # カスタム保存先（省略可）
@@ -115,7 +115,7 @@ locale   = "ja-JP"   # 地域設定（例: "en-US", "en-GB"）。表示される
 # Unsplash — API キー必須（https://unsplash.com/developers で取得）
 [[online_sources]]
 provider = "unsplash"
-enabled  = true
+enabled  = false
 api_key  = "YOUR_UNSPLASH_ACCESS_KEY"
 query    = "nature landscape"   # 検索キーワード
 count    = 10                   # 保持する枚数。1 回の取得上限は 30 枚
@@ -127,7 +127,7 @@ count    = 10                   # 保持する枚数。1 回の取得上限は 3
 # API キーは https://wallhaven.cc/settings/account から取得できます。
 [[online_sources]]
 provider = "wallhaven"
-enabled  = true
+enabled  = false
 # api_key = "YOUR_WALLHAVEN_API_KEY"
 query    = "landscape"   # 検索キーワード
 count    = 10            # 保持する枚数。1 回の取得上限は 24 枚
@@ -137,7 +137,7 @@ count    = 10            # 保持する枚数。1 回の取得上限は 24 枚
 # Reddit — API キー不要
 [[online_sources]]
 provider   = "reddit"
-enabled    = true
+enabled    = false
 subreddit  = "wallpapers"   # サブレディット名（r/ は不要）
 count      = 10             # 保持する枚数。1 回の取得上限は 100 枚
 # download_dir = "~/Pictures/Reddit"
