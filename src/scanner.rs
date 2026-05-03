@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 /// 画像として扱う拡張子（大文字小文字を無視して比較する）。
+/// `image` クレートで有効化している feature と揃える（jpeg/png/webp/avif）。
 pub(crate) const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "webp", "bmp", "tiff", "tif", "gif",
+    "jpg", "jpeg", "png", "webp", "avif",
 ];
 
 /// 指定されたディレクトリを走査して画像ファイルのパス一覧を返す。

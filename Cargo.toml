@@ -3,6 +3,14 @@ members = ["crates/kabekami-common", "crates/kabekami-config"]
 default-members = [".", "crates/kabekami-config"]
 resolver = "2"
 
+# 全クレートで共有する依存。features を 1 箇所に集約することで
+# クレート間で feature 集合がズレてビルドが分裂するのを防ぐ。
+[workspace.dependencies]
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "avif"] }
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+
 [package]
 name = "kabekami"
 version = "0.1.0"
@@ -11,16 +19,16 @@ description = "KDE Plasma wallpaper rotation tool with Variety-inspired BlurPad 
 license = "MIT"
 
 [dependencies]
-anyhow = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "avif", "bmp", "tiff", "gif"] }
+anyhow.workspace = true
+image.workspace = true
+serde.workspace = true
+tracing.workspace = true
 kabekami-common = { path = "crates/kabekami-common" }
 ksni = "0.3.4"
 notify = "7"
 fastrand = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
-serde = { version = "1", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "fs"] }
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 trash = "5.2.5"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
