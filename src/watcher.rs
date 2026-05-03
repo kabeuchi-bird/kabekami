@@ -15,7 +15,7 @@
 //! }
 //! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use notify::{
     event::{ModifyKind, RenameMode},
@@ -104,6 +104,62 @@ pub fn spawn(
         return None;
     }
 
+    Some((DirWatcher { _inner: watcher }, rx))
+}
+
+/// 設定ファイル（`~/.config/kabekami/config.toml`）の変更を監視する。
+///
+/// エディタや設定 GUI による上書き保存を検知するために、ファイル単体ではなく
+/// 親ディレクトリを監視する（atomic-write 系エディタはファイルを置換するため
+/// ファイル直接の watch だと取りこぼすことがある）。
+///
+/// イベントは内容なし `()` のチャンネルで通知する。バーストはメインループ側の
+/// 100ms スロットルおよび `ReloadConfig` ハンドラの冪等性で吸収する。
+pub fn spawn_config(config_path: &Path) -> Option<(DirWatcher, UnboundedReceiver<()>)> {
+    let parent = config_path.parent()?.to_path_buf();
+    if let Err(e) = std::fs::create_dir_all(&parent) {
+        tracing::warn!("failed to create config dir {}: {}", parent.display(), e);
+        return None;
+    }
+
+    let (tx, rx) = mpsc::unbounded_channel::<()>();
+    let target = config_path.to_path_buf();
+
+    let mut watcher = match notify::recommended_watcher(
+        move |res: notify::Result<notify::Event>| {
+            let Ok(event) = res else { return };
+            // 書き込み・置換に関連するイベントのみ
+            if !matches!(
+                event.kind,
+                EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+            ) {
+                return;
+            }
+            if event.paths.iter().any(|p| p == &target) {
+                let _ = tx.send(());
+            }
+        },
+    ) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("failed to create config watcher: {}", e);
+            return None;
+        }
+    };
+
+    if let Err(e) = watcher.watch(&parent, RecursiveMode::NonRecursive) {
+        tracing::warn!(
+            "failed to watch config dir {}: {}",
+            parent.display(),
+            e
+        );
+        return None;
+    }
+
+    tracing::info!(
+        "watching {} for config changes",
+        config_path.display()
+    );
     Some((DirWatcher { _inner: watcher }, rx))
 }
 
