@@ -511,6 +511,19 @@ max_size_mb = 123
     }
 
     #[test]
+    fn ui_defaults() {
+        let ui = Ui::default();
+        assert!(ui.language.is_empty());
+        assert!(!ui.warn_notify);
+        assert!(ui.enable_blacklist, "enable_blacklist must default to true");
+
+        // TOML omit-all should produce the same defaults
+        let parsed: Ui = toml::from_str("").unwrap();
+        assert!(parsed.enable_blacklist);
+        assert!(!parsed.warn_notify);
+    }
+
+    #[test]
     fn home_dir_empty_string_returns_none() {
         let _guard = EnvGuard::set("HOME", "");
         assert_eq!(home_dir(), None);
