@@ -11,6 +11,7 @@ makedepends=('rust' 'cargo' 'git' 'pkg-config')
 optdepends=(
     'kscreen: screen resolution auto-detection via kscreen-doctor'
     'noto-fonts-cjk: Japanese text in the settings GUI'
+    'xdg-desktop-portal-kde: native KDE file picker dialogs in kabekami-config'
 )
 provides=('kabekami' 'kabekami-config')
 conflicts=('kabekami' 'kabekami-config')

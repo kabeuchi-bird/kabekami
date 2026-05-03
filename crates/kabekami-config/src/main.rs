@@ -63,6 +63,32 @@ fn setup_fonts(ctx: &egui::Context) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// xdg-desktop-portal 経由でフォルダ選択ダイアログを開く。
+/// `start` が `Some` でかつ存在すればそこを初期表示にする。
+/// キャンセル時は `None`。
+fn pick_folder(start: Option<&std::path::Path>) -> Option<PathBuf> {
+    let mut dlg = rfd::FileDialog::new().set_title("フォルダを選択 / Select folder");
+    if let Some(p) = start.filter(|p| p.exists()) {
+        dlg = dlg.set_directory(p);
+    } else if let Some(home) = std::env::var_os("HOME") {
+        dlg = dlg.set_directory(home);
+    }
+    dlg.pick_folder()
+}
+
+/// 画像ファイル選択ダイアログ（プレビュー用）。
+fn pick_image_file(start: Option<&std::path::Path>) -> Option<PathBuf> {
+    let mut dlg = rfd::FileDialog::new()
+        .set_title("画像を選択 / Select image")
+        .add_filter("画像 / Images", &["jpg", "jpeg", "png", "webp", "avif"]);
+    if let Some(p) = start.filter(|p| p.exists()) {
+        dlg = dlg.set_directory(p);
+    } else if let Some(home) = std::env::var_os("HOME") {
+        dlg = dlg.set_directory(home);
+    }
+    dlg.pick_file()
+}
+
 fn compute_dir_size(dir: &std::path::Path) -> u64 {
     std::fs::read_dir(dir)
         .into_iter()
@@ -370,6 +396,12 @@ impl KabekamiApp {
                     self.new_dir_input.clear();
                 }
             }
+            if ui.button("📁 参照 / Browse…").clicked() {
+                if let Some(path) = pick_folder(None) {
+                    self.config.sources.directories.push(path);
+                    self.new_dir_input.clear();
+                }
+            }
         });
     }
 
@@ -456,10 +488,30 @@ impl KabekamiApp {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.preview_image_path)
                     .hint_text("/path/to/image.jpg")
-                    .desired_width(500.0),
+                    .desired_width(440.0),
             );
-            let preview_clicked = ui.button("▶ プレビュー").clicked();
-            if preview_clicked || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) || mode_changed {
+            let mut should_preview =
+                ui.button("▶ プレビュー").clicked()
+                || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                || mode_changed;
+            if ui.button("📁 参照").clicked() {
+                let cur_path = std::path::Path::new(self.preview_image_path.trim());
+                let start = cur_path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty() && p.exists())
+                    .or_else(|| {
+                        self.config
+                            .sources
+                            .directories
+                            .first()
+                            .map(|p| p.as_path())
+                    });
+                if let Some(path) = pick_image_file(start) {
+                    self.preview_image_path = path.to_string_lossy().into_owned();
+                    should_preview = true;
+                }
+            }
+            if should_preview {
                 self.request_preview();
             }
         });
@@ -488,6 +540,12 @@ impl KabekamiApp {
             if ui.text_edit_singleline(&mut dir_str).changed() {
                 self.config.cache.directory = PathBuf::from(dir_str);
                 self.cache_size_bytes = None; // ディレクトリ変更時はリセット
+            }
+            if ui.button("📁 参照").clicked() {
+                if let Some(path) = pick_folder(Some(&self.config.cache.directory)) {
+                    self.config.cache.directory = path;
+                    self.cache_size_bytes = None;
+                }
             }
         });
 
@@ -590,13 +648,18 @@ impl KabekamiApp {
                         if ui.add(
                             egui::TextEdit::singleline(&mut dir_str)
                                 .hint_text(hint)
-                                .desired_width(300.0)
+                                .desired_width(260.0)
                         ).changed() {
                             oc.download_dir = if dir_str.is_empty() {
                                 None
                             } else {
                                 Some(PathBuf::from(dir_str))
                             };
+                        }
+                        if ui.button("📁").clicked() {
+                            if let Some(path) = pick_folder(oc.download_dir.as_deref()) {
+                                oc.download_dir = Some(path);
+                            }
                         }
                     });
                 });
