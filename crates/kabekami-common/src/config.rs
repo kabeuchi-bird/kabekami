@@ -390,6 +390,38 @@ fn xdg_data_local_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    // Serialises all tests that mutate environment variables.
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    /// RAII guard: acquires ENV_LOCK, sets `key` to `value`, restores original on drop.
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let mutex = ENV_LOCK.get_or_init(|| Mutex::new(()));
+            let lock = mutex.lock().unwrap_or_else(|e| e.into_inner());
+            let original = std::env::var(key).ok();
+            // SAFETY: single-threaded thanks to the lock above.
+            unsafe { std::env::set_var(key, value) };
+            Self { _lock: lock, key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                // SAFETY: single-threaded thanks to the lock held in _lock.
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None    => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     #[test]
     fn parses_full_config() {
@@ -464,25 +496,9 @@ max_size_mb = 123
         assert!((loaded.display.blur_sigma - 15.0).abs() < f32::EPSILON);
     }
 
-    /// Regression test: empty HOME env var should return None.
-    /// Note: This test modifies global environment state and should be run serially
-    /// to avoid interference with other tests. Run tests with `--test-threads=1` if flaky.
     #[test]
     fn home_dir_empty_string_returns_none() {
-        // Save original HOME value
-        let original_home = std::env::var("HOME").ok();
-
-        // Set HOME to empty string
-        std::env::set_var("HOME", "");
-
-        // home_dir() should return None for empty string
-        let result = home_dir();
-        assert_eq!(result, None, "home_dir() should return None when HOME is empty string");
-
-        // Restore original environment state to avoid test pollution
-        match original_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
+        let _guard = EnvGuard::set("HOME", "");
+        assert_eq!(home_dir(), None);
     }
 }
