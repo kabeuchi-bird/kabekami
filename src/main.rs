@@ -140,6 +140,7 @@ async fn main() -> Result<()> {
         lang,
         config.sources.favorites_dir.is_some(),
         config.ui.enable_blacklist,
+        config.online_sources.iter().any(|s| s.enabled),
     )
     .await;
 
@@ -480,6 +481,7 @@ async fn main() -> Result<()> {
                                     let count = scheduler.image_count();
                                     let has_fav = config.sources.favorites_dir.is_some();
                                     let bl_enabled = config.ui.enable_blacklist;
+                                    let has_online = config.online_sources.iter().any(|s| s.enabled);
                                     h.update(|t| {
                                         t.mode = mode;
                                         t.interval_secs = secs;
@@ -487,6 +489,7 @@ async fn main() -> Result<()> {
                                         t.image_count = count;
                                         t.has_favorites_dir = has_fav;
                                         t.blacklist_enabled = bl_enabled;
+                                        t.has_online_sources = has_online;
                                     }).await;
                                 }
 
