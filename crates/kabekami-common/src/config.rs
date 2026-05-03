@@ -139,7 +139,7 @@ impl Default for Cache {
 }
 
 /// UI 表示言語の設定。
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Ui {
     /// `"ja"` または `"en"`。空文字列はデフォルト（英語）として扱う。
     #[serde(default)]
@@ -147,6 +147,20 @@ pub struct Ui {
     /// WARN レベルのログをデスクトップ通知として表示する（デフォルト: false）。
     #[serde(default)]
     pub warn_notify: bool,
+    /// 「二度と表示しない」ブラックリスト機能を有効にする（デフォルト: true）。
+    /// false にするとトレイメニュー項目・CLI・D-Bus メソッドが無効になる。
+    #[serde(default = "default_true")]
+    pub enable_blacklist: bool,
+}
+
+impl Default for Ui {
+    fn default() -> Self {
+        Self {
+            language: String::new(),
+            warn_notify: false,
+            enable_blacklist: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -494,6 +508,19 @@ max_size_mb = 123
         assert_eq!(loaded.rotation.interval_secs, 300);
         assert_eq!(loaded.display.mode, DisplayMode::Fill);
         assert!((loaded.display.blur_sigma - 15.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn ui_defaults() {
+        let ui = Ui::default();
+        assert!(ui.language.is_empty());
+        assert!(!ui.warn_notify);
+        assert!(ui.enable_blacklist, "enable_blacklist must default to true");
+
+        // TOML omit-all should produce the same defaults
+        let parsed: Ui = toml::from_str("").unwrap();
+        assert!(parsed.enable_blacklist);
+        assert!(!parsed.warn_notify);
     }
 
     #[test]

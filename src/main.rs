@@ -139,6 +139,8 @@ async fn main() -> Result<()> {
         config.rotation.interval_secs,
         lang,
         config.sources.favorites_dir.is_some(),
+        config.ui.enable_blacklist,
+        config.online_sources.iter().any(|s| s.enabled),
     )
     .await;
 
@@ -353,7 +355,9 @@ async fn main() -> Result<()> {
                     }
 
                     TrayCmd::BlacklistCurrent => {
-                        if let Some(path) = scheduler.current().cloned() {
+                        if !config.ui.enable_blacklist {
+                            tracing::debug!("blacklist disabled in config, ignoring");
+                        } else if let Some(path) = scheduler.current().cloned() {
                             if let Err(e) = blacklist.add(&path) {
                                 tracing::error!("blacklist: failed to save {}: {}", path.display(), e);
                             } else {
@@ -476,12 +480,16 @@ async fn main() -> Result<()> {
                                     let strings = crate::i18n::strings(lang);
                                     let count = scheduler.image_count();
                                     let has_fav = config.sources.favorites_dir.is_some();
+                                    let bl_enabled = config.ui.enable_blacklist;
+                                    let has_online = config.online_sources.iter().any(|s| s.enabled);
                                     h.update(|t| {
                                         t.mode = mode;
                                         t.interval_secs = secs;
                                         t.strings = strings;
                                         t.image_count = count;
                                         t.has_favorites_dir = has_fav;
+                                        t.blacklist_enabled = bl_enabled;
+                                        t.has_online_sources = has_online;
                                     }).await;
                                 }
 
