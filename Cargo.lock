@@ -1762,6 +1762,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "fastrand",
+ "futures-util",
  "image",
  "kabekami-common",
  "ksni",
