@@ -264,8 +264,8 @@ async fn main() -> Result<()> {
 
             Some(cmd) = cmd_rx.recv() => {
                 let now = std::time::Instant::now();
-                // Quit と PlasmaRestarted はスロットリングをバイパスする
-                let throttle_exempt = matches!(cmd, TrayCmd::Quit | TrayCmd::PlasmaRestarted);
+                // Quit と PlasmaRestarted と ReloadConfig はスロットリングをバイパスする
+                let throttle_exempt = matches!(cmd, TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ReloadConfig);
                 if !throttle_exempt
                     && last_cmd_at.map_or(false, |t| now.duration_since(t) < Duration::from_millis(100))
                 {
