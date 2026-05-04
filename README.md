@@ -165,6 +165,12 @@ Config file: `~/.config/kabekami/config.toml`
 
 See [`config.toml`](config.toml) in this repository for a fully annotated reference covering every setting and its default value.
 
+### Supported Image Formats
+
+kabekami supports the following image formats: **jpg, jpeg, png, webp, avif**
+
+Note: bmp, tiff, and gif are not supported (the `image` crate features are limited to jpeg/png/webp/avif to reduce binary size).
+
 ## Troubleshooting
 
 **Tray icon not appearing** — Restart kabekami after Plasma has fully started.

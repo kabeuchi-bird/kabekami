@@ -144,6 +144,9 @@ async fn main() -> Result<()> {
     )
     .await;
 
+    // 設定ファイルの自動リロード用にトレイ／DBus とは別系統の送信ハンドルを保持
+    let cmd_tx_for_config = cmd_tx.clone();
+
     // D-Bus デーモンインターフェースを登録（CLI からのリモート操作を受け付ける）
     let _dbus_conn = spawn_dbus_iface(cmd_tx.clone()).await;
 
@@ -152,6 +155,20 @@ async fn main() -> Result<()> {
 
     // KDE グローバルショートカットを登録・監視する
     shortcuts::spawn_shortcut_watcher(cmd_tx).await;
+
+    // 設定ファイル監視を起動。失敗時は閉じたチャンネルにフォールバック
+    // （`Some(()) = ...` パターンが一致せず select! で無害にスキップされる）。
+    let (mut config_change_rx, _config_watcher_handle) = match Config::config_path()
+        .ok()
+        .and_then(|p| watcher::spawn_config(&p))
+    {
+        Some((w, rx)) => (rx, Some(w)),
+        None => {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            drop(tx);
+            (rx, None)
+        }
+    };
 
     // Plasma への壁紙適用ハンドル（D-Bus 接続を保持して再利用）
     let plasma_shell = plasma::PlasmaShell::new().await;
@@ -247,8 +264,8 @@ async fn main() -> Result<()> {
 
             Some(cmd) = cmd_rx.recv() => {
                 let now = std::time::Instant::now();
-                // Quit と PlasmaRestarted はスロットリングをバイパスする
-                let throttle_exempt = matches!(cmd, TrayCmd::Quit | TrayCmd::PlasmaRestarted);
+                // Quit と PlasmaRestarted と ReloadConfig はスロットリングをバイパスする
+                let throttle_exempt = matches!(cmd, TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ReloadConfig);
                 if !throttle_exempt
                     && last_cmd_at.map_or(false, |t| now.duration_since(t) < Duration::from_millis(100))
                 {
@@ -550,6 +567,20 @@ async fn main() -> Result<()> {
                     let count = scheduler.image_count();
                     h.update(|t| t.image_count = count).await;
                 }
+            }
+
+            // config.toml の変更を検知したら、連続イベントを集約してから ReloadConfig を送信。
+            // まず recv() で待機し、その後 try_recv() で保留中のイベントをドレインし、
+            // 100ms 待機後に 1 つの ReloadConfig だけを送信して、バーストを確実に集約する。
+            Some(()) = config_change_rx.recv() => {
+                // Drain any additional pending config change events
+                while config_change_rx.try_recv().is_ok() {}
+                tracing::info!("config file changed; waiting 100ms to coalesce events");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // Drain again in case more events arrived during sleep
+                while config_change_rx.try_recv().is_ok() {}
+                tracing::info!("queueing single ReloadConfig after debounce");
+                let _ = cmd_tx_for_config.send(TrayCmd::ReloadConfig);
             }
 
             msg = next_warn(&mut warn_rx) => {
