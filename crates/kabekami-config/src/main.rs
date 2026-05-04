@@ -63,30 +63,56 @@ fn setup_fonts(ctx: &egui::Context) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// xdg-desktop-portal 経由でフォルダ選択ダイアログを開く。
-/// `start` が `Some` でかつ存在すればそこを初期表示にする。
-/// キャンセル時は `None`。
-fn pick_folder(start: Option<&std::path::Path>) -> Option<PathBuf> {
-    let mut dlg = rfd::FileDialog::new().set_title("フォルダを選択 / Select folder");
-    if let Some(p) = start.filter(|p| p.exists()) {
-        dlg = dlg.set_directory(p);
-    } else if let Some(home) = std::env::var_os("HOME") {
-        dlg = dlg.set_directory(home);
-    }
-    dlg.pick_folder()
+/// `kdialog` が PATH 上にあるかを起動時に 1 回だけ確認する。
+/// 見つからない環境ではフォルダ選択ボタンを無効化する。
+fn kdialog_available() -> bool {
+    std::process::Command::new("kdialog")
+        .arg("--version")
+        .output()
+        .is_ok()
 }
 
-/// 画像ファイル選択ダイアログ（プレビュー用）。
-fn pick_image_file(start: Option<&std::path::Path>) -> Option<PathBuf> {
-    let mut dlg = rfd::FileDialog::new()
-        .set_title("画像を選択 / Select image")
-        .add_filter("画像 / Images", &["jpg", "jpeg", "png", "webp", "avif"]);
-    if let Some(p) = start.filter(|p| p.exists()) {
-        dlg = dlg.set_directory(p);
-    } else if let Some(home) = std::env::var_os("HOME") {
-        dlg = dlg.set_directory(home);
+/// 開始位置を解決する（`start` が存在すればそれ、無ければ `$HOME`、最後は `.`）。
+fn pick_start_dir(start: Option<&std::path::Path>) -> PathBuf {
+    start
+        .filter(|p| p.exists())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// kdialog 出力（パス）を `Option<PathBuf>` に変換する。
+/// 失敗・キャンセル・空出力はすべて `None`。
+fn kdialog_run(args: &[&std::ffi::OsStr]) -> Option<PathBuf> {
+    let out = std::process::Command::new("kdialog").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
     }
-    dlg.pick_file()
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(PathBuf::from(s)) }
+}
+
+/// kdialog `--getexistingdirectory` でフォルダ選択ダイアログを開く。
+fn pick_folder(start: Option<&std::path::Path>) -> Option<PathBuf> {
+    let start_dir = pick_start_dir(start);
+    kdialog_run(&[
+        "--title".as_ref(),
+        "フォルダを選択 / Select folder".as_ref(),
+        "--getexistingdirectory".as_ref(),
+        start_dir.as_os_str(),
+    ])
+}
+
+/// kdialog `--getopenfilename` で画像ファイル選択ダイアログを開く。
+fn pick_image_file(start: Option<&std::path::Path>) -> Option<PathBuf> {
+    let start_dir = pick_start_dir(start);
+    kdialog_run(&[
+        "--title".as_ref(),
+        "画像を選択 / Select image".as_ref(),
+        "--getopenfilename".as_ref(),
+        start_dir.as_os_str(),
+        "Images (*.jpg *.jpeg *.png *.webp *.avif)".as_ref(),
+    ])
 }
 
 fn compute_dir_size(dir: &std::path::Path) -> u64 {
@@ -219,6 +245,9 @@ struct KabekamiApp {
 
     // Cache tab: computed size (None = not yet measured)
     cache_size_bytes: Option<u64>,
+
+    /// `kdialog` が利用可能か（起動時に 1 回判定し、参照ボタンの活性／非活性に使う）。
+    has_kdialog: bool,
 }
 
 impl KabekamiApp {
@@ -246,7 +275,26 @@ impl KabekamiApp {
             new_dir_input: String::new(),
             new_online_provider: ProviderKind::Bing,
             cache_size_bytes: None,
+            has_kdialog: kdialog_available(),
         }
+    }
+
+    /// kdialog 利用不可時のツールチップ。
+    const KDIALOG_HINT: &'static str =
+        "kdialog がインストールされていません。\n\
+         パスを直接入力してください。\n\n\
+         kdialog is not installed.\n\
+         Type the path manually.";
+
+    /// 「📁 参照」ボタンを描画する（kdialog 不在時は無効化＆ツールチップ）。
+    /// クリックされたら `true` を返す。
+    fn browse_button(&self, ui: &mut egui::Ui, label: &str) -> bool {
+        let resp = ui.add_enabled(self.has_kdialog, egui::Button::new(label));
+        let clicked = resp.clicked();
+        if !self.has_kdialog {
+            resp.on_hover_text(Self::KDIALOG_HINT);
+        }
+        clicked
     }
 
     fn set_status(&mut self, msg: impl Into<String>, is_error: bool) {
@@ -396,7 +444,7 @@ impl KabekamiApp {
                     self.new_dir_input.clear();
                 }
             }
-            if ui.button("📁 参照 / Browse…").clicked() {
+            if self.browse_button(ui, "📁 参照 / Browse…") {
                 if let Some(path) = pick_folder(None) {
                     self.config.sources.directories.push(path);
                     self.new_dir_input.clear();
@@ -494,7 +542,7 @@ impl KabekamiApp {
                 ui.button("▶ プレビュー").clicked()
                 || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 || mode_changed;
-            if ui.button("📁 参照").clicked() {
+            if self.browse_button(ui, "📁 参照") {
                 let cur_path = std::path::Path::new(self.preview_image_path.trim());
                 let start = cur_path
                     .parent()
@@ -541,7 +589,7 @@ impl KabekamiApp {
                 self.config.cache.directory = PathBuf::from(dir_str);
                 self.cache_size_bytes = None; // ディレクトリ変更時はリセット
             }
-            if ui.button("📁 参照").clicked() {
+            if self.browse_button(ui, "📁 参照") {
                 if let Some(path) = pick_folder(Some(&self.config.cache.directory)) {
                     self.config.cache.directory = path;
                     self.cache_size_bytes = None;
@@ -656,7 +704,7 @@ impl KabekamiApp {
                                 Some(PathBuf::from(dir_str))
                             };
                         }
-                        if ui.button("📁").clicked() {
+                        if self.browse_button(ui, "📁") {
                             if let Some(path) = pick_folder(oc.download_dir.as_deref()) {
                                 oc.download_dir = Some(path);
                             }
