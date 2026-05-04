@@ -569,10 +569,17 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // config.toml の変更を検知したら ReloadConfig をキューに投入する。
-            // 連続イベントは select! 内の 100ms スロットルで吸収される。
+            // config.toml の変更を検知したら、連続イベントを集約してから ReloadConfig を送信。
+            // まず recv() で待機し、その後 try_recv() で保留中のイベントをドレインし、
+            // 100ms 待機後に 1 つの ReloadConfig だけを送信して、バーストを確実に集約する。
             Some(()) = config_change_rx.recv() => {
-                tracing::info!("config file changed; queueing reload");
+                // Drain any additional pending config change events
+                while config_change_rx.try_recv().is_ok() {}
+                tracing::info!("config file changed; waiting 100ms to coalesce events");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // Drain again in case more events arrived during sleep
+                while config_change_rx.try_recv().is_ok() {}
+                tracing::info!("queueing single ReloadConfig after debounce");
                 let _ = cmd_tx_for_config.send(TrayCmd::ReloadConfig);
             }
 

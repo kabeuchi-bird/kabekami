@@ -165,6 +165,12 @@ kabekami --quit
 
 全設定項目とデフォルト値の詳細は、リポジトリの [`config.ja.toml`](config.ja.toml) を参照してください。
 
+### 対応画像形式
+
+kabekami は以下の画像形式に対応しています: **jpg, jpeg, png, webp, avif**
+
+注意: bmp, tiff, gif には対応していません（バイナリサイズ削減のため `image` クレートの feature を jpeg/png/webp/avif に限定しています）。
+
 ## トラブルシューティング
 
 **トレイアイコンが表示されない** — Plasma が完全に起動してから kabekami を再起動してください。
