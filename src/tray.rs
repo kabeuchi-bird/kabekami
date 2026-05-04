@@ -32,6 +32,10 @@ pub enum TrayCmd {
     OpenCurrent,
     /// 現在の壁紙ファイルをソースフォルダから削除する
     DeleteCurrent,
+    /// 現在の壁紙を二度と表示しないリストに追加する
+    BlacklistCurrent,
+    /// 現在の壁紙をお気に入りフォルダにコピーする
+    CopyToFavorites,
     /// 設定ファイルを再読み込みする
     ReloadConfig,
     /// 設定 GUI を開く
@@ -40,6 +44,8 @@ pub enum TrayCmd {
     FetchNow,
     /// アプリ終了
     Quit,
+    /// KDE Plasma が再起動した（壁紙を再適用する）
+    PlasmaRestarted,
 }
 
 /// 切り替え間隔プリセット（秒）。ラベル表示は `i18n::UiStrings::interval_labels` を使用する。
@@ -63,6 +69,12 @@ pub struct KabekamiTray {
     pub image_count: usize,
     /// UI 文字列テーブル（言語設定に応じて初期化）。
     pub strings: &'static UiStrings,
+    /// お気に入りフォルダが設定されているか（未設定時は項目を非表示）。
+    pub has_favorites_dir: bool,
+    /// ブラックリスト機能が有効か（false 時は項目を非表示）。
+    pub blacklist_enabled: bool,
+    /// 有効なオンラインソースが 1 件以上あるか（なければ「今すぐ取得」を非表示）。
+    pub has_online_sources: bool,
 }
 
 impl KabekamiTray {
@@ -132,13 +144,15 @@ impl ksni::Tray for KabekamiTray {
             .position(|(m, _)| *m == self.mode)
             .unwrap_or(3);
 
-        // 切り替え間隔のラジオボタン選択インデックス
+        // 切り替え間隔のラジオボタン選択インデックス（プリセット外は全ボタン非選択）
         let interval_selected = INTERVAL_PRESETS
             .iter()
             .position(|&s| s == self.interval_secs)
-            .unwrap_or(usize::MAX); // プリセット外の場合は全ボタン非選択
+            .unwrap_or(usize::MAX);
 
-        vec![
+        let has_current = !self.current_name.is_empty();
+
+        let mut items: Vec<MenuItem<Self>> = vec![
             Self::tray_item(self.strings.next_wallpaper, "", true, TrayCmd::Next),
             Self::tray_item(self.strings.prev_wallpaper, "", true, TrayCmd::Prev),
             MenuItem::Separator,
@@ -155,7 +169,6 @@ impl ksni::Tray for KabekamiTray {
                     "media-playback-pause".into()
                 },
                 activate: Box::new(|this: &mut Self| {
-                    // 楽観的にローカル状態を更新しておく（Handle::update で正式反映される）
                     this.paused = !this.paused;
                     let _ = this.notifier.send(TrayCmd::TogglePause);
                 }),
@@ -163,7 +176,7 @@ impl ksni::Tray for KabekamiTray {
             }
             .into(),
             MenuItem::Separator,
-            // 表示モード / Display Mode サブメニュー
+            // 表示モード サブメニュー
             SubMenu {
                 label: self.strings.display_mode.into(),
                 submenu: vec![RadioGroup {
@@ -185,7 +198,7 @@ impl ksni::Tray for KabekamiTray {
                 ..Default::default()
             }
             .into(),
-            // 切り替え間隔 / Rotation Interval サブメニュー
+            // 切り替え間隔 サブメニュー
             SubMenu {
                 label: self.strings.interval.into(),
                 submenu: vec![RadioGroup {
@@ -208,14 +221,33 @@ impl ksni::Tray for KabekamiTray {
             }
             .into(),
             MenuItem::Separator,
-            Self::tray_item(self.strings.open_current,   "document-open", !self.current_name.is_empty(), TrayCmd::OpenCurrent),
-            Self::tray_item(self.strings.delete_current, "edit-delete",    !self.current_name.is_empty(), TrayCmd::DeleteCurrent),
-            Self::tray_item(self.strings.reload_config, "view-refresh", true, TrayCmd::ReloadConfig),
-            Self::tray_item(self.strings.open_settings, "preferences-system", true, TrayCmd::OpenSettings),
-            Self::tray_item(self.strings.fetch_now, "download", true, TrayCmd::FetchNow),
-            MenuItem::Separator,
-            Self::tray_item(self.strings.quit, "application-exit", true, TrayCmd::Quit),
-        ]
+            Self::tray_item(self.strings.open_current,    "document-open", has_current, TrayCmd::OpenCurrent),
+        ];
+
+        // お気に入り: パスが設定されているときだけ表示
+        if self.has_favorites_dir {
+            items.push(Self::tray_item(self.strings.copy_to_favorites, "emblem-favorite", has_current, TrayCmd::CopyToFavorites));
+        }
+
+        items.push(Self::tray_item(self.strings.delete_current, "edit-delete", has_current, TrayCmd::DeleteCurrent));
+
+        // ブラックリスト: 機能が有効なときだけ表示
+        if self.blacklist_enabled {
+            items.push(Self::tray_item(self.strings.blacklist_current, "dialog-cancel", has_current, TrayCmd::BlacklistCurrent));
+        }
+
+        items.push(Self::tray_item(self.strings.reload_config,  "view-refresh",        true, TrayCmd::ReloadConfig));
+        items.push(Self::tray_item(self.strings.open_settings,  "preferences-system",  true, TrayCmd::OpenSettings));
+
+        // オンラインソースが 1 件以上有効なときだけ「今すぐ取得」を表示
+        if self.has_online_sources {
+            items.push(Self::tray_item(self.strings.fetch_now, "download", true, TrayCmd::FetchNow));
+        }
+
+        items.push(MenuItem::Separator);
+        items.push(Self::tray_item(self.strings.quit, "application-exit", true, TrayCmd::Quit));
+
+        items
     }
 }
 
@@ -228,6 +260,9 @@ pub async fn spawn_tray(
     mode: DisplayMode,
     interval_secs: u64,
     lang: Lang,
+    has_favorites_dir: bool,
+    blacklist_enabled: bool,
+    has_online_sources: bool,
 ) -> Option<ksni::Handle<KabekamiTray>> {
     use ksni::TrayMethods;
 
@@ -240,6 +275,9 @@ pub async fn spawn_tray(
         last_error: None,
         image_count: 0,
         strings: crate::i18n::strings(lang),
+        has_favorites_dir,
+        blacklist_enabled,
+        has_online_sources,
     };
 
     // `assume_sni_available(true)` にすることで、デスクトップ環境の起動が

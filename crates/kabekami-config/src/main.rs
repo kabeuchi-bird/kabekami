@@ -413,6 +413,27 @@ impl KabekamiApp {
         ui.checkbox(&mut self.config.sources.recursive, "サブフォルダも含める / Recursive");
         ui.add_space(8.0);
 
+        // お気に入りフォルダ
+        ui.label("お気に入りフォルダ / Favorites directory:");
+        ui.horizontal(|ui| {
+            let mut fav_str = self.config.sources.favorites_dir
+                .as_deref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if ui.add(
+                egui::TextEdit::singleline(&mut fav_str)
+                    .hint_text("~/Pictures/Favorites  (空欄=無効 / empty=disabled)")
+                    .desired_width(400.0),
+            ).changed() {
+                self.config.sources.favorites_dir = if fav_str.trim().is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(fav_str.trim()))
+                };
+            }
+        });
+        ui.add_space(8.0);
+
         ui.label("ディレクトリ / Directories:");
         let dirs = self.config.sources.directories.clone();
         let mut remove_idx = None;
@@ -785,6 +806,11 @@ impl KabekamiApp {
         ui.checkbox(
             &mut self.config.ui.warn_notify,
             "警告をデスクトップ通知で表示 / Show warnings as desktop notifications",
+        );
+        ui.add_space(4.0);
+        ui.checkbox(
+            &mut self.config.ui.enable_blacklist,
+            "「二度と表示しない」機能を有効にする / Enable \"Never Show Again\" blacklist",
         );
     }
 }

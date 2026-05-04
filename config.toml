@@ -1,0 +1,146 @@
+# kabekami — full configuration reference
+# Copy this file to ~/.config/kabekami/config.toml and edit as needed.
+# All keys are optional; the defaults shown here are used when omitted.
+
+# ── Image Sources ─────────────────────────────────────────────────────────────
+
+[sources]
+# Directories that contain wallpaper images.
+# Multiple entries are allowed. Tilde (~) is expanded to your home directory.
+directories = [
+    "~/Pictures/Wallpapers",
+]
+
+# When true, subdirectories are scanned recursively (default: true).
+recursive = true
+
+# Destination folder for "Copy to Favorites".
+# When unset the tray item is disabled.
+# favorites_dir = "~/Pictures/Favorites"
+
+# ── Rotation ──────────────────────────────────────────────────────────────────
+
+[rotation]
+# How often to change the wallpaper, in seconds.
+# Minimum value is 5; lower values are clamped to 5.
+interval_secs = 1800   # 30 minutes
+
+# Rotation order.
+#   "random"     — Fisher-Yates shuffle; every image is shown once before
+#                  reshuffling (no repeats within a cycle).
+#   "sequential" — in directory scan order.
+order = "random"
+
+# Change the wallpaper immediately on daemon start (default: true).
+# Set to false to keep the current desktop wallpaper until the first interval.
+change_on_start = true
+
+# Pre-process the next image in the background while the current one is shown
+# (default: true). Reduces the delay on fast rotation intervals.
+prefetch = true
+
+# ── Display Mode ──────────────────────────────────────────────────────────────
+
+[display]
+# How the wallpaper image is fitted to the screen.
+#
+#   "blur_pad"  — The original image is composited over a blurred, darkened
+#                 version of itself that fills the screen. Best for portrait
+#                 images on landscape displays and vice-versa. (default)
+#   "fill"      — Scale to fill the screen; edges are cropped as needed.
+#   "fit"       — Scale to fit inside the screen; black bars fill the rest.
+#   "stretch"   — Scale to exact screen dimensions, ignoring aspect ratio.
+#   "smart"     — Automatically chooses "fill" when the aspect-ratio difference
+#                 between the image and screen is small, otherwise "blur_pad".
+mode = "blur_pad"
+
+# Gaussian blur radius for blur_pad mode (default: 25.0).
+# Higher values produce a softer background. Recommended range: 15–30.
+blur_sigma = 25.0
+
+# How much to darken the blurred background in blur_pad mode (default: 0.1).
+# 0.0 = no darkening, 1.0 = fully black. 0.1 darkens by 10 %.
+bg_darken = 0.1
+
+# ── Image Cache ───────────────────────────────────────────────────────────────
+
+[cache]
+# Where to store processed (mode-applied) images.
+# Defaults to ~/.cache/kabekami.
+directory = "~/.cache/kabekami"
+
+# Maximum cache size in megabytes (default: 500).
+# When the limit is exceeded, the least-recently-used files are deleted first.
+# Set to 0 for unlimited.
+max_size_mb = 500
+
+# ── User Interface ────────────────────────────────────────────────────────────
+
+[ui]
+# Display language for the tray menu and notifications.
+#   "en"  — English (default when this key is empty or absent)
+#   "ja"  — Japanese
+# The KABEKAMI_LANG environment variable overrides this value at runtime.
+language = "en"
+
+# Show WARN-level log events as desktop notifications (default: false).
+warn_notify = false
+
+# Enable the "Never Show Again" blacklist feature (default: true).
+# When false, the tray menu item, CLI flag, and D-Bus method are all disabled.
+enable_blacklist = true
+
+# ── Online Wallpaper Sources ──────────────────────────────────────────────────
+#
+# Each [[online_sources]] block configures one provider.
+# Images are downloaded automatically on the provider's schedule and saved to
+# the download_dir (or the default location below).
+# Use "Fetch Wallpapers Now" in the tray to trigger an immediate fetch.
+#
+# Default download locations:
+#   ~/.local/share/kabekami/bing/
+#   ~/.local/share/kabekami/unsplash/
+#   ~/.local/share/kabekami/wallhaven/
+#   ~/.local/share/kabekami/reddit/
+
+# Bing Daily — no API key required
+# Downloads Bing's daily wallpaper for the given locale.
+# Maximum 8 images per fetch (Bing API limit).
+[[online_sources]]
+provider = "bing"
+enabled  = false
+count    = 8          # number of recent Bing daily images to keep
+locale   = "en-US"    # e.g. "ja-JP", "en-GB" — controls the regional image
+# download_dir = "~/Pictures/Bing"   # custom save location (optional)
+# interval_hours = 24                # re-fetch interval; default 24 h
+
+# Unsplash — API key required (https://unsplash.com/developers)
+[[online_sources]]
+provider = "unsplash"
+enabled  = false
+api_key  = "YOUR_UNSPLASH_ACCESS_KEY"
+query    = "nature landscape"   # search keywords
+count    = 10                   # images to keep; max 30 per fetch
+# quality = "regular"           # "regular" (default) or "full"
+# download_dir = "~/Pictures/Unsplash"
+# interval_hours = 24
+
+# Wallhaven — API key optional (required for NSFW content)
+# https://wallhaven.cc/settings/account — copy your API key from there.
+[[online_sources]]
+provider = "wallhaven"
+enabled  = false
+# api_key = "YOUR_WALLHAVEN_API_KEY"
+query    = "landscape"   # search keywords
+count    = 10            # images to keep; max 24 per fetch
+# download_dir = "~/Pictures/Wallhaven"
+# interval_hours = 24
+
+# Reddit — no API key required
+[[online_sources]]
+provider   = "reddit"
+enabled    = false
+subreddit  = "wallpapers"   # subreddit name without the r/ prefix
+count      = 10             # images to keep; max 100 per fetch
+# download_dir = "~/Pictures/Reddit"
+# interval_hours = 1        # default for Reddit is 1 h (posts change quickly)

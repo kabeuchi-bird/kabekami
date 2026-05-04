@@ -1,0 +1,40 @@
+language: "ja-JP"
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_filters:
+    - "!target/**"
+    - "!**/target/**"
+    - "!packaging/**"
+
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: |
+        Rust コードをレビューする際は以下の点に注意してください:
+        - 非同期コード（tokio）の正しさ: タスクリーク、デッドロック、キャンセル安全性
+        - エラー処理: unwrap/expect の使用箇所（テスト外では原則 NG）
+        - D-Bus（zbus）呼び出しのエラー処理漏れ
+        - `Arc`/`Mutex` の使い方と不要なクローン
+    - path: "crates/**/*.rs"
+      instructions: |
+        ライブラリクレートのレビューです。公開 API の安定性と
+        ドキュメント（`///` コメント）が適切かも確認してください。
+    - path: "src/provider/**/*.rs"
+      instructions: |
+        オンラインプロバイダーの実装です。
+        HTTP エラー処理・レート制限・センシティブ情報（API キー等）の
+        ログ出力への混入がないか確認してください。
+
+chat:
+  auto_reply: true

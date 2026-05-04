@@ -7,10 +7,18 @@
 //! 連続してエラーが起きた場合に通知をスタックさせないため、前回の通知 ID を
 //! `replaces_id` として渡す。これにより通知センターには常に最新のエラーが
 //! 1 件だけ表示される。
+//!
+//! ## KDE 通知ヒント
+//! エラー通知には以下の KDE 拡張ヒントを付与する:
+//! - `resident = true` : 自動消去せず通知センターに残す
+//! - `category = "device.error"` : 通知カテゴリー（KDE 通知フィルターで活用可能）
+//! - `x-kde-origin-url` : 問題のあったファイルの URL（ファイルマネージャー連携）
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::Result;
+use zbus::zvariant::{OwnedValue, Value};
 
 use kabekami_common::i18n::Lang;
 
@@ -27,7 +35,6 @@ pub struct Notifier {
     /// 警告通知のサマリー文字列。
     warn_summary: &'static str,
     /// D-Bus セッション接続。確立済みの接続を保持して再利用する。
-    /// 利用不可の場合は `None`（通知はベストエフォートで送信を試みる）。
     conn: Option<zbus::Connection>,
 }
 
@@ -47,10 +54,18 @@ impl Notifier {
 
     /// エラー通知を送る。
     ///
+    /// `origin_path` が指定された場合、`x-kde-origin-url` ヒントを付与する。
+    /// `resident = true` により通知は自動消去されない。
     /// 前回の通知を `replaces_id` で置き換えるため、連続エラーでも通知は 1 件に留まる。
-    /// D-Bus が使えない環境では `debug` ログを出して無視する（通知はベストエフォート）。
-    pub async fn error(&mut self, body: &str) {
-        match self.send_dbus("dialog-error", self.summary, body, 7000, self.last_id).await {
+    pub async fn error(&mut self, body: &str, origin_path: Option<&Path>) {
+        let url = origin_path.map(|p| format!("file://{}", p.display()));
+        let mut hints: HashMap<String, OwnedValue> = HashMap::new();
+        insert_hint(&mut hints, "resident", Value::Bool(true));
+        insert_hint(&mut hints, "category", Value::Str("device.error".into()));
+        if let Some(ref u) = url {
+            insert_hint(&mut hints, "x-kde-origin-url", Value::Str(u.as_str().into()));
+        }
+        match self.send_dbus("dialog-error", self.summary, body, -1, self.last_id, hints).await {
             Ok(id) => self.last_id = id,
             Err(e) => tracing::debug!("desktop notification unavailable: {}", e),
         }
@@ -63,15 +78,15 @@ impl Notifier {
 
     /// WARN レベルのログを通知として表示する。連続警告は 1 件に集約される。
     pub async fn warn(&mut self, body: &str) {
-        match self.send_dbus("dialog-warning", self.warn_summary, body, 5000, self.warn_last_id).await {
+        let mut hints: HashMap<String, OwnedValue> = HashMap::new();
+        insert_hint(&mut hints, "category", Value::Str("device.warning".into()));
+        match self.send_dbus("dialog-warning", self.warn_summary, body, 5000, self.warn_last_id, hints).await {
             Ok(id) => self.warn_last_id = id,
             Err(e) => tracing::debug!("desktop notification unavailable: {}", e),
         }
     }
 
     /// `org.freedesktop.Notifications::Notify` を呼び、付与された通知 ID を返す。
-    ///
-    /// 接続が未確立の場合は再接続を試みる。それでも失敗した場合はエラーを返す。
     async fn send_dbus(
         &mut self,
         icon: &str,
@@ -79,19 +94,15 @@ impl Notifier {
         body: &str,
         expire_ms: i32,
         replaces_id: u32,
+        hints: HashMap<String, OwnedValue>,
     ) -> Result<u32> {
-        // 接続がなければ再接続を試みる
         if self.conn.is_none() {
             self.conn = zbus::Connection::session().await.ok();
         }
         let conn = self.conn.as_ref()
             .ok_or_else(|| anyhow::anyhow!("D-Bus session unavailable"))?;
 
-        // Notify シグネチャ:
-        //   (app_name, replaces_id, app_icon, summary, body,
-        //    actions, hints, expire_timeout) → notification_id
         let actions: Vec<&str> = vec![];
-        let hints: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
 
         let reply = conn
             .call_method(
@@ -100,7 +111,7 @@ impl Notifier {
                 Some("org.freedesktop.Notifications"),
                 "Notify",
                 &(
-                    "kabekami", // app_name
+                    "kabekami",
                     replaces_id,
                     icon,
                     summary,
@@ -113,5 +124,11 @@ impl Notifier {
             .await?;
 
         Ok(reply.body().deserialize::<u32>()?)
+    }
+}
+
+fn insert_hint(hints: &mut HashMap<String, OwnedValue>, key: &str, value: Value<'_>) {
+    if let Ok(owned) = OwnedValue::try_from(value) {
+        hints.insert(key.to_string(), owned);
     }
 }

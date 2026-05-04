@@ -1,5 +1,6 @@
 //! kabekami — KDE Plasma 向け壁紙ローテーションデーモン
 
+mod blacklist;
 mod cache;
 mod config;
 mod daemon_iface;
@@ -12,6 +13,8 @@ mod provider;
 mod scanner;
 mod scheduler;
 mod screen;
+mod session;
+mod shortcuts;
 mod tray;
 mod watcher;
 
@@ -42,6 +45,9 @@ enum CliCmd {
     TogglePause,
     ReloadConfig,
     FetchNow,
+    TrashCurrent,
+    BlacklistCurrent,
+    CopyToFavorites,
     Quit,
 }
 
@@ -60,6 +66,14 @@ async fn main() -> Result<()> {
 
     tracing::info!(?config, "loaded config");
 
+    // ブラックリストを起動時に読み込む
+    let kabekami_config_dir = Config::config_path()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut blacklist = blacklist::Blacklist::load(&kabekami_config_dir)
+        .context("failed to load blacklist")?;
+
     // ローカルディレクトリ + オンラインソースのダウンロードディレクトリを統合してスキャン
     let mut scan_dirs = config.sources.directories.clone();
     for oc in &config.online_sources {
@@ -67,7 +81,7 @@ async fn main() -> Result<()> {
             scan_dirs.push(oc.resolved_download_dir());
         }
     }
-    let images = crate::scanner::scan(&scan_dirs, config.sources.recursive)
+    let images = build_filtered_images_list(&scan_dirs, config.sources.recursive, &blacklist)
         .context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
     if images.is_empty() {
@@ -83,8 +97,13 @@ async fn main() -> Result<()> {
         tracing::info!("discovered {} image(s)", images.len());
     }
 
-    let (screen_w, screen_h) = resolve_screen_size().await;
-    tracing::info!("using screen size {}x{}", screen_w, screen_h);
+    // モニター検出（マルチモニター対応）
+    let screens = resolve_screens().await;
+    // プライマリ解像度: フェッチコンテキスト・プリフェッチに使用
+    let (screen_w, screen_h) = screens
+        .first()
+        .map(|m| (m.width, m.height))
+        .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
 
     // キャッシュ・スケジューラ・先読みを初期化
     let mut cache = Arc::new(Cache::new(
@@ -99,8 +118,6 @@ async fn main() -> Result<()> {
         match watcher::spawn(&collect_watch_dirs(&config), config.sources.recursive) {
             Some((w, rx)) => (rx, Some(w)),
             None => {
-                // ウォッチャーが使えない場合は即座に閉じるチャンネルを用意する。
-                // select! では Some(ev) パターンが一致しないため無害にスキップされる。
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<watcher::WatchEvent>();
                 drop(tx);
                 (rx, None)
@@ -121,6 +138,9 @@ async fn main() -> Result<()> {
         config.display.mode,
         config.rotation.interval_secs,
         lang,
+        config.sources.favorites_dir.is_some(),
+        config.ui.enable_blacklist,
+        config.online_sources.iter().any(|s| s.enabled),
     )
     .await;
 
@@ -128,7 +148,13 @@ async fn main() -> Result<()> {
     let cmd_tx_for_config = cmd_tx.clone();
 
     // D-Bus デーモンインターフェースを登録（CLI からのリモート操作を受け付ける）
-    let _dbus_conn = spawn_dbus_iface(cmd_tx).await;
+    let _dbus_conn = spawn_dbus_iface(cmd_tx.clone()).await;
+
+    // セッション管理ウォッチャーを起動（ログアウト検知・Plasma 再起動検知）
+    session::spawn_session_watcher(cmd_tx.clone()).await;
+
+    // KDE グローバルショートカットを登録・監視する
+    shortcuts::spawn_shortcut_watcher(cmd_tx).await;
 
     // 設定ファイル監視を起動。失敗時は閉じたチャンネルにフォールバック
     // （`Some(()) = ...` パターンが一致せず select! で無害にスキップされる）。
@@ -158,19 +184,16 @@ async fn main() -> Result<()> {
         }
     };
 
-    // 画面サイズをフェッチコンテキストとして保持
     let fetch_ctx = provider::FetchContext { screen_w, screen_h };
 
     // 30 分ごとにプロバイダーを確認する（第 1 tick は即時）
     let mut fetch_ticker = tokio::time::interval(Duration::from_secs(1800));
     fetch_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    // オンラインソース設定を共有（ReloadConfig で更新される）
     let online_configs = std::sync::Arc::new(std::sync::Mutex::new(
         config.online_sources.clone(),
     ));
 
-    // 同時フェッチを防ぐフラグ（前のタスクが終わる前に次の tick が来ても無視する）
     let fetch_in_progress = Arc::new(AtomicBool::new(false));
 
     // トレイに初期画像枚数を反映
@@ -182,22 +205,18 @@ async fn main() -> Result<()> {
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
-            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+            apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
                 &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "initial apply failed").await;
         }
     }
 
-    // タイマー: 最初の tick は 1 interval 後から。
     let mut ticker = make_ticker(config.rotation.interval_secs);
-
-    // コマンドスロットリング: 100ms 以内の重複コマンドを破棄する
     let mut last_cmd_at: Option<std::time::Instant> = None;
 
     tracing::info!("entering main loop (interval={}s)", config.rotation.interval_secs);
 
     loop {
         tokio::select! {
-            // オンラインプロバイダーの定期フェッチ（30 分ごと、初回は即時）
             _ = fetch_ticker.tick() => {
                 if let Some(ref client) = online_client {
                     let configs = online_configs.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -205,12 +224,14 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // オンラインフェッチ完了 → スケジューラに追加
             Some(result) = online_rx.recv() => {
                 if !result.new_paths.is_empty() {
                     let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
-                    let added = result.new_paths.len();
-                    for path in result.new_paths {
+                    let new_paths: Vec<_> = result.new_paths.into_iter()
+                        .filter(|p| !blacklist.contains(p))
+                        .collect();
+                    let added = new_paths.len();
+                    for path in new_paths {
                         scheduler.add_image(path);
                     }
                     tracing::info!(
@@ -222,10 +243,9 @@ async fn main() -> Result<()> {
                         let count = scheduler.image_count();
                         h.update(|t| t.image_count = count).await;
                     }
-                    // 壁紙が 1 枚も表示されていなければ即時適用
                     if was_empty {
                         if let Some(path) = scheduler.next() {
-                            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                            apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
                                 &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "online: initial apply failed").await;
                         }
                     }
@@ -237,14 +257,18 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if let Some(path) = scheduler.next() {
-                    apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                    apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
                         &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "auto apply failed").await;
                 }
             }
 
             Some(cmd) = cmd_rx.recv() => {
                 let now = std::time::Instant::now();
-                if last_cmd_at.map_or(false, |t| now.duration_since(t) < Duration::from_millis(100)) {
+                // Quit と PlasmaRestarted はスロットリングをバイパスする
+                let throttle_exempt = matches!(cmd, TrayCmd::Quit | TrayCmd::PlasmaRestarted);
+                if !throttle_exempt
+                    && last_cmd_at.map_or(false, |t| now.duration_since(t) < Duration::from_millis(100))
+                {
                     tracing::debug!("command throttled (< 100ms): {:?}", cmd);
                     continue;
                 }
@@ -253,7 +277,7 @@ async fn main() -> Result<()> {
                     TrayCmd::Next => {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
-                            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                            apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
                                 &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Next failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
@@ -261,7 +285,7 @@ async fn main() -> Result<()> {
 
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
-                            apply_and_notify(&path, screen_w, screen_h, &config, &cache, &plasma_shell,
+                            apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
                                 &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Prev failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
@@ -285,10 +309,10 @@ async fn main() -> Result<()> {
                         tracing::info!("display mode → {:?}", mode);
                         config.display.mode = mode;
                         if let Some(cur) = scheduler.current().cloned() {
-                            if let Err(e) = apply(&cur, screen_w, screen_h, &config, &cache, &plasma_shell).await {
+                            if let Err(e) = apply(&cur, &screens, &config, &cache, &plasma_shell).await {
                                 tracing::error!(error = %e, "reapply after mode change failed");
                                 let msg = e.to_string();
-                                notifier.error(&msg).await;
+                                notifier.error(&msg, Some(&cur)).await;
                                 update_tray_error(&tray_handle, msg).await;
                             } else {
                                 notifier.clear();
@@ -334,7 +358,7 @@ async fn main() -> Result<()> {
                                     scheduler.remove_image(&path);
                                     prefetcher.abort();
                                     if let Some(next) = scheduler.next() {
-                                        apply_and_notify(&next, screen_w, screen_h, &config, &cache,
+                                        apply_and_notify(&next, &screens, &config, &cache,
                                             &plasma_shell, &mut notifier, &tray_handle,
                                             &mut prefetcher, &scheduler, "apply after trash failed").await;
                                     }
@@ -347,22 +371,77 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    TrayCmd::BlacklistCurrent => {
+                        if !config.ui.enable_blacklist {
+                            tracing::debug!("blacklist disabled in config, ignoring");
+                        } else if let Some(path) = scheduler.current().cloned() {
+                            if let Err(e) = blacklist.add(&path) {
+                                tracing::error!("blacklist: failed to save {}: {}", path.display(), e);
+                            } else {
+                                tracing::info!("blacklisted: {}", path.display());
+                                scheduler.remove_image(&path);
+                                prefetcher.abort();
+                                match scheduler.next() {
+                                    Some(next) => {
+                                        apply_and_notify(&next, &screens, &config, &cache,
+                                            &plasma_shell, &mut notifier, &tray_handle,
+                                            &mut prefetcher, &scheduler, "apply after blacklist failed").await;
+                                        if let Some(ref h) = tray_handle {
+                                            h.update(|t| t.image_count = scheduler.image_count()).await;
+                                        }
+                                    }
+                                    None => {
+                                        if let Some(ref h) = tray_handle {
+                                            h.update(|t| {
+                                                t.current_name = String::new();
+                                                t.image_count = scheduler.image_count();
+                                            }).await;
+                                        }
+                                    }
+                                }
+                                ticker = make_ticker(config.rotation.interval_secs);
+                            }
+                        }
+                    }
+
+                    TrayCmd::CopyToFavorites => 'fav: {
+                        let Some(path) = scheduler.current().map(|p| p.to_owned()) else { break 'fav };
+                        let Some(fav_dir) = config.sources.favorites_dir.clone() else {
+                            tracing::warn!("copy_to_favorites: favorites_dir not configured");
+                            break 'fav;
+                        };
+                        let Some(filename) = path.file_name().map(|n| n.to_owned()) else { break 'fav };
+                        let dest = fav_dir.join(&filename);
+                        if let Err(e) = tokio::fs::create_dir_all(&fav_dir).await {
+                            tracing::error!("favorites: failed to create dir {}: {}", fav_dir.display(), e);
+                            break 'fav;
+                        }
+                        match tokio::fs::copy(&path, &dest).await {
+                            Ok(_) => tracing::info!("copied to favorites: {}", dest.display()),
+                            Err(e) => tracing::error!("favorites: failed to copy {}: {}", path.display(), e),
+                        }
+                    }
+
                     TrayCmd::ReloadConfig => {
                         match Config::load() {
                             Err(e) => {
                                 tracing::error!(error = %e, "config reload failed");
                                 let msg = e.to_string();
-                                notifier.error(&msg).await;
+                                notifier.error(&msg, None).await;
                                 update_tray_error(&tray_handle, msg).await;
                             }
                             Ok(new_cfg) => {
                                 tracing::info!("reloading config");
 
-                                // 1. 現在の壁紙パスを退避（scheduler 再構築前）
                                 let prev_current = scheduler.current().cloned();
 
-                                // 2. 画像再スキャン → scheduler 再構築
-                                match scanner::scan(&new_cfg.sources.directories, new_cfg.sources.recursive) {
+                                let mut reload_scan_dirs = new_cfg.sources.directories.clone();
+                                for oc in &new_cfg.online_sources {
+                                    if oc.enabled {
+                                        reload_scan_dirs.push(oc.resolved_download_dir());
+                                    }
+                                }
+                                match build_filtered_images_list(&reload_scan_dirs, new_cfg.sources.recursive, &blacklist) {
                                     Ok(images) if !images.is_empty() => {
                                         tracing::info!("reload: {} image(s) found", images.len());
                                         scheduler = Scheduler::new(images, new_cfg.rotation.order);
@@ -371,7 +450,6 @@ async fn main() -> Result<()> {
                                     Err(e) => tracing::warn!("reload: scan error: {}", e),
                                 }
 
-                                // 3. ウォッチャー再起動
                                 (watch_rx, _watcher_handle) =
                                     match watcher::spawn(&collect_watch_dirs(&new_cfg), new_cfg.sources.recursive) {
                                         Some((w, rx)) => (rx, Some(w)),
@@ -383,25 +461,20 @@ async fn main() -> Result<()> {
                                         }
                                     };
 
-                                // 4. キャッシュ再構築（設定変更を反映）
                                 prefetcher.abort();
                                 cache = Arc::new(Cache::new(
                                     new_cfg.cache.directory.clone(),
                                     new_cfg.cache.max_size_mb,
                                 ));
 
-                                // 5. タイマー再起動
                                 ticker = make_ticker(new_cfg.rotation.interval_secs);
 
-                                // 6. 言語更新
                                 let new_lang = resolve_lang(&new_cfg);
                                 if new_lang != lang {
                                     lang = new_lang;
                                     notifier = notify::Notifier::new(lang).await;
                                 }
 
-                                // warn_notify の変更は tracing subscriber を再初期化できないため
-                                // 再起動後にのみ反映される
                                 if new_cfg.ui.warn_notify != config.ui.warn_notify {
                                     tracing::warn!(
                                         "warn_notify setting changed ({} → {}); restart kabekami to apply this change",
@@ -410,27 +483,30 @@ async fn main() -> Result<()> {
                                     );
                                 }
 
-                                // 7. 設定更新（オンラインソース設定も共有 Arc を更新）
                                 *online_configs.lock().unwrap_or_else(|e| e.into_inner()) = new_cfg.online_sources.clone();
                                 config = new_cfg;
 
-                                // 8. 現在の壁紙を新設定で再適用
                                 if let Some(cur) = prev_current {
-                                    apply_and_notify(&cur, screen_w, screen_h, &config, &cache, &plasma_shell,
+                                    apply_and_notify(&cur, &screens, &config, &cache, &plasma_shell,
                                         &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reload: reapply failed").await;
                                 }
 
-                                // 9. トレイ状態更新
                                 if let Some(ref h) = tray_handle {
                                     let mode = config.display.mode;
                                     let secs = config.rotation.interval_secs;
                                     let strings = crate::i18n::strings(lang);
                                     let count = scheduler.image_count();
+                                    let has_fav = config.sources.favorites_dir.is_some();
+                                    let bl_enabled = config.ui.enable_blacklist;
+                                    let has_online = config.online_sources.iter().any(|s| s.enabled);
                                     h.update(|t| {
                                         t.mode = mode;
                                         t.interval_secs = secs;
                                         t.strings = strings;
                                         t.image_count = count;
+                                        t.has_favorites_dir = has_fav;
+                                        t.blacklist_enabled = bl_enabled;
+                                        t.has_online_sources = has_online;
                                     }).await;
                                 }
 
@@ -457,6 +533,14 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    TrayCmd::PlasmaRestarted => {
+                        tracing::info!("Plasma restarted, re-applying wallpaper");
+                        if let Some(path) = scheduler.current().cloned() {
+                            apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reapply after Plasma restart failed").await;
+                        }
+                    }
+
                     TrayCmd::Quit => {
                         tracing::info!("quit requested from tray");
                         break;
@@ -464,12 +548,15 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // ディレクトリ変更監視イベント（ウォッチャーが無効な場合は到達しない）
             Some(ev) = watch_rx.recv() => {
                 match ev {
                     watcher::WatchEvent::Added(path) => {
-                        tracing::info!("new image detected: {}", path.display());
-                        scheduler.add_image(path);
+                        if blacklist.contains(&path) {
+                            tracing::debug!("ignoring blacklisted image: {}", path.display());
+                        } else {
+                            tracing::info!("new image detected: {}", path.display());
+                            scheduler.add_image(path);
+                        }
                     }
                     watcher::WatchEvent::Removed(path) => {
                         tracing::info!("image removed: {}", path.display());
@@ -492,7 +579,7 @@ async fn main() -> Result<()> {
             msg = next_warn(&mut warn_rx) => {
                 match msg {
                     Some(msg) => notifier.warn(&msg).await,
-                    None => warn_rx = None, // チャンネルが閉じたらブランチを無効化
+                    None => warn_rx = None,
                 }
             }
 
@@ -511,6 +598,18 @@ async fn main() -> Result<()> {
 }
 
 // ── ヘルパー関数 ─────────────────────────────────────────────────────────────
+
+fn build_filtered_images_list(
+    scan_dirs: &[std::path::PathBuf],
+    recursive: bool,
+    blacklist: &blacklist::Blacklist,
+) -> Result<Vec<std::path::PathBuf>> {
+    let images: Vec<_> = crate::scanner::scan(scan_dirs, recursive)?
+        .into_iter()
+        .filter(|p| !blacklist.contains(p))
+        .collect();
+    Ok(images)
+}
 
 fn init_tracing(warn_notify: bool) -> Option<tokio::sync::mpsc::UnboundedReceiver<String>> {
     use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -540,22 +639,28 @@ fn parse_cli() -> Result<Option<CliCmd>> {
     let Some(arg) = args.next() else { return Ok(None) };
 
     let cmd = match arg.as_str() {
-        "--next"          => CliCmd::Next,
-        "--prev"          => CliCmd::Prev,
-        "--toggle-pause"  => CliCmd::TogglePause,
-        "--reload-config" => CliCmd::ReloadConfig,
-        "--fetch-now"     => CliCmd::FetchNow,
-        "--quit"          => CliCmd::Quit,
+        "--next"               => CliCmd::Next,
+        "--prev"               => CliCmd::Prev,
+        "--toggle-pause"       => CliCmd::TogglePause,
+        "--reload-config"      => CliCmd::ReloadConfig,
+        "--fetch-now"          => CliCmd::FetchNow,
+        "--trash-current"      => CliCmd::TrashCurrent,
+        "--blacklist-current"  => CliCmd::BlacklistCurrent,
+        "--copy-to-favorites"  => CliCmd::CopyToFavorites,
+        "--quit"               => CliCmd::Quit,
         "--help" | "-h" => {
             println!("kabekami — KDE Plasma wallpaper rotation daemon\n");
             println!("USAGE:");
-            println!("  kabekami                start the daemon");
-            println!("  kabekami --next         switch to next wallpaper");
-            println!("  kabekami --prev         switch to previous wallpaper");
-            println!("  kabekami --toggle-pause pause / resume rotation");
-            println!("  kabekami --reload-config reload config.toml");
-            println!("  kabekami --fetch-now    trigger online wallpaper fetch");
-            println!("  kabekami --quit         quit the daemon");
+            println!("  kabekami                      start the daemon");
+            println!("  kabekami --next               switch to next wallpaper");
+            println!("  kabekami --prev               switch to previous wallpaper");
+            println!("  kabekami --toggle-pause       pause / resume rotation");
+            println!("  kabekami --reload-config      reload config.toml");
+            println!("  kabekami --fetch-now          trigger online wallpaper fetch");
+            println!("  kabekami --trash-current      move current wallpaper to trash");
+            println!("  kabekami --blacklist-current  never show current wallpaper again");
+            println!("  kabekami --copy-to-favorites  copy current wallpaper to favorites folder");
+            println!("  kabekami --quit               quit the daemon");
             std::process::exit(0);
         }
         other => anyhow::bail!("unknown option '{}'. Try --help.", other),
@@ -568,12 +673,15 @@ async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
     use daemon_iface::{BUS_NAME, OBJECT_PATH};
 
     let method = match cmd {
-        CliCmd::Next         => "Next",
-        CliCmd::Prev         => "Prev",
-        CliCmd::TogglePause  => "TogglePause",
-        CliCmd::ReloadConfig => "ReloadConfig",
-        CliCmd::FetchNow     => "FetchNow",
-        CliCmd::Quit         => "Quit",
+        CliCmd::Next             => "Next",
+        CliCmd::Prev             => "Prev",
+        CliCmd::TogglePause      => "TogglePause",
+        CliCmd::ReloadConfig     => "ReloadConfig",
+        CliCmd::FetchNow         => "FetchNow",
+        CliCmd::TrashCurrent     => "TrashCurrent",
+        CliCmd::BlacklistCurrent => "BlacklistCurrent",
+        CliCmd::CopyToFavorites  => "CopyToFavorites",
+        CliCmd::Quit             => "Quit",
     };
 
     let conn = zbus::Connection::session()
@@ -596,9 +704,6 @@ async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
 }
 
 /// D-Bus デーモンインターフェースを起動する。
-///
-/// 登録に失敗した場合（D-Bus 未使用環境など）は警告ログを出して `None` を返す。
-/// 返値の `Connection` を main() スコープで保持し続けることでサービスが維持される。
 async fn spawn_dbus_iface(
     tx: tokio::sync::mpsc::UnboundedSender<TrayCmd>,
 ) -> Option<zbus::Connection> {
@@ -627,7 +732,6 @@ async fn spawn_dbus_iface(
     }
 }
 
-/// warn_rx が None のときは永遠に pending にする（select! ブランチを無効化）。
 async fn next_warn(
     rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
 ) -> Option<String> {
@@ -637,7 +741,6 @@ async fn next_warn(
     }
 }
 
-/// WARN イベントを tokio チャンネル経由で非同期に転送する tracing レイヤー。
 struct WarnNotifyLayer {
     tx: tokio::sync::mpsc::UnboundedSender<String>,
 }
@@ -663,7 +766,6 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnNotifyLayer {
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        // kabekami クレートの WARN のみを対象にする（外部クレートの WARN は除外）
         if *event.metadata().level() == tracing::Level::WARN
             && event.metadata().target().starts_with("kabekami")
         {
@@ -676,11 +778,6 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnNotifyLayer {
     }
 }
 
-/// 表示言語を解決する。優先順位:
-///
-/// 1. 環境変数 `KABEKAMI_LANG`（`"en"` / `"ja"`）
-/// 2. `config.toml` の `[ui] language`
-/// 3. デフォルト: 英語
 fn resolve_lang(config: &Config) -> i18n::Lang {
     if let Ok(val) = std::env::var("KABEKAMI_LANG") {
         return i18n::Lang::from_str(val.trim());
@@ -691,55 +788,53 @@ fn resolve_lang(config: &Config) -> i18n::Lang {
     i18n::Lang::default()
 }
 
-/// 画面解像度を解決する。優先順位:
+/// モニター一覧を解決する。優先順位:
 ///
-/// 1. `KABEKAMI_SCREEN=WxH` 環境変数
+/// 1. `KABEKAMI_SCREEN=WxH` 環境変数（単一モニターとして扱う）
 /// 2. `kscreen-doctor --outputs` による自動検出（最大4回、指数バックオフ）
-/// 3. フォールバック（1920×1080）
-async fn resolve_screen_size() -> (u32, u32) {
+/// 3. フォールバック（1920×1080 の単一モニター）
+async fn resolve_screens() -> Vec<screen::Monitor> {
     // 1. 環境変数による手動指定
     if let Ok(val) = std::env::var("KABEKAMI_SCREEN") {
         if let Some((w, h)) = val.split_once('x') {
             if let (Ok(w), Ok(h)) = (w.trim().parse::<u32>(), h.trim().parse::<u32>()) {
                 if w > 0 && h > 0 {
-                    tracing::info!("screen size from KABEKAMI_SCREEN: {}x{}", w, h);
-                    return (w, h);
+                    tracing::info!("screen from KABEKAMI_SCREEN: {}x{}", w, h);
+                    return vec![screen::Monitor { name: "env".into(), width: w, height: h }];
                 }
             }
         }
         tracing::warn!("invalid KABEKAMI_SCREEN='{}', expected WxH (e.g. 2560x1440)", val);
     }
 
-    // 2. kscreen-doctor による自動検出（自動起動時の起動競合に備えてリトライ）
-    // 遅延: 即時 → 1s → 2s → 4s（計4回）
+    // 2. kscreen-doctor による自動検出（起動競合に備えてリトライ）
     let mut delay_secs = 0u64;
     for attempt in 1..=4u32 {
         if delay_secs > 0 {
             tracing::info!(
-                "screen detection: kscreen not ready, retrying in {}s (attempt {}/4)...",
+                "screen detection: retrying in {}s (attempt {}/4)...",
                 delay_secs, attempt
             );
             tokio::time::sleep(Duration::from_secs(delay_secs)).await;
         }
-        if let Some((w, h)) = screen::detect() {
-            tracing::info!("screen size from kscreen-doctor: {}x{}", w, h);
-            return (w, h);
+        let monitors = screen::detect_all();
+        if !monitors.is_empty() {
+            for m in &monitors {
+                tracing::info!("monitor detected: {} {}x{}", m.name, m.width, m.height);
+            }
+            return monitors;
         }
         if delay_secs == 0 { delay_secs = 1; } else { delay_secs *= 2; }
     }
 
     tracing::warn!(
-        "could not detect screen size after 4 attempts, using fallback {}x{}",
+        "could not detect screens after 4 attempts, using fallback {}x{}",
         FALLBACK_SCREEN_W,
         FALLBACK_SCREEN_H
     );
-    (FALLBACK_SCREEN_W, FALLBACK_SCREEN_H)
+    vec![screen::Monitor { name: "fallback".into(), width: FALLBACK_SCREEN_W, height: FALLBACK_SCREEN_H }]
 }
 
-/// ウォッチャーに渡すディレクトリ一覧を返す。
-///
-/// ローカルソースディレクトリに加え、有効なオンラインソースの
-/// ダウンロードディレクトリも含める。
 fn collect_watch_dirs(config: &Config) -> Vec<std::path::PathBuf> {
     let mut dirs = config.sources.directories.clone();
     for oc in &config.online_sources {
@@ -750,7 +845,6 @@ fn collect_watch_dirs(config: &Config) -> Vec<std::path::PathBuf> {
     dirs
 }
 
-/// 「1 interval 後に最初の tick」が来る Interval を生成する。
 fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
     let period = Duration::from_secs(interval_secs);
     let mut t = interval_at(Instant::now() + period, period);
@@ -758,12 +852,14 @@ fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
     t
 }
 
-/// 壁紙を加工してキャッシュし、Plasma に反映する。
-///
-/// 1. キャッシュヒット → キャッシュ済みファイルを直接 Plasma に渡す（高速パス）
-/// 2. キャッシュミス  → `spawn_blocking` で加工・保存してから Plasma に渡す
-///    （`store()` が LRU 退避も担う）
-async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache: &Arc<Cache>, plasma: &plasma::PlasmaShell) -> Result<()> {
+/// 1 つのモニター解像度向けに壁紙を加工してキャッシュパスを返す。
+async fn process_image(
+    src: &Path,
+    screen_w: u32,
+    screen_h: u32,
+    config: &Config,
+    cache: &Arc<Cache>,
+) -> Result<std::path::PathBuf> {
     let key = CacheKey {
         src: src.to_path_buf(),
         screen_w,
@@ -772,39 +868,58 @@ async fn apply(src: &Path, screen_w: u32, screen_h: u32, config: &Config, cache:
         blur_sigma: config.display.blur_sigma,
         bg_darken: config.display.bg_darken,
     };
-
-    let output = if let Some(cached) = cache.get(&key) {
+    if let Some(cached) = cache.get(&key) {
         tracing::debug!("cache hit: {}", src.display());
-        cached
-    } else {
-        let src_owned = src.to_path_buf();
-        let cache_owned = Arc::clone(cache);
-        let mode = config.display.mode;
-        let blur_sigma = config.display.blur_sigma;
-        let bg_darken = config.display.bg_darken;
-        tokio::task::spawn_blocking(move || {
-            prefetch::process_for_cache(
-                &src_owned,
-                screen_w,
-                screen_h,
-                mode,
-                blur_sigma,
-                bg_darken,
-                &cache_owned,
-            )
-        })
-        .await
-        .context("image processing task panicked")??
-    };
+        return Ok(cached);
+    }
+    let src_owned = src.to_path_buf();
+    let cache_owned = Arc::clone(cache);
+    let mode = config.display.mode;
+    let blur_sigma = config.display.blur_sigma;
+    let bg_darken = config.display.bg_darken;
+    tokio::task::spawn_blocking(move || {
+        prefetch::process_for_cache(&src_owned, screen_w, screen_h, mode, blur_sigma, bg_darken, &cache_owned)
+    })
+    .await
+    .context("image processing task panicked")?
+}
 
-    plasma.set_wallpaper(&output).await
+/// 壁紙を加工してキャッシュし、Plasma に反映する。
+///
+/// マルチモニター時は各モニターの解像度で個別に処理して `set_wallpaper_multi` を呼ぶ。
+async fn apply(
+    src: &Path,
+    screens: &[screen::Monitor],
+    config: &Config,
+    cache: &Arc<Cache>,
+    plasma: &plasma::PlasmaShell,
+) -> Result<()> {
+    if screens.len() <= 1 {
+        let (w, h) = screens
+            .first()
+            .map(|m| (m.width, m.height))
+            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
+        let output = process_image(src, w, h, config, cache).await?;
+        plasma.set_wallpaper(&output).await
+    } else {
+        let entries: Vec<(usize, std::path::PathBuf)> =
+            futures_util::future::try_join_all(screens.iter().enumerate().map(
+                |(idx, monitor)| async move {
+                    process_image(src, monitor.width, monitor.height, config, cache)
+                        .await
+                        .map(|p| (idx, p))
+                },
+            ))
+            .await?;
+        let entry_refs: Vec<(usize, &Path)> = entries.iter().map(|(i, p)| (*i, p.as_path())).collect();
+        plasma.set_wallpaper_multi(&entry_refs).await
+    }
 }
 
 /// apply + 通知 + tray 更新 + prefetch 開始をまとめて行う。
 async fn apply_and_notify(
     path: &Path,
-    screen_w: u32,
-    screen_h: u32,
+    screens: &[screen::Monitor],
     config: &Config,
     cache: &Arc<Cache>,
     plasma: &plasma::PlasmaShell,
@@ -814,19 +929,22 @@ async fn apply_and_notify(
     scheduler: &Scheduler,
     ctx: &str,
 ) {
-    if let Err(e) = apply(path, screen_w, screen_h, config, cache, plasma).await {
+    if let Err(e) = apply(path, screens, config, cache, plasma).await {
         tracing::error!(error = %e, "{}", ctx);
         let msg = e.to_string();
-        notifier.error(&msg).await;
+        notifier.error(&msg, Some(path)).await;
         update_tray_error(tray_handle, msg).await;
     } else {
         notifier.clear();
         update_tray_ok(tray_handle, path).await;
-        start_prefetch(prefetcher, scheduler, screen_w, screen_h, config, cache);
+        let (w, h) = screens
+            .first()
+            .map(|m| (m.width, m.height))
+            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
+        start_prefetch(prefetcher, scheduler, w, h, config, cache);
     }
 }
 
-/// トレイアイコンに `last_error` をセットする。
 async fn update_tray_error(
     tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
     msg: String,
@@ -836,14 +954,12 @@ async fn update_tray_error(
     }
 }
 
-/// トレイアイコンの `last_error` をクリアする。
 async fn update_tray_clear_error(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>) {
     if let Some(ref h) = tray_handle {
         h.update(|t| t.last_error = None).await;
     }
 }
 
-/// 壁紙切り替え成功時に `last_error` クリアと `current_name` 更新を 1 回の IPC で行う。
 async fn update_tray_ok(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>, path: &Path) {
     if let Some(ref h) = tray_handle {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
@@ -851,9 +967,6 @@ async fn update_tray_ok(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>, 
     }
 }
 
-/// 先読みを開始する。`scheduler.peek_next()` の画像を対象にする。
-/// オンラインフェッチタスクをスポーンする。
-/// 既にフェッチ中かソース未設定なら何もせず `false` を返す。
 fn try_spawn_fetch(
     client: &reqwest::Client,
     configs: Vec<crate::config::OnlineSourceConfig>,

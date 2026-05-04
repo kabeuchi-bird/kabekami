@@ -44,6 +44,9 @@ pub struct Sources {
     pub directories: Vec<PathBuf>,
     #[serde(default = "default_true")]
     pub recursive: bool,
+    /// お気に入り壁紙のコピー先ディレクトリ。`None` の場合は機能無効。
+    #[serde(default)]
+    pub favorites_dir: Option<PathBuf>,
 }
 
 impl Default for Sources {
@@ -51,6 +54,7 @@ impl Default for Sources {
         Self {
             directories: Vec::new(),
             recursive: true,
+            favorites_dir: None,
         }
     }
 }
@@ -135,7 +139,7 @@ impl Default for Cache {
 }
 
 /// UI 表示言語の設定。
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Ui {
     /// `"ja"` または `"en"`。空文字列はデフォルト（英語）として扱う。
     #[serde(default)]
@@ -143,6 +147,20 @@ pub struct Ui {
     /// WARN レベルのログをデスクトップ通知として表示する（デフォルト: false）。
     #[serde(default)]
     pub warn_notify: bool,
+    /// 「二度と表示しない」ブラックリスト機能を有効にする（デフォルト: true）。
+    /// false にするとトレイメニュー項目・CLI・D-Bus メソッドが無効になる。
+    #[serde(default = "default_true")]
+    pub enable_blacklist: bool,
+}
+
+impl Default for Ui {
+    fn default() -> Self {
+        Self {
+            language: String::new(),
+            warn_notify: false,
+            enable_blacklist: true,
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -232,6 +250,9 @@ impl Config {
             .iter()
             .map(|p| expand_tilde(p))
             .collect();
+        if let Some(dir) = &self.sources.favorites_dir {
+            self.sources.favorites_dir = Some(expand_tilde(dir));
+        }
         self.cache.directory = expand_tilde(&self.cache.directory);
         for oc in &mut self.online_sources {
             if let Some(dir) = &oc.download_dir {
@@ -354,7 +375,9 @@ fn expand_tilde(path: &Path) -> PathBuf {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(PathBuf::from)
+    let v = std::env::var("HOME").ok()?;
+    if v.is_empty() { return None; }
+    Some(PathBuf::from(v))
 }
 
 fn xdg_config_dir() -> Option<PathBuf> {
@@ -381,6 +404,38 @@ fn xdg_data_local_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    // Serialises all tests that mutate environment variables.
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    /// RAII guard: acquires ENV_LOCK, sets `key` to `value`, restores original on drop.
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let mutex = ENV_LOCK.get_or_init(|| Mutex::new(()));
+            let lock = mutex.lock().unwrap_or_else(|e| e.into_inner());
+            let original = std::env::var(key).ok();
+            // SAFETY: single-threaded thanks to the lock above.
+            unsafe { std::env::set_var(key, value) };
+            Self { _lock: lock, key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                // SAFETY: single-threaded thanks to the lock held in _lock.
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None    => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     #[test]
     fn parses_full_config() {
@@ -453,5 +508,24 @@ max_size_mb = 123
         assert_eq!(loaded.rotation.interval_secs, 300);
         assert_eq!(loaded.display.mode, DisplayMode::Fill);
         assert!((loaded.display.blur_sigma - 15.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn ui_defaults() {
+        let ui = Ui::default();
+        assert!(ui.language.is_empty());
+        assert!(!ui.warn_notify);
+        assert!(ui.enable_blacklist, "enable_blacklist must default to true");
+
+        // TOML omit-all should produce the same defaults
+        let parsed: Ui = toml::from_str("").unwrap();
+        assert!(parsed.enable_blacklist);
+        assert!(!parsed.warn_notify);
+    }
+
+    #[test]
+    fn home_dir_empty_string_returns_none() {
+        let _guard = EnvGuard::set("HOME", "");
+        assert_eq!(home_dir(), None);
     }
 }
