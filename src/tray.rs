@@ -36,7 +36,7 @@ pub enum TrayCmd {
     BlacklistCurrent,
     /// 現在の壁紙をお気に入りフォルダにコピーする
     CopyToFavorites,
-    /// 設定ファイルを再読み込みする
+    /// 設定ファイルを再読み込みする（inotify 自動リロードからのみ発行される内部用）。
     ReloadConfig,
     /// 設定 GUI を開く
     OpenSettings,
@@ -232,7 +232,6 @@ impl ksni::Tray for KabekamiTray {
             items.push(Self::tray_item(self.strings.blacklist_current, "dialog-cancel", has_current, TrayCmd::BlacklistCurrent));
         }
 
-        items.push(Self::tray_item(self.strings.reload_config,  "view-refresh",        true, TrayCmd::ReloadConfig));
         items.push(Self::tray_item(self.strings.open_settings,  "preferences-system",  true, TrayCmd::OpenSettings));
 
         items.push(MenuItem::Separator);

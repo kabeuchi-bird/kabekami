@@ -117,7 +117,6 @@ paru -S kabekami-git
 ├── お気に入りに追加       — （favorites_dir 未設定時は無効）
 ├── ゴミ箱に移動          — 削除して次の壁紙へ
 ├── 二度と表示しない       — 永続ブラックリスト登録
-├── 設定を再読み込み
 ├── 設定を開く            — kabekami-config を起動
 └── 終了
 ```
@@ -128,7 +127,6 @@ paru -S kabekami-git
 kabekami --next
 kabekami --prev
 kabekami --toggle-pause
-kabekami --reload-config
 kabekami --trash-current
 kabekami --blacklist-current
 kabekami --copy-to-favorites

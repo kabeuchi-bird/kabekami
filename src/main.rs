@@ -43,7 +43,6 @@ enum CliCmd {
     Next,
     Prev,
     TogglePause,
-    ReloadConfig,
     TrashCurrent,
     BlacklistCurrent,
     CopyToFavorites,
@@ -634,7 +633,6 @@ fn parse_cli() -> Result<Option<CliCmd>> {
         "--next"               => CliCmd::Next,
         "--prev"               => CliCmd::Prev,
         "--toggle-pause"       => CliCmd::TogglePause,
-        "--reload-config"      => CliCmd::ReloadConfig,
         "--trash-current"      => CliCmd::TrashCurrent,
         "--blacklist-current"  => CliCmd::BlacklistCurrent,
         "--copy-to-favorites"  => CliCmd::CopyToFavorites,
@@ -646,7 +644,6 @@ fn parse_cli() -> Result<Option<CliCmd>> {
             println!("  kabekami --next               switch to next wallpaper");
             println!("  kabekami --prev               switch to previous wallpaper");
             println!("  kabekami --toggle-pause       pause / resume rotation");
-            println!("  kabekami --reload-config      reload config.toml");
             println!("  kabekami --trash-current      move current wallpaper to trash");
             println!("  kabekami --blacklist-current  never show current wallpaper again");
             println!("  kabekami --copy-to-favorites  copy current wallpaper to favorites folder");
@@ -666,7 +663,6 @@ async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
         CliCmd::Next             => "Next",
         CliCmd::Prev             => "Prev",
         CliCmd::TogglePause      => "TogglePause",
-        CliCmd::ReloadConfig     => "ReloadConfig",
         CliCmd::TrashCurrent     => "TrashCurrent",
         CliCmd::BlacklistCurrent => "BlacklistCurrent",
         CliCmd::CopyToFavorites  => "CopyToFavorites",

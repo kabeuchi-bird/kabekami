@@ -36,11 +36,6 @@ impl DaemonIface {
         let _ = self.tx.send(TrayCmd::TogglePause);
     }
 
-    /// 設定ファイルを再読み込みする。
-    async fn reload_config(&self) {
-        let _ = self.tx.send(TrayCmd::ReloadConfig);
-    }
-
     /// デーモンを終了する。
     async fn quit(&self) {
         let _ = self.tx.send(TrayCmd::Quit);
