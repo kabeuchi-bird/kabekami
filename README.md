@@ -117,9 +117,7 @@ paru -S kabekami-git
 ├── Copy to Favorites       — (disabled if favorites_dir not set)
 ├── Move to Trash           — Delete and advance
 ├── Never Show Again        — Blacklist permanently
-├── Reload Config
 ├── Open Settings           — Launch kabekami-config
-├── Fetch Wallpapers Now    — Trigger online fetch immediately
 └── Quit
 ```
 
@@ -129,8 +127,6 @@ paru -S kabekami-git
 kabekami --next
 kabekami --prev
 kabekami --toggle-pause
-kabekami --reload-config
-kabekami --fetch-now
 kabekami --trash-current
 kabekami --blacklist-current
 kabekami --copy-to-favorites

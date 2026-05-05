@@ -36,12 +36,10 @@ pub enum TrayCmd {
     BlacklistCurrent,
     /// 現在の壁紙をお気に入りフォルダにコピーする
     CopyToFavorites,
-    /// 設定ファイルを再読み込みする
+    /// 設定ファイルを再読み込みする（inotify 自動リロードからのみ発行される内部用）。
     ReloadConfig,
     /// 設定 GUI を開く
     OpenSettings,
-    /// オンライン壁紙を今すぐ取得（インターバル無視）
-    FetchNow,
     /// アプリ終了
     Quit,
     /// KDE Plasma が再起動した（壁紙を再適用する）
@@ -73,8 +71,6 @@ pub struct KabekamiTray {
     pub has_favorites_dir: bool,
     /// ブラックリスト機能が有効か（false 時は項目を非表示）。
     pub blacklist_enabled: bool,
-    /// 有効なオンラインソースが 1 件以上あるか（なければ「今すぐ取得」を非表示）。
-    pub has_online_sources: bool,
 }
 
 impl KabekamiTray {
@@ -236,13 +232,7 @@ impl ksni::Tray for KabekamiTray {
             items.push(Self::tray_item(self.strings.blacklist_current, "dialog-cancel", has_current, TrayCmd::BlacklistCurrent));
         }
 
-        items.push(Self::tray_item(self.strings.reload_config,  "view-refresh",        true, TrayCmd::ReloadConfig));
         items.push(Self::tray_item(self.strings.open_settings,  "preferences-system",  true, TrayCmd::OpenSettings));
-
-        // オンラインソースが 1 件以上有効なときだけ「今すぐ取得」を表示
-        if self.has_online_sources {
-            items.push(Self::tray_item(self.strings.fetch_now, "download", true, TrayCmd::FetchNow));
-        }
 
         items.push(MenuItem::Separator);
         items.push(Self::tray_item(self.strings.quit, "application-exit", true, TrayCmd::Quit));
@@ -262,7 +252,6 @@ pub async fn spawn_tray(
     lang: Lang,
     has_favorites_dir: bool,
     blacklist_enabled: bool,
-    has_online_sources: bool,
 ) -> Option<ksni::Handle<KabekamiTray>> {
     use ksni::TrayMethods;
 
@@ -277,7 +266,6 @@ pub async fn spawn_tray(
         strings: crate::i18n::strings(lang),
         has_favorites_dir,
         blacklist_enabled,
-        has_online_sources,
     };
 
     // `assume_sni_available(true)` にすることで、デスクトップ環境の起動が
