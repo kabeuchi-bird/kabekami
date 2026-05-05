@@ -119,7 +119,6 @@ paru -S kabekami-git
 ├── Never Show Again        — Blacklist permanently
 ├── Reload Config
 ├── Open Settings           — Launch kabekami-config
-├── Fetch Wallpapers Now    — Trigger online fetch immediately
 └── Quit
 ```
 
@@ -130,7 +129,6 @@ kabekami --next
 kabekami --prev
 kabekami --toggle-pause
 kabekami --reload-config
-kabekami --fetch-now
 kabekami --trash-current
 kabekami --blacklist-current
 kabekami --copy-to-favorites

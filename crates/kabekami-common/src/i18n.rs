@@ -87,7 +87,6 @@ pub struct UiStrings {
     pub interval_labels:    &'static [&'static str],
     pub reload_config:      &'static str,
     pub open_settings:      &'static str,
-    pub fetch_now:          &'static str,
     /// 画像枚数の単位（`"images"` / `"枚"`）
     pub images:             &'static str,
 }
@@ -113,7 +112,6 @@ pub static EN: UiStrings = UiStrings {
     interval_labels:    &["10s", "30s", "5m", "30m", "1h", "3h"],
     reload_config:      "Reload Config",
     open_settings:      "Open Settings",
-    fetch_now:          "Fetch Wallpapers Now",
     images:             "images",
 };
 
@@ -138,7 +136,6 @@ pub static JA: UiStrings = UiStrings {
     interval_labels:    &["10秒", "30秒", "5分", "30分", "1時間", "3時間"],
     reload_config:      "設定を再読み込み",
     open_settings:      "設定を開く",
-    fetch_now:          "今すぐ取得",
     images:             "枚",
 };
 

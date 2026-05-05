@@ -95,7 +95,6 @@ enable_blacklist = true
 # Each [[online_sources]] block configures one provider.
 # Images are downloaded automatically on the provider's schedule and saved to
 # the download_dir (or the default location below).
-# Use "Fetch Wallpapers Now" in the tray to trigger an immediate fetch.
 #
 # Default download locations:
 #   ~/.local/share/kabekami/bing/

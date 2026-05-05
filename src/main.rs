@@ -44,7 +44,6 @@ enum CliCmd {
     Prev,
     TogglePause,
     ReloadConfig,
-    FetchNow,
     TrashCurrent,
     BlacklistCurrent,
     CopyToFavorites,
@@ -140,7 +139,6 @@ async fn main() -> Result<()> {
         lang,
         config.sources.favorites_dir.is_some(),
         config.ui.enable_blacklist,
-        config.online_sources.iter().any(|s| s.enabled),
     )
     .await;
 
@@ -498,7 +496,6 @@ async fn main() -> Result<()> {
                                     let count = scheduler.image_count();
                                     let has_fav = config.sources.favorites_dir.is_some();
                                     let bl_enabled = config.ui.enable_blacklist;
-                                    let has_online = config.online_sources.iter().any(|s| s.enabled);
                                     h.update(|t| {
                                         t.mode = mode;
                                         t.interval_secs = secs;
@@ -506,7 +503,6 @@ async fn main() -> Result<()> {
                                         t.image_count = count;
                                         t.has_favorites_dir = has_fav;
                                         t.blacklist_enabled = bl_enabled;
-                                        t.has_online_sources = has_online;
                                     }).await;
                                 }
 
@@ -519,17 +515,6 @@ async fn main() -> Result<()> {
                         match std::process::Command::new("kabekami-config").spawn() {
                             Ok(_) => tracing::info!("launched kabekami-config"),
                             Err(e) => tracing::warn!("failed to launch kabekami-config: {}", e),
-                        }
-                    }
-
-                    TrayCmd::FetchNow => {
-                        if let Some(ref client) = online_client {
-                            let configs = online_configs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                            if try_spawn_fetch(client, configs, online_tx.clone(), fetch_in_progress.clone(), fetch_ctx, true) {
-                                tracing::info!("manual fetch triggered");
-                            } else {
-                                tracing::info!("fetch already in progress, skipping");
-                            }
                         }
                     }
 
@@ -650,7 +635,6 @@ fn parse_cli() -> Result<Option<CliCmd>> {
         "--prev"               => CliCmd::Prev,
         "--toggle-pause"       => CliCmd::TogglePause,
         "--reload-config"      => CliCmd::ReloadConfig,
-        "--fetch-now"          => CliCmd::FetchNow,
         "--trash-current"      => CliCmd::TrashCurrent,
         "--blacklist-current"  => CliCmd::BlacklistCurrent,
         "--copy-to-favorites"  => CliCmd::CopyToFavorites,
@@ -663,7 +647,6 @@ fn parse_cli() -> Result<Option<CliCmd>> {
             println!("  kabekami --prev               switch to previous wallpaper");
             println!("  kabekami --toggle-pause       pause / resume rotation");
             println!("  kabekami --reload-config      reload config.toml");
-            println!("  kabekami --fetch-now          trigger online wallpaper fetch");
             println!("  kabekami --trash-current      move current wallpaper to trash");
             println!("  kabekami --blacklist-current  never show current wallpaper again");
             println!("  kabekami --copy-to-favorites  copy current wallpaper to favorites folder");
@@ -684,7 +667,6 @@ async fn send_to_daemon(cmd: CliCmd) -> Result<()> {
         CliCmd::Prev             => "Prev",
         CliCmd::TogglePause      => "TogglePause",
         CliCmd::ReloadConfig     => "ReloadConfig",
-        CliCmd::FetchNow         => "FetchNow",
         CliCmd::TrashCurrent     => "TrashCurrent",
         CliCmd::BlacklistCurrent => "BlacklistCurrent",
         CliCmd::CopyToFavorites  => "CopyToFavorites",

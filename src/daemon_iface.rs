@@ -46,11 +46,6 @@ impl DaemonIface {
         let _ = self.tx.send(TrayCmd::Quit);
     }
 
-    /// オンライン壁紙を今すぐ取得する（インターバル無視）。
-    async fn fetch_now(&self) {
-        let _ = self.tx.send(TrayCmd::FetchNow);
-    }
-
     /// 現在の壁紙をゴミ箱に移動して次の壁紙へ進む。
     async fn trash_current(&self) {
         let _ = self.tx.send(TrayCmd::DeleteCurrent);

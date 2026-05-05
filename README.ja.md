@@ -119,7 +119,6 @@ paru -S kabekami-git
 ├── 二度と表示しない       — 永続ブラックリスト登録
 ├── 設定を再読み込み
 ├── 設定を開く            — kabekami-config を起動
-├── 今すぐ取得            — オンラインソースを即時取得
 └── 終了
 ```
 
@@ -130,7 +129,6 @@ kabekami --next
 kabekami --prev
 kabekami --toggle-pause
 kabekami --reload-config
-kabekami --fetch-now
 kabekami --trash-current
 kabekami --blacklist-current
 kabekami --copy-to-favorites
