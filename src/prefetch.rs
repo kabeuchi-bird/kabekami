@@ -104,7 +104,7 @@ pub fn process_for_cache(
     mode: DisplayMode,
     blur_sigma: f32,
     bg_darken: f32,
-    cache: &Cache,
+    cache: &Arc<Cache>,
 ) -> anyhow::Result<PathBuf> {
     let key = CacheKey {
         src: src.to_path_buf(),

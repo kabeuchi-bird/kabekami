@@ -10,8 +10,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -29,6 +29,8 @@ pub struct Cache {
     /// ディスク上に存在するキャッシュファイルのパス集合。
     /// ホットパスで `path.exists()` syscall を省略するために使う。
     known: Mutex<HashSet<PathBuf>>,
+    /// バックグラウンド退避タスクが走行中。重複起動を防ぐ。
+    eviction_running: AtomicBool,
 }
 
 /// キャッシュのルックアップ・格納に使うキー。
@@ -49,6 +51,7 @@ impl Cache {
             max_size_bytes: max_size_mb.saturating_mul(1024 * 1024),
             tracked_size: AtomicU64::new(u64::MAX), // u64::MAX = 未初期化
             known: Mutex::new(HashSet::new()),
+            eviction_running: AtomicBool::new(false),
         }
     }
 
@@ -78,7 +81,11 @@ impl Cache {
     ///
     /// すでに同じキーのファイルが存在する場合は書き込みをスキップして
     /// 既存のパスを返す（並列で先読みが書いた場合などの重複書き込み防止）。
-    pub fn store(&self, key: &CacheKey, img: &image::RgbaImage) -> Result<PathBuf> {
+    ///
+    /// 容量超過時の LRU 退避は呼び出しスレッドではなくバックグラウンドで実行する
+    /// （`tokio::task::spawn_blocking`）。これにより大容量キャッシュの `read_dir`
+    /// が壁紙適用パスをブロックしない。
+    pub fn store(self: &Arc<Self>, key: &CacheKey, img: &image::RgbaImage) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.directory)
             .with_context(|| format!("failed to create cache dir: {}", self.directory.display()))?;
 
@@ -106,12 +113,40 @@ impl Cache {
             let current = self.tracked_size.load(Ordering::Relaxed);
             // 未初期化 or 上限超過の場合のみフルスキャン（通常はインクリメントのみ）
             if current == u64::MAX || current.saturating_add(file_size) > self.max_size_bytes {
-                self.evict_if_needed()?;
+                self.spawn_eviction();
             } else {
                 self.tracked_size.fetch_add(file_size, Ordering::Relaxed);
             }
         }
         Ok(path)
+    }
+
+    /// バックグラウンドで `evict_if_needed()` を発火する。
+    ///
+    /// すでに退避タスクが走行中ならスキップする（`eviction_running` フラグ）。
+    /// tokio ランタイムが利用できない場合（テストなど）は同期実行にフォールバック。
+    fn spawn_eviction(self: &Arc<Self>) {
+        if self.eviction_running.swap(true, Ordering::AcqRel) {
+            return; // 既に走行中
+        }
+        let cache = Arc::clone(self);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(move || {
+                    if let Err(e) = cache.evict_if_needed() {
+                        tracing::warn!("background eviction failed: {}", e);
+                    }
+                    cache.eviction_running.store(false, Ordering::Release);
+                });
+            }
+            Err(_) => {
+                // ランタイム外（テスト等）。同期で実行。
+                if let Err(e) = self.evict_if_needed() {
+                    tracing::warn!("eviction failed: {}", e);
+                }
+                self.eviction_running.store(false, Ordering::Release);
+            }
+        }
     }
 
     /// `max_size_bytes` を超えていたら古いキャッシュファイルを LRU 順に削除する。
@@ -225,10 +260,10 @@ mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
 
-    fn tmp_cache(name: &str) -> Cache {
+    fn tmp_cache(name: &str) -> Arc<Cache> {
         let dir = std::env::temp_dir().join(format!("kabekami-cache-test-{}", name));
         let _ = std::fs::remove_dir_all(&dir);
-        Cache::new(dir, 10)
+        Arc::new(Cache::new(dir, 10))
     }
 
     fn solid_rgba(w: u32, h: u32) -> RgbaImage {

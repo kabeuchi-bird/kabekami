@@ -21,7 +21,12 @@ use notify::{
     event::{ModifyKind, RenameMode},
     EventKind, RecursiveMode, Watcher,
 };
-use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
+
+/// ディレクトリ監視のチャンネル容量。大量のファイル操作（コピー等）で
+/// 一時的にバーストしてもメインタスクが処理しきれるよう余裕をもたせた値。
+/// 溢れた場合は最古のイベントが落ちる（次の取りこぼしは起動時のスキャンで吸収）。
+const WATCH_QUEUE_CAPACITY: usize = 256;
 
 /// スケジューラに送信するディレクトリ変更イベント。
 #[derive(Debug)]
@@ -47,8 +52,8 @@ pub struct DirWatcher {
 pub fn spawn(
     dirs: &[PathBuf],
     recursive: bool,
-) -> Option<(DirWatcher, UnboundedReceiver<WatchEvent>)> {
-    let (tx, rx) = mpsc::unbounded_channel::<WatchEvent>();
+) -> Option<(DirWatcher, Receiver<WatchEvent>)> {
+    let (tx, rx) = mpsc::channel::<WatchEvent>(WATCH_QUEUE_CAPACITY);
 
     let mut watcher =
         match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -70,7 +75,11 @@ pub fn spawn(
                     }
                     _ => continue,
                 };
-                let _ = tx.send(msg);
+                // 同期コールバックなのでブロックしない try_send。
+                // 溢れた場合はイベントを落とす（バックプレッシャより取りこぼし優先）。
+                if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(msg) {
+                    tracing::debug!("watcher channel full; dropping event");
+                }
             }
         }) {
             Ok(w) => w,

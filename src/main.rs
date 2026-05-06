@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
         match watcher::spawn(&collect_watch_dirs(&config), config.sources.recursive) {
             Some((w, rx)) => (rx, Some(w)),
             None => {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<watcher::WatchEvent>();
+                let (tx, rx) = tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
                 drop(tx);
                 (rx, None)
             }
@@ -452,7 +452,7 @@ async fn main() -> Result<()> {
                                         Some((w, rx)) => (rx, Some(w)),
                                         None => {
                                             let (tx, rx) =
-                                                tokio::sync::mpsc::unbounded_channel::<watcher::WatchEvent>();
+                                                tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
                                             drop(tx);
                                             (rx, None)
                                         }
