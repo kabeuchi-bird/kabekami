@@ -184,9 +184,16 @@ fn render_preview(req: &PreviewRequest) -> anyhow::Result<egui::ColorImage> {
     const PREV_W: u32 = 480;
     const PREV_H: u32 = 270; // 16:9
 
+    // EXIF Orientation を読み取りつつデコード（縦撮り写真などが正しい向きで表示される）
+    use image::ImageDecoder;
     let reader = image::ImageReader::open(&req.path)?
         .with_guessed_format()?;
-    let src = reader.decode()?;
+    let mut decoder = reader.into_decoder()?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut src = image::DynamicImage::from_decoder(decoder)?;
+    src.apply_orientation(orientation);
 
     let rgba = kabekami_common::display_mode::process(
         &src,

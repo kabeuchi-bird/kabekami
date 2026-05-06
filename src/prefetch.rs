@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use image::ImageDecoder;
 use tokio::task::JoinHandle;
 
 use crate::cache::{Cache, CacheKey};
@@ -141,9 +142,21 @@ pub fn process_for_cache(
         }
     }
 
-    let img = reader
-        .decode()
+    // EXIF Orientation を読み取りつつデコード。decode() は orientation を取り出す前に
+    // reader を消費するので into_decoder() で分解する必要がある。
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| anyhow::anyhow!("failed to create decoder for {}: {}", src.display(), e))?;
+    let orientation = decoder.orientation().unwrap_or_else(|e| {
+        tracing::debug!("orientation read failed for {}: {}", src.display(), e);
+        image::metadata::Orientation::NoTransforms
+    });
+    let mut img = image::DynamicImage::from_decoder(decoder)
         .map_err(|e| anyhow::anyhow!("failed to decode {}: {}", src.display(), e))?;
+    if !matches!(orientation, image::metadata::Orientation::NoTransforms) {
+        tracing::debug!("applying EXIF orientation {:?} to {}", orientation, src.display());
+        img.apply_orientation(orientation);
+    }
 
     let processed =
         crate::display_mode::process(&img, screen_w, screen_h, mode, blur_sigma, bg_darken);
