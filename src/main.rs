@@ -56,10 +56,10 @@ async fn main() -> Result<()> {
         return send_to_daemon(cmd).await;
     }
 
-    // Config を先にロード（tracing の初期化に warn_notify フラグが必要なため）
+    // Config を先にロード（tracing の warn_notify 初期値を取得するため）
     let mut config = Config::load().context("failed to load config")?;
 
-    // warn_notify に応じた tracing subscriber を初期化
+    // tracing subscriber を初期化（warn_notify は実行時に動的切り替え可能）
     let mut warn_rx = init_tracing(config.ui.warn_notify);
 
     tracing::info!(?config, "loaded config");
@@ -473,8 +473,9 @@ async fn main() -> Result<()> {
                                 }
 
                                 if new_cfg.ui.warn_notify != config.ui.warn_notify {
-                                    tracing::warn!(
-                                        "warn_notify setting changed ({} → {}); restart kabekami to apply this change",
+                                    WARN_NOTIFY_ENABLED.store(new_cfg.ui.warn_notify, Ordering::Relaxed);
+                                    tracing::info!(
+                                        "warn_notify toggled: {} → {}",
                                         config.ui.warn_notify,
                                         new_cfg.ui.warn_notify
                                     );
@@ -567,10 +568,9 @@ async fn main() -> Result<()> {
                 let _ = cmd_tx_for_config.send(TrayCmd::ReloadConfig);
             }
 
-            msg = next_warn(&mut warn_rx) => {
-                match msg {
-                    Some(msg) => notifier.warn(&msg).await,
-                    None => warn_rx = None,
+            msg = warn_rx.recv() => {
+                if let Some(msg) = msg {
+                    notifier.warn(&msg).await;
                 }
             }
 
@@ -602,26 +602,23 @@ fn build_filtered_images_list(
     Ok(images)
 }
 
-fn init_tracing(warn_notify: bool) -> Option<tokio::sync::mpsc::UnboundedReceiver<String>> {
+/// tracing subscriber を初期化する。
+///
+/// `WarnNotifyLayer` は常時インストールし、実行時の有効・無効は
+/// `WARN_NOTIFY_ENABLED` フラグで切り替える（`config.toml` 編集で動的反映）。
+fn init_tracing(warn_notify: bool) -> tokio::sync::mpsc::UnboundedReceiver<String> {
     use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("kabekami=info,warn"));
 
-    if warn_notify {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer())
-            .with(WarnNotifyLayer { tx })
-            .init();
-        Some(rx)
-    } else {
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer())
-            .init();
-        None
-    }
+    WARN_NOTIFY_ENABLED.store(warn_notify, Ordering::Relaxed);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer())
+        .with(WarnNotifyLayer { tx })
+        .init();
+    rx
 }
 
 /// CLI 引数を解析して `CliCmd` を返す。引数がなければ `None`（デーモンモード）。
@@ -717,18 +714,14 @@ async fn spawn_dbus_iface(
     }
 }
 
-async fn next_warn(
-    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
-) -> Option<String> {
-    match rx {
-        Some(rx) => rx.recv().await,
-        None => std::future::pending().await,
-    }
-}
-
 struct WarnNotifyLayer {
     tx: tokio::sync::mpsc::UnboundedSender<String>,
 }
+
+/// `warn_notify` の現在状態。`config.toml` 編集で動的に切り替えられる。
+/// 起動時に一度だけ `WarnNotifyLayer` をインストールし、`on_event` で
+/// このフラグを参照することで再起動なしの ON/OFF を実現する。
+static WARN_NOTIFY_ENABLED: AtomicBool = AtomicBool::new(false);
 
 struct MessageVisitor(String);
 
@@ -751,6 +744,9 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnNotifyLayer {
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        if !WARN_NOTIFY_ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
         if *event.metadata().level() == tracing::Level::WARN
             && event.metadata().target().starts_with("kabekami")
         {
