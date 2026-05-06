@@ -62,12 +62,12 @@ impl Cache {
     /// 呼び出し元は IO エラー時にキャッシュミスとして再処理すること。
     pub fn get(&self, key: &CacheKey) -> Option<PathBuf> {
         let path = self.path_for(key);
-        if self.known.lock().unwrap().contains(&path) {
+        if self.known.lock().expect("known set lock").contains(&path) {
             return Some(path);
         }
         // コールドパス: デーモン起動後の初回アクセス時のみ syscall が発生する。
         if path.exists() {
-            self.known.lock().unwrap().insert(path.clone());
+            self.known.lock().expect("known set lock").insert(path.clone());
             Some(path)
         } else {
             None
