@@ -57,9 +57,12 @@ impl PlasmaShell {
     /// 1. D-Bus `evaluateScript` を試みる（高速・確実）
     /// 2. 失敗した場合は `plasma-apply-wallpaperimage` CLI にフォールバック
     pub async fn set_wallpaper(&self, path: &Path) -> Result<()> {
-        let canonical = path
-            .canonicalize()
-            .with_context(|| format!("failed to canonicalize path: {}", path.display()))?;
+        let canonical = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            path.canonicalize()
+                .with_context(|| format!("failed to canonicalize path: {}", path.display()))?
+        };
 
         if let Some(ref conn) = self.conn {
             match set_wallpaper_dbus(&canonical, conn).await {
@@ -94,9 +97,13 @@ impl PlasmaShell {
         let canonical: Vec<(usize, std::path::PathBuf)> = entries
             .iter()
             .map(|(idx, p)| {
-                p.canonicalize()
-                    .with_context(|| format!("failed to canonicalize path: {}", p.display()))
-                    .map(|c| (*idx, c))
+                let c = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    p.canonicalize()
+                        .with_context(|| format!("failed to canonicalize path: {}", p.display()))?
+                };
+                Ok((*idx, c))
             })
             .collect::<Result<_>>()?;
 
