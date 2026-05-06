@@ -8,8 +8,10 @@
 //! `store()` の後に `evict_if_needed()` を呼び、総容量が `max_size_bytes` を
 //! 超えていれば更新日時の古いファイルから削除する。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result};
@@ -24,6 +26,9 @@ pub struct Cache {
     max_size_bytes: u64,
     /// キャッシュの推定合計サイズ（バイト）。u64::MAX は未初期化（フルスキャン要）。
     tracked_size: AtomicU64,
+    /// ディスク上に存在するキャッシュファイルのパス集合。
+    /// ホットパスで `path.exists()` syscall を省略するために使う。
+    known: Mutex<HashSet<PathBuf>>,
 }
 
 /// キャッシュのルックアップ・格納に使うキー。
@@ -43,17 +48,26 @@ impl Cache {
             directory,
             max_size_bytes: max_size_mb.saturating_mul(1024 * 1024),
             tracked_size: AtomicU64::new(u64::MAX), // u64::MAX = 未初期化
+            known: Mutex::new(HashSet::new()),
         }
     }
 
     /// キャッシュヒットなら該当ファイルのパスを返す。
     ///
-    /// `path.exists()` チェックと呼び出し元での利用の間に LRU 退避が走る可能性が
-    /// あるため（TOCTOU 競合）、返されたパスが存在しないこともある。
-    /// 呼び出し元は IO エラーが発生した場合にキャッシュミスとして再処理する。
+    /// `known` セットにあればメモリのみで判定（syscall なし）。
+    /// デーモン起動直後など `known` が空の場合のみ `path.exists()` にフォールバックし、
+    /// 結果を `known` に登録する。
+    ///
+    /// TOCTOU 注意: `known` への登録後に LRU 退避でファイルが消えることがある。
+    /// 呼び出し元は IO エラー時にキャッシュミスとして再処理すること。
     pub fn get(&self, key: &CacheKey) -> Option<PathBuf> {
         let path = self.path_for(key);
+        if self.known.lock().expect("known set lock").contains(&path) {
+            return Some(path);
+        }
+        // コールドパス: デーモン起動後の初回アクセス時のみ syscall が発生する。
         if path.exists() {
+            self.known.lock().expect("known set lock").insert(path.clone());
             Some(path)
         } else {
             None
@@ -69,7 +83,11 @@ impl Cache {
             .with_context(|| format!("failed to create cache dir: {}", self.directory.display()))?;
 
         let path = self.path_for(key);
+        if self.known.lock().unwrap().contains(&path) {
+            return Ok(path);
+        }
         if path.exists() {
+            self.known.lock().unwrap().insert(path.clone());
             return Ok(path);
         }
 
@@ -78,6 +96,7 @@ impl Cache {
             .with_context(|| format!("WebP encode failed: {}", path.display()))?;
 
         tracing::debug!("cached: {}", path.display());
+        self.known.lock().unwrap().insert(path.clone());
 
         if self.max_size_bytes > 0 {
             let file_size = std::fs::metadata(&path)
@@ -116,6 +135,7 @@ impl Cache {
                 Ok(()) => {
                     tracing::debug!("evicted from cache: {}", path.display());
                     remaining -= size;
+                    self.known.lock().unwrap().remove(path);
                 }
                 Err(e) => {
                     tracing::warn!("eviction failed for {}: {}", path.display(), e);
