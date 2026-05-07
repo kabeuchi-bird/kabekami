@@ -17,18 +17,22 @@ const HISTORY_LIMIT: usize = 50;
 /// - `queue`: まだ表示していない画像のキュー（前端が「次」）
 /// - `history`: 表示済み画像のスタック（後端が「直前」）
 /// - `current`: 現在表示中の画像
+///
+/// キュー・履歴・現在画像はすべて `images` へのインデックス（`usize`）で
+/// 保持する。`PathBuf` を持ち回らないことで refill 時のフルクローン
+/// （画像数 N に比例した GC 圧）を避けられる。
 pub struct Scheduler {
     /// ソース画像リスト（shuffle / refill の原本）
     images: Vec<PathBuf>,
     /// `images` の重複チェック用セット（O(1) ルックアップ）
     image_set: HashSet<PathBuf>,
     order: Order,
-    /// 未表示の画像キュー。空になったら `refill()` する。
-    queue: VecDeque<PathBuf>,
-    /// 表示済み履歴（後端が直近）。上限 `HISTORY_LIMIT`。
-    history: VecDeque<PathBuf>,
-    /// 現在表示中の画像。起動直後は `None`。
-    current: Option<PathBuf>,
+    /// 未表示の画像インデックスキュー。空になったら `refill()` する。
+    queue: VecDeque<usize>,
+    /// 表示済みインデックス履歴（後端が直近）。上限 `HISTORY_LIMIT`。
+    history: VecDeque<usize>,
+    /// 現在表示中の画像インデックス。起動直後は `None`。
+    current: Option<usize>,
     /// `true` ならタイマー割り込みでの自動切り替えを停止する。
     paused: bool,
 }
@@ -38,7 +42,7 @@ impl Scheduler {
     ///
     /// `order` が `Random` の場合はキューを Fisher-Yates シャッフルする。
     pub fn new(images: Vec<PathBuf>, order: Order) -> Self {
-        let queue = Self::build_queue(&images, order, None);
+        let queue = Self::build_queue(images.len(), order, None);
         let image_set = images.iter().cloned().collect();
         Self {
             images,
@@ -74,8 +78,9 @@ impl Scheduler {
             self.refill();
         }
 
-        self.current = self.queue.pop_front();
-        self.current.clone()
+        let idx = self.queue.pop_front()?;
+        self.current = Some(idx);
+        Some(self.images[idx].clone())
     }
 
     /// 直前の壁紙に戻る。
@@ -83,15 +88,15 @@ impl Scheduler {
     /// 履歴がなければ `None` を返す（最古の壁紙より前には戻れない）。
     /// 現在の画像はキューの先頭に差し戻されるので、`next()` で再び取得できる。
     pub fn prev(&mut self) -> Option<PathBuf> {
-        let prev = self.history.pop_back()?;
+        let prev_idx = self.history.pop_back()?;
 
         // 現在の画像をキューに差し戻す
-        if let Some(cur) = self.current.take() {
-            self.queue.push_front(cur);
+        if let Some(cur_idx) = self.current.take() {
+            self.queue.push_front(cur_idx);
         }
 
-        self.current = Some(prev.clone());
-        Some(prev)
+        self.current = Some(prev_idx);
+        Some(self.images[prev_idx].clone())
     }
 
     /// 次に表示される画像をチラ見せする（状態を変えない）。
@@ -99,12 +104,12 @@ impl Scheduler {
     /// - キューが空でない場合はその先頭を返す（prefetch で使用）
     /// - キューが空の場合は `None`（refill 前のタイミング）
     pub fn peek_next(&self) -> Option<&PathBuf> {
-        self.queue.front()
+        self.queue.front().map(|&idx| &self.images[idx])
     }
 
     /// 現在表示中の画像パスを返す。
     pub fn current(&self) -> Option<&PathBuf> {
-        self.current.as_ref()
+        self.current.map(|idx| &self.images[idx])
     }
 
     /// タイマー自動切り替えを一時停止する。
@@ -134,9 +139,10 @@ impl Scheduler {
         if !self.image_set.insert(path.clone()) {
             return; // すでに存在する
         }
-        self.images.push(path.clone());
+        let idx = self.images.len();
+        self.images.push(path);
         // キューの末尾にも追加して、現在の一巡に含める
-        self.queue.push_back(path);
+        self.queue.push_back(idx);
     }
 
     /// 画像を動的に削除する（ディレクトリ監視で使用）。
@@ -144,14 +150,41 @@ impl Scheduler {
     /// リスト・キュー・現在画像から除去する。
     /// 現在表示中の画像が削除された場合は `current` を `None` にし、
     /// 次の `next()` 呼び出しでキューから新しい画像を選択する。
+    ///
+    /// 内部では `swap_remove` で削除位置に末尾要素を埋めるため、
+    /// 末尾要素のインデックスを参照しているキュー・履歴・現在画像を再マップする。
     pub fn remove_image(&mut self, path: &Path) {
-        self.images.retain(|p| p != path);
+        let Some(idx) = self.images.iter().position(|p| p == path) else {
+            return;
+        };
         self.image_set.remove(path);
-        self.queue.retain(|p| p != path);
-        if self.current.as_deref() == Some(path) {
+
+        let last = self.images.len() - 1;
+        self.images.swap_remove(idx);
+
+        // 削除されたインデックス（idx）を参照していたエントリを除去
+        self.queue.retain(|&i| i != idx);
+        self.history.retain(|&i| i != idx);
+        if self.current == Some(idx) {
             self.current = None;
         }
-        self.history.retain(|p| p != path);
+
+        // swap_remove により末尾要素 (last) が idx に移動したので再マップ
+        if idx != last {
+            for q in self.queue.iter_mut() {
+                if *q == last {
+                    *q = idx;
+                }
+            }
+            for h in self.history.iter_mut() {
+                if *h == last {
+                    *h = idx;
+                }
+            }
+            if self.current == Some(last) {
+                self.current = Some(idx);
+            }
+        }
     }
 
     // ---- private --------------------------------------------------------
@@ -160,24 +193,24 @@ impl Scheduler {
     /// - Sequential: ソース順に再追加
     /// - Random: Fisher-Yates でシャッフルして追加（直前の current と先頭が重ならないよう配慮）
     fn refill(&mut self) {
-        let avoid_first = self.current.as_ref();
-        self.queue = Self::build_queue(&self.images, self.order, avoid_first);
+        let avoid_first = self.current;
+        self.queue = Self::build_queue(self.images.len(), self.order, avoid_first);
     }
 
     fn build_queue(
-        images: &[PathBuf],
+        image_count: usize,
         order: Order,
-        avoid_first: Option<&PathBuf>,
-    ) -> VecDeque<PathBuf> {
+        avoid_first: Option<usize>,
+    ) -> VecDeque<usize> {
         match order {
-            Order::Sequential => images.iter().cloned().collect(),
+            Order::Sequential => (0..image_count).collect(),
             Order::Random => {
-                let mut v = images.to_vec();
+                let mut v: Vec<usize> = (0..image_count).collect();
                 fisher_yates(&mut v);
                 // 直前に表示していた画像が先頭に来てしまったら 1 つずらす
                 if v.len() > 1 {
                     if let Some(avoid) = avoid_first {
-                        if v.first() == Some(avoid) {
+                        if v.first() == Some(&avoid) {
                             v.rotate_left(1);
                         }
                     }
