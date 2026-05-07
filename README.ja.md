@@ -6,6 +6,7 @@ KDE Plasma 向け壁紙ローテーションデーモン。Rust 製。
 
 - ローカル画像をタイマーで順次 / ランダム切り替え
 - **BlurPad** モード: ぼかした背景の中央に元画像をオーバーレイ（[Variety](https://github.com/varietywalls/variety) の blur-pad 相当）
+- **EXIF Orientation 対応**: 縦撮り写真や回転情報を持つ画像も正しい向きで表示
 - システムトレイ常駐（SNI）＋コンテキストメニュー、多言語対応
 - LRU キャッシュ＋先読みで短い間隔でも即座に切り替え
 - **マルチモニター**: `kscreen-doctor` で各画面の解像度に最適化した画像を個別適用
@@ -13,6 +14,7 @@ KDE Plasma 向け壁紙ローテーションデーモン。Rust 製。
 - **二度と表示しない**: 壁紙を永続ブラックリスト登録（`~/.config/kabekami/blacklist.txt`）
 - **グローバルショートカット**: システム設定 → ショートカット → kabekami で設定可能
 - **セッション管理**: `logind` でシャットダウン検知・Plasma 再起動時に壁紙を自動再適用
+- **設定の自動リロード**: `config.toml` の変更を inotify で検知し再起動なしで反映
 - **GUI 設定ツール**（`kabekami-config`）: egui 製の 6 タブ設定画面。BlurPad リアルタイムプレビュー付き
 
 ## 動作要件
@@ -25,6 +27,7 @@ KDE Plasma 向け壁紙ローテーションデーモン。Rust 製。
 | 外部コマンド | `plasma-apply-wallpaperimage`（`plasma-workspace` 同梱） |
 | D-Bus | セッションバスへのアクセス（トレイ表示に必要） |
 | `kscreen-doctor` | 任意 — マルチモニター自動検出に必要（`kscreen` パッケージ） |
+| `kdialog` | 任意 — `kabekami-config` でネイティブな KDE ファイル／フォルダ選択ダイアログを使用 |
 
 ## インストール
 
@@ -164,6 +167,8 @@ kabekami --quit
 ### 対応画像形式
 
 kabekami は以下の画像形式に対応しています: **jpg, jpeg, png, webp, avif**
+
+EXIF Orientation タグは自動的に読み取り・適用されるため、縦撮り写真や回転情報を持つ画像も正しい向きで表示されます。
 
 注意: bmp, tiff, gif には対応していません（バイナリサイズ削減のため `image` クレートの feature を jpeg/png/webp/avif に限定しています）。
 
