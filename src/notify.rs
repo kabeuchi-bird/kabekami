@@ -88,7 +88,7 @@ impl Notifier {
 
     /// 情報通知を送る（5 秒で自動消去・連続通知は集約しない）。
     /// オンライン取得完了サマリーなどの軽い通知に使う。
-    pub async fn info(&self, summary: &str, body: &str) {
+    pub async fn info(&mut self, summary: &str, body: &str) {
         let hints: HashMap<String, OwnedValue> = HashMap::new();
         if let Err(e) = self.send_info_dbus(summary, body, hints).await {
             tracing::debug!("desktop notification unavailable: {}", e);
@@ -96,12 +96,17 @@ impl Notifier {
     }
 
     /// `info()` 用の D-Bus 呼び出し（`replaces_id = 0` で常に新規通知）。
+    /// 起動時に D-Bus が使えなかった場合に備えて遅延再接続を行う
+    /// （`send_dbus()` と同じパターン）。
     async fn send_info_dbus(
-        &self,
+        &mut self,
         summary: &str,
         body: &str,
         hints: HashMap<String, OwnedValue>,
     ) -> Result<()> {
+        if self.conn.is_none() {
+            self.conn = zbus::Connection::session().await.ok();
+        }
         let conn = self.conn.as_ref()
             .ok_or_else(|| anyhow::anyhow!("D-Bus session unavailable"))?;
         let actions: Vec<&str> = vec![];
