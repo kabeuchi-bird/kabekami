@@ -4,18 +4,11 @@
 
 A KDE Plasma wallpaper rotation daemon written in Rust.
 
-- Rotates local images on a timer (sequential or random order)
-- **BlurPad** mode: original image centred on a blurred background (like [Variety](https://github.com/varietywalls/variety)'s blur-pad)
-- **EXIF orientation**: portrait photos and rotated camera shots display in the correct orientation
-- System tray icon (SNI) with context menu, multi-language UI
-- LRU cache + background prefetch for instant switching at any interval
+- Rotates local images on a timer (sequential or random) with a system tray menu
+- **BlurPad** mode: image centred on a blurred background (like [Variety](https://github.com/varietywalls/variety)'s blur-pad)
 - **Multi-monitor**: per-screen resolution-optimised images via `kscreen-doctor`
 - **Online sources**: Bing Daily, Unsplash, Wallhaven, Reddit — auto-downloaded on a schedule
-- **Never Show Again**: permanently blacklist a wallpaper (`~/.config/kabekami/blacklist.txt`)
-- **Global shortcuts**: configurable via System Settings → Shortcuts → kabekami
-- **Session management**: graceful shutdown via `logind`, auto-reapply on Plasma restart
-- **Auto config reload**: `config.toml` changes are picked up via inotify — no restart needed
-- **GUI settings tool** (`kabekami-config`): 6-tab egui interface with real-time BlurPad preview
+- **GUI settings tool** (`kabekami-config`) with real-time BlurPad preview
 
 ## Requirements
 
