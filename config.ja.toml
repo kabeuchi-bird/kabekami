@@ -85,6 +85,10 @@ language = "ja"
 # WARN レベルのログイベントをデスクトップ通知として表示するか（デフォルト: false）。
 warn_notify = false
 
+# オンラインソースが新しい画像を取得したときにデスクトップ通知を出すか
+# （例: 「unsplash から 10 枚の画像をダウンロードしました」）。デフォルト: true。
+notify_fetch = true
+
 # 「二度と表示しない」ブラックリスト機能を有効にするか（デフォルト: true）。
 # false にするとトレイメニュー項目・--blacklist-current CLI・D-Bus メソッドが無効になります。
 enable_blacklist = true

@@ -6,6 +6,7 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 
 - Rotates local images on a timer (sequential or random order)
 - **BlurPad** mode: original image centred on a blurred background (like [Variety](https://github.com/varietywalls/variety)'s blur-pad)
+- **EXIF orientation**: portrait photos and rotated camera shots display in the correct orientation
 - System tray icon (SNI) with context menu, multi-language UI
 - LRU cache + background prefetch for instant switching at any interval
 - **Multi-monitor**: per-screen resolution-optimised images via `kscreen-doctor`
@@ -13,6 +14,7 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 - **Never Show Again**: permanently blacklist a wallpaper (`~/.config/kabekami/blacklist.txt`)
 - **Global shortcuts**: configurable via System Settings → Shortcuts → kabekami
 - **Session management**: graceful shutdown via `logind`, auto-reapply on Plasma restart
+- **Auto config reload**: `config.toml` changes are picked up via inotify — no restart needed
 - **GUI settings tool** (`kabekami-config`): 6-tab egui interface with real-time BlurPad preview
 
 ## Requirements
@@ -25,6 +27,7 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 | External | `plasma-apply-wallpaperimage` (bundled with `plasma-workspace`) |
 | D-Bus | Session bus (required for tray icon) |
 | `kscreen-doctor` | Optional — needed for multi-monitor auto-detection (`kscreen` package) |
+| `kdialog` | Optional — native KDE file/folder picker dialogs in `kabekami-config` |
 
 ## Installation
 
@@ -164,6 +167,8 @@ See [`config.toml`](config.toml) in this repository for a fully annotated refere
 ### Supported Image Formats
 
 kabekami supports the following image formats: **jpg, jpeg, png, webp, avif**
+
+EXIF Orientation tags are read and applied automatically, so portrait photos and rotated camera shots are displayed in the correct orientation.
 
 Note: bmp, tiff, and gif are not supported (the `image` crate features are limited to jpeg/png/webp/avif to reduce binary size).
 

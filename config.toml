@@ -86,6 +86,10 @@ language = "en"
 # Show WARN-level log events as desktop notifications (default: false).
 warn_notify = false
 
+# Show a desktop notification when an online source finishes fetching new
+# images (e.g., "Downloaded 10 image(s) from unsplash"). Default: true.
+notify_fetch = true
+
 # Enable the "Never Show Again" blacklist feature (default: true).
 # When false, the tray menu item, CLI flag, and D-Bus method are all disabled.
 enable_blacklist = true

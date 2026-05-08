@@ -90,6 +90,10 @@ impl KabekamiTray {
 }
 
 impl ksni::Tray for KabekamiTray {
+    /// 左クリック（activate）でも右クリックと同じメニューを開く。
+    /// 既定の `false` ではトレイ実装側の挙動（KDE は何もしない）になる。
+    const MENU_ON_ACTIVATE: bool = true;
+
     fn id(&self) -> String {
         env!("CARGO_PKG_NAME").into()
     }

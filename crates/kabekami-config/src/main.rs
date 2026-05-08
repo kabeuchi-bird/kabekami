@@ -816,6 +816,11 @@ impl KabekamiApp {
         );
         ui.add_space(4.0);
         ui.checkbox(
+            &mut self.config.ui.notify_fetch,
+            "オンライン取得完了時に通知を表示 / Notify when online sources finish fetching",
+        );
+        ui.add_space(4.0);
+        ui.checkbox(
             &mut self.config.ui.enable_blacklist,
             "「二度と表示しない」機能を有効にする / Enable \"Never Show Again\" blacklist",
         );

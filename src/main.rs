@@ -224,6 +224,7 @@ async fn main() -> Result<()> {
             Some(result) = online_rx.recv() => {
                 if !result.new_paths.is_empty() {
                     let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
+                    let provider_name = result.provider.clone();
                     let new_paths: Vec<_> = result.new_paths.into_iter()
                         .filter(|p| !blacklist.contains(p))
                         .collect();
@@ -233,12 +234,19 @@ async fn main() -> Result<()> {
                     }
                     tracing::info!(
                         "provider {}: {} new image(s) added to rotation",
-                        result.provider,
+                        provider_name,
                         added
                     );
                     if let Some(ref h) = tray_handle {
                         let count = scheduler.image_count();
                         h.update(|t| t.image_count = count).await;
+                    }
+                    if added > 0 && config.ui.notify_fetch {
+                        let strings = i18n::strings(lang);
+                        let body = strings.notify_fetch_body
+                            .replace("{provider}", &provider_name)
+                            .replace("{count}", &added.to_string());
+                        notifier.info(strings.notify_fetch_title, &body).await;
                     }
                     if was_empty {
                         if let Some(path) = scheduler.next() {

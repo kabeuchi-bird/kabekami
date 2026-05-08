@@ -83,6 +83,11 @@ pub struct UiStrings {
     pub tooltip_error:      &'static str,
     pub notify_failed:      &'static str,
     pub notify_warning:     &'static str,
+    /// オンライン取得サマリー通知のヘッダー
+    pub notify_fetch_title: &'static str,
+    /// オンライン取得サマリー通知の本文。
+    /// 置換トークン: `{provider}` = プロバイダー名, `{count}` = 取得枚数
+    pub notify_fetch_body:  &'static str,
     /// `tray::INTERVAL_PRESETS` と同じ長さ（6 件）であること
     pub interval_labels:    &'static [&'static str],
     pub open_settings:      &'static str,
@@ -108,6 +113,8 @@ pub static EN: UiStrings = UiStrings {
     tooltip_error:      "Error: {}",
     notify_failed:      "Wallpaper apply failed",
     notify_warning:     "kabekami Warning",
+    notify_fetch_title: "Online sources",
+    notify_fetch_body:  "Downloaded {count} image(s) from {provider}",
     interval_labels:    &["10s", "30s", "5m", "30m", "1h", "3h"],
     open_settings:      "Open Settings",
     images:             "images",
@@ -131,6 +138,8 @@ pub static JA: UiStrings = UiStrings {
     tooltip_error:      "エラー: {}",
     notify_failed:      "壁紙の設定に失敗しました",
     notify_warning:     "kabekami 警告",
+    notify_fetch_title: "オンラインソース",
+    notify_fetch_body:  "{provider} から {count} 枚の画像をダウンロードしました",
     interval_labels:    &["10秒", "30秒", "5分", "30分", "1時間", "3時間"],
     open_settings:      "設定を開く",
     images:             "枚",
