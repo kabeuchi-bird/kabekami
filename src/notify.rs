@@ -89,45 +89,14 @@ impl Notifier {
     /// 情報通知を送る（5 秒で自動消去・連続通知は集約しない）。
     /// オンライン取得完了サマリーなどの軽い通知に使う。
     pub async fn info(&mut self, summary: &str, body: &str) {
+        // `replaces_id = 0` で常に新規通知。ID は捨てる（連続通知を集約しないため）。
         let hints: HashMap<String, OwnedValue> = HashMap::new();
-        if let Err(e) = self.send_info_dbus(summary, body, hints).await {
+        if let Err(e) = self
+            .send_dbus("preferences-desktop-wallpaper", summary, body, 5000, 0, hints)
+            .await
+        {
             tracing::debug!("desktop notification unavailable: {}", e);
         }
-    }
-
-    /// `info()` 用の D-Bus 呼び出し（`replaces_id = 0` で常に新規通知）。
-    /// 起動時に D-Bus が使えなかった場合に備えて遅延再接続を行う
-    /// （`send_dbus()` と同じパターン）。
-    async fn send_info_dbus(
-        &mut self,
-        summary: &str,
-        body: &str,
-        hints: HashMap<String, OwnedValue>,
-    ) -> Result<()> {
-        if self.conn.is_none() {
-            self.conn = zbus::Connection::session().await.ok();
-        }
-        let conn = self.conn.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("D-Bus session unavailable"))?;
-        let actions: Vec<&str> = vec![];
-        conn.call_method(
-            Some("org.freedesktop.Notifications"),
-            "/org/freedesktop/Notifications",
-            Some("org.freedesktop.Notifications"),
-            "Notify",
-            &(
-                "kabekami",
-                0u32,                       // replaces_id = 0 → 新規通知
-                "preferences-desktop-wallpaper",
-                summary,
-                body,
-                actions,
-                hints,
-                5000i32,                    // 5s で自動消去
-            ),
-        )
-        .await?;
-        Ok(())
     }
 
     /// `org.freedesktop.Notifications::Notify` を呼び、付与された通知 ID を返す。

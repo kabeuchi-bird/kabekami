@@ -21,14 +21,13 @@ const COMPONENT: &str = "kabekami";
     default_path = "/kglobalaccel"
 )]
 trait KGlobalAccel {
-    /// アクションを登録し、デフォルトキーを設定する。
-    /// `keys` に空配列を渡すとデフォルトなし（ユーザーが手動設定）。
-    fn set_shortcut_keys(
-        &self,
-        action_id: Vec<String>,
-        keys: Vec<Vec<u32>>,
-        flags: u32,
-    ) -> zbus::Result<bool>;
+    /// アクションを登録する（デフォルトキーは割り当てない）。
+    ///
+    /// KDE は camelCase の D-Bus メソッド名を使うため `name = "doRegister"` で
+    /// オーバーライドする（zbus 既定の PascalCase だと `DoRegister` になり
+    /// `UnknownMethod` エラーになる）。
+    #[zbus(name = "doRegister")]
+    fn do_register(&self, action_id: Vec<String>) -> zbus::Result<()>;
 }
 
 #[zbus::proxy(
@@ -37,7 +36,8 @@ trait KGlobalAccel {
     default_path = "/component/kabekami"
 )]
 trait KGlobalAccelComponent {
-    #[zbus(signal)]
+    /// KDE はシグナル名も camelCase（`globalShortcutPressed`）。
+    #[zbus(signal, name = "globalShortcutPressed")]
     fn global_shortcut_pressed(
         &self,
         component: String,
@@ -83,7 +83,7 @@ pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>) {
             COMPONENT.to_string(),
             display_name.to_string(),
         ];
-        if let Err(e) = accel.set_shortcut_keys(id, vec![], 0).await {
+        if let Err(e) = accel.do_register(id).await {
             tracing::warn!("shortcuts: failed to register {}: {}", action_id, e);
         }
     }
