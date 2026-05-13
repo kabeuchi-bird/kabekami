@@ -1,10 +1,15 @@
 //! 画面解像度の自動取得。
 //!
-//! `kscreen-doctor --outputs` の出力をパースして、有効な出力（モニター）の
+//! `kscreen-doctor` の出力をパースして、有効な出力（モニター）の
 //! 解像度を返す。環境変数 `KABEKAMI_SCREEN=WxH` が設定されている場合は
 //! main.rs 側で優先して使用され、この関数は呼ばれない。
 //!
-//! ## kscreen-doctor 出力例
+//! ## 検出戦略
+//!
+//! 1. `kscreen-doctor --json` を試す（Plasma 6 で安定、機械可読）
+//! 2. 失敗 / 空なら `kscreen-doctor --outputs` のテキスト出力を従来パーサで解析
+//!
+//! ## kscreen-doctor のテキスト出力例
 //!
 //! ```text
 //! Output: 1 DP-1 enabled connected primary geometry 0,0,2560x1440 resolution 2560x1440@60
@@ -19,8 +24,10 @@
 //!     1: 1920x1080@60 *current
 //! ```
 
+use serde::Deserialize;
+
 /// マルチモニター対応のモニター情報。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Monitor {
     /// kscreen-doctor が報告するコネクター名（例: "DP-1", "HDMI-1"）。
     pub name: String,
@@ -32,9 +39,40 @@ pub struct Monitor {
 
 /// 接続・有効化された全モニターを検出する。
 ///
-/// `kscreen-doctor --outputs` を実行し、`enabled` な全出力の情報を返す。
-/// コマンドが利用できない / 失敗した場合は空 Vec を返す。
+/// 1. `kscreen-doctor --json` を試す（Plasma 6 で安定）
+/// 2. 失敗 / 空なら `kscreen-doctor --outputs` のテキスト出力を解析する
+///
+/// どちらも失敗した場合は空 Vec を返す。
 pub fn detect_all() -> Vec<Monitor> {
+    if let Some(monitors) = detect_json() {
+        if !monitors.is_empty() {
+            return monitors;
+        }
+        tracing::debug!("kscreen-doctor --json returned 0 monitors, falling back to text");
+    }
+    detect_text()
+}
+
+/// `kscreen-doctor --json` で検出を試みる。
+///
+/// JSON 機能がない古い kscreen や、JSON 形式の変更で失敗した場合は `None` を返す。
+fn detect_json() -> Option<Vec<Monitor>> {
+    let output = std::process::Command::new("kscreen-doctor")
+        .arg("--json")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: KScreenJson = serde_json::from_str(&stdout)
+        .inspect_err(|e| tracing::debug!("kscreen-doctor --json parse failed: {}", e))
+        .ok()?;
+    Some(parse_json_monitors(&parsed))
+}
+
+/// `kscreen-doctor --outputs` のテキスト出力を解析する（旧パス・フォールバック）。
+fn detect_text() -> Vec<Monitor> {
     let output = std::process::Command::new("kscreen-doctor")
         .arg("--outputs")
         .output();
@@ -51,6 +89,62 @@ pub fn detect_all() -> Vec<Monitor> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     tracing::debug!("kscreen-doctor output:\n{}", stdout);
     parse_all_monitors(&stdout)
+}
+
+// ── JSON パース ──────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct KScreenJson {
+    #[serde(default)]
+    outputs: Vec<JsonOutput>,
+}
+
+#[derive(Deserialize)]
+struct JsonOutput {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default, rename = "currentModeId")]
+    current_mode_id: Option<String>,
+    #[serde(default)]
+    modes: Vec<JsonMode>,
+}
+
+#[derive(Deserialize)]
+struct JsonMode {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    size: JsonSize,
+}
+
+#[derive(Default, Deserialize)]
+struct JsonSize {
+    #[serde(default)]
+    width: u32,
+    #[serde(default)]
+    height: u32,
+}
+
+fn parse_json_monitors(cfg: &KScreenJson) -> Vec<Monitor> {
+    cfg.outputs
+        .iter()
+        .filter(|o| o.enabled)
+        .filter_map(|o| {
+            let current_id = o.current_mode_id.as_deref()?;
+            let mode = o.modes.iter().find(|m| m.id == current_id)?;
+            if mode.size.width > 100 && mode.size.height > 100 {
+                Some(Monitor {
+                    name: o.name.clone(),
+                    width: mode.size.width,
+                    height: mode.size.height,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// テキストから全 `enabled` 出力の解像度とコネクター名を取り出す。
@@ -216,5 +310,79 @@ mod tests {
     #[test]
     fn parse_all_monitors_empty() {
         assert!(parse_all_monitors("").is_empty());
+    }
+
+    // ── JSON パーサのテスト ──────────────────────────────────────────────
+
+    fn json_first(text: &str) -> Option<(u32, u32)> {
+        let parsed: KScreenJson = serde_json::from_str(text).ok()?;
+        parse_json_monitors(&parsed)
+            .into_iter()
+            .next()
+            .map(|m| (m.width, m.height))
+    }
+
+    #[test]
+    fn json_parses_current_mode() {
+        let text = r#"{
+            "outputs": [{
+                "name": "DP-1",
+                "enabled": true,
+                "currentModeId": "mode-2",
+                "modes": [
+                    {"id": "mode-1", "size": {"width": 1920, "height": 1080}},
+                    {"id": "mode-2", "size": {"width": 2560, "height": 1440}}
+                ]
+            }]
+        }"#;
+        assert_eq!(json_first(text), Some((2560, 1440)));
+    }
+
+    #[test]
+    fn json_skips_disabled() {
+        let text = r#"{
+            "outputs": [
+                {"name": "DP-1", "enabled": false, "currentModeId": "x",
+                 "modes": [{"id": "x", "size": {"width": 1920, "height": 1080}}]},
+                {"name": "HDMI-1", "enabled": true, "currentModeId": "y",
+                 "modes": [{"id": "y", "size": {"width": 3840, "height": 2160}}]}
+            ]
+        }"#;
+        assert_eq!(json_first(text), Some((3840, 2160)));
+    }
+
+    #[test]
+    fn json_skips_when_current_mode_missing() {
+        let text = r#"{
+            "outputs": [{
+                "name": "DP-1", "enabled": true, "currentModeId": "missing",
+                "modes": [{"id": "other", "size": {"width": 1920, "height": 1080}}]
+            }]
+        }"#;
+        assert_eq!(json_first(text), None);
+    }
+
+    #[test]
+    fn json_handles_empty_outputs() {
+        let text = r#"{"outputs": []}"#;
+        let parsed: KScreenJson = serde_json::from_str(text).unwrap();
+        assert!(parse_json_monitors(&parsed).is_empty());
+    }
+
+    #[test]
+    fn json_parses_multiple_enabled() {
+        let text = r#"{
+            "outputs": [
+                {"name": "DP-1", "enabled": true, "currentModeId": "a",
+                 "modes": [{"id": "a", "size": {"width": 2560, "height": 1440}}]},
+                {"name": "HDMI-1", "enabled": true, "currentModeId": "b",
+                 "modes": [{"id": "b", "size": {"width": 1920, "height": 1080}}]}
+            ]
+        }"#;
+        let parsed: KScreenJson = serde_json::from_str(text).unwrap();
+        let monitors = parse_json_monitors(&parsed);
+        assert_eq!(monitors.len(), 2);
+        assert_eq!(monitors[0].name, "DP-1");
+        assert_eq!(monitors[1].name, "HDMI-1");
     }
 }

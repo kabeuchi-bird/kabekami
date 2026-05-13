@@ -13,6 +13,7 @@ mod provider;
 mod scanner;
 mod scheduler;
 mod screen;
+mod screen_watcher;
 mod session;
 mod shortcuts;
 mod tray;
@@ -96,9 +97,9 @@ async fn main() -> Result<()> {
     }
 
     // モニター検出（マルチモニター対応）
-    let screens = resolve_screens().await;
+    let mut screens = resolve_screens().await;
     // プライマリ解像度: フェッチコンテキスト・プリフェッチに使用
-    let (screen_w, screen_h) = screens
+    let (mut screen_w, mut screen_h) = screens
         .first()
         .map(|m| (m.width, m.height))
         .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
@@ -150,6 +151,9 @@ async fn main() -> Result<()> {
     // セッション管理ウォッチャーを起動（ログアウト検知・Plasma 再起動検知）
     session::spawn_session_watcher(cmd_tx.clone()).await;
 
+    // 画面構成変更の監視（壁紙更新を契機に再検出、60s スロットル）
+    let screen_check_tx = screen_watcher::spawn(screens.clone(), cmd_tx.clone());
+
     // KDE グローバルショートカットを登録・監視する
     shortcuts::spawn_shortcut_watcher(cmd_tx).await;
 
@@ -181,7 +185,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let fetch_ctx = provider::FetchContext { screen_w, screen_h };
+    let mut fetch_ctx = provider::FetchContext { screen_w, screen_h };
 
     // 30 分ごとにプロバイダーを確認する（第 1 tick は即時）
     let mut fetch_ticker = tokio::time::interval(Duration::from_secs(1800));
@@ -203,7 +207,7 @@ async fn main() -> Result<()> {
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "initial apply failed").await;
+                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, screen_check_tx.as_ref(), "initial apply failed").await;
         }
     }
 
@@ -251,7 +255,7 @@ async fn main() -> Result<()> {
                     if was_empty {
                         if let Some(path) = scheduler.next() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "online: initial apply failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, screen_check_tx.as_ref(), "online: initial apply failed").await;
                         }
                     }
                 }
@@ -263,14 +267,18 @@ async fn main() -> Result<()> {
                 }
                 if let Some(path) = scheduler.next() {
                     apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "auto apply failed").await;
+                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, screen_check_tx.as_ref(), "auto apply failed").await;
                 }
             }
 
             Some(cmd) = cmd_rx.recv() => {
                 let now = std::time::Instant::now();
-                // Quit と PlasmaRestarted と ReloadConfig はスロットリングをバイパスする
-                let throttle_exempt = matches!(cmd, TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ReloadConfig);
+                // システムイベント系（Quit / PlasmaRestarted / ReloadConfig / ScreensChanged）は
+                // スロットリングをバイパスする
+                let throttle_exempt = matches!(
+                    cmd,
+                    TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ReloadConfig | TrayCmd::ScreensChanged(_)
+                );
                 if !throttle_exempt
                     && last_cmd_at.map_or(false, |t| now.duration_since(t) < Duration::from_millis(100))
                 {
@@ -283,7 +291,7 @@ async fn main() -> Result<()> {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Next failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, screen_check_tx.as_ref(), "tray Next failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -291,7 +299,7 @@ async fn main() -> Result<()> {
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "tray Prev failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, screen_check_tx.as_ref(), "tray Prev failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -365,7 +373,7 @@ async fn main() -> Result<()> {
                                     if let Some(next) = scheduler.next() {
                                         apply_and_notify(&next, &screens, &config, &cache,
                                             &plasma_shell, &mut notifier, &tray_handle,
-                                            &mut prefetcher, &scheduler, "apply after trash failed").await;
+                                            &mut prefetcher, &scheduler, screen_check_tx.as_ref(), "apply after trash failed").await;
                                     }
                                     if let Some(ref h) = tray_handle {
                                         h.update(|t| t.image_count = scheduler.image_count()).await;
@@ -390,7 +398,7 @@ async fn main() -> Result<()> {
                                     Some(next) => {
                                         apply_and_notify(&next, &screens, &config, &cache,
                                             &plasma_shell, &mut notifier, &tray_handle,
-                                            &mut prefetcher, &scheduler, "apply after blacklist failed").await;
+                                            &mut prefetcher, &scheduler, screen_check_tx.as_ref(), "apply after blacklist failed").await;
                                         if let Some(ref h) = tray_handle {
                                             h.update(|t| t.image_count = scheduler.image_count()).await;
                                         }
@@ -494,7 +502,7 @@ async fn main() -> Result<()> {
 
                                 if let Some(cur) = prev_current {
                                     apply_and_notify(&cur, &screens, &config, &cache, &plasma_shell,
-                                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reload: reapply failed").await;
+                                        &mut notifier, &tray_handle, &mut prefetcher, &scheduler, screen_check_tx.as_ref(), "reload: reapply failed").await;
                                 }
 
                                 if let Some(ref h) = tray_handle {
@@ -530,7 +538,28 @@ async fn main() -> Result<()> {
                         tracing::info!("Plasma restarted, re-applying wallpaper");
                         if let Some(path) = scheduler.current().cloned() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
-                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reapply after Plasma restart failed").await;
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, screen_check_tx.as_ref(), "reapply after Plasma restart failed").await;
+                        }
+                    }
+
+                    TrayCmd::ScreensChanged(new_screens) => {
+                        let (new_w, new_h) = new_screens.first()
+                            .map(|m| (m.width, m.height))
+                            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
+                        tracing::info!(
+                            "screens updated: {} monitor(s), primary {}x{}",
+                            new_screens.len(), new_w, new_h
+                        );
+                        screens = new_screens;
+                        screen_w = new_w;
+                        screen_h = new_h;
+                        fetch_ctx = provider::FetchContext { screen_w, screen_h };
+                        // 解像度が変わるとキャッシュキーも変わるため、現在の壁紙を
+                        // 新しい解像度で再加工して適用する。
+                        if let Some(path) = scheduler.current().cloned() {
+                            apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler, screen_check_tx.as_ref(),
+                                "reapply after screen change failed").await;
                         }
                     }
 
@@ -905,7 +934,8 @@ async fn apply(
     }
 }
 
-/// apply + 通知 + tray 更新 + prefetch 開始をまとめて行う。
+/// apply + 通知 + tray 更新 + prefetch 開始 + 画面構成再検出トリガーをまとめて行う。
+#[allow(clippy::too_many_arguments)]
 async fn apply_and_notify(
     path: &Path,
     screens: &[screen::Monitor],
@@ -916,6 +946,7 @@ async fn apply_and_notify(
     tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
     prefetcher: &mut Prefetcher,
     scheduler: &Scheduler,
+    screen_check_tx: Option<&tokio::sync::mpsc::UnboundedSender<()>>,
     ctx: &str,
 ) {
     if let Err(e) = apply(path, screens, config, cache, plasma).await {
@@ -931,6 +962,10 @@ async fn apply_and_notify(
             .map(|m| (m.width, m.height))
             .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
         start_prefetch(prefetcher, scheduler, w, h, config, cache);
+        // 画面構成の再検出を要求（ウォッチャー側で 60s スロットル）
+        if let Some(tx) = screen_check_tx {
+            let _ = tx.send(());
+        }
     }
 }
 
