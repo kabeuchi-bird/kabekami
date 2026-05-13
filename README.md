@@ -175,7 +175,7 @@ Note: bmp, tiff, and gif are not supported (the `image` crate features are limit
 
 **Multi-monitor: same image on all screens** — Install `kscreen` to enable per-monitor detection.
 
-**Wallpaper looks blurry / not at native resolution** — kabekami first tries `kscreen-doctor --json` (Plasma 6) and falls back to text parsing on older versions. If both fail (KScreen daemon unavailable at startup, etc.), it uses 1920×1080 until the next dynamic re-detection (polled every 60s). To diagnose, run `RUST_LOG=kabekami=debug kabekami` and check the `kscreen-doctor output` log line. As a workaround, override the resolution explicitly with `KABEKAMI_SCREEN=2560x1440` (your actual resolution).
+**Wallpaper looks blurry / not at native resolution** — kabekami first tries `kscreen-doctor --json` (Plasma 6) and falls back to text parsing on older versions. If both fail (KScreen daemon unavailable at startup, etc.), it uses 1920×1080 until the next wallpaper-update triggers a re-detection (throttled to a 60s minimum). To diagnose, run `RUST_LOG=kabekami=debug kabekami` and check the `kscreen-doctor output` log line. As a workaround, override the resolution explicitly with `KABEKAMI_SCREEN=2560x1440` (your actual resolution).
 
 **Online sources download 0 images** — Check API key, network, and `RUST_LOG=kabekami=debug` output.
 

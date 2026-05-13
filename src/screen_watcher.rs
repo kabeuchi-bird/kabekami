@@ -2,55 +2,74 @@
 //!
 //! 起動時の `resolve_screens()` が失敗（kscreen-doctor 未起動等）してフォールバック
 //! 解像度に落ちた場合でも、Plasma が後から立ち上がってきた時点で正しい解像度を
-//! 取得できるよう、定期的に `screen::detect_all()` を呼んで差分を検出する。
-//!
-//! 副次効果としてモニターのホットプラグ／解像度変更にも追従できる。
+//! 取得できるよう、壁紙更新のタイミングで `screen::detect_all()` を呼び直して
+//! 差分を検出する。副次効果としてモニターのホットプラグ・解像度変更にも追従できる。
 //!
 //! ## 設計
-//! - インターバルは 60 秒（kscreen-doctor 1 プロセスぶんなので十分軽量）
-//! - 環境変数 `KABEKAMI_SCREEN` が設定されている場合は監視しない（ユーザー上書きを尊重）
-//! - 差分が検出されたら `TrayCmd::ScreensChanged` を送信し、メインループ側で
+//! - **トリガー**: 壁紙更新イベント（`trigger_tx.send(())` 経由）
+//! - **スロットル**: 連続呼び出しは最低 60 秒間隔まで間引く。短い rotation
+//!   interval （例: 10 秒）でも kscreen-doctor を叩きすぎないようにする。
+//! - 環境変数 `KABEKAMI_SCREEN` が設定されている場合は無効化（ユーザー上書きを尊重）
+//! - 差分検出時は `TrayCmd::ScreensChanged` を送信し、メインループ側で
 //!   `screens` を差し替えて壁紙を再適用する。
 //!
-//! ## なぜポーリング？
-//! KDE には残念ながら全バージョンで安定した「画面構成変更シグナル」の D-Bus 公開が
-//! ないため、kscreen-doctor を周期実行する単純な方法に倒している。
+//! ## なぜシグナル監視ではなくポーリング？
+//! KDE には全バージョンで安定した「画面構成変更」D-Bus シグナルが無いため、
+//! 壁紙更新のタイミングで kscreen-doctor を呼び直すという単純な方法に倒している。
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 use crate::screen::{self, Monitor};
 use crate::tray::TrayCmd;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// 連続検出の最小間隔。短い rotation interval での kscreen-doctor 連打を防ぐ。
+const MIN_INTERVAL: Duration = Duration::from_secs(60);
 
-/// モニター構成の変化を周期的に検出するタスクをバックグラウンドで起動する。
+/// 画面構成検出ウォッチャーをバックグラウンドで起動する。
 ///
-/// `KABEKAMI_SCREEN` が設定されている場合は何もせずに戻る。
-pub fn spawn(initial: Vec<Monitor>, tx: UnboundedSender<TrayCmd>) {
+/// - `Some(trigger_tx)` を返した場合、`trigger_tx.send(())` で検出を要求できる。
+///   メインループは壁紙更新の直後にこれを呼ぶ。
+/// - `KABEKAMI_SCREEN` が設定されている場合は `None` を返す（動的検出を行わない）。
+pub fn spawn(
+    initial: Vec<Monitor>,
+    cmd_tx: UnboundedSender<TrayCmd>,
+) -> Option<UnboundedSender<()>> {
     if std::env::var_os("KABEKAMI_SCREEN").is_some() {
         tracing::debug!("screen watcher: KABEKAMI_SCREEN is set, watcher disabled");
-        return;
+        return None;
     }
+
+    let (trigger_tx, mut trigger_rx) = unbounded_channel::<()>();
 
     tokio::spawn(async move {
         let mut current = initial;
-        let mut ticker = tokio::time::interval(POLL_INTERVAL);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // 初回 tick は即時なので捨てる（起動時の resolve_screens と重複させない）
-        ticker.tick().await;
+        let mut last_detect: Option<Instant> = None;
 
-        loop {
-            ticker.tick().await;
+        while trigger_rx.recv().await.is_some() {
+            // バックログをドレイン（連続トリガーは 1 回にまとめる）
+            while trigger_rx.try_recv().is_ok() {}
+
+            // スロットル: 前回検出から MIN_INTERVAL 経過していなければスキップ
+            if let Some(t) = last_detect {
+                if t.elapsed() < MIN_INTERVAL {
+                    continue;
+                }
+            }
+
             let detected = tokio::task::spawn_blocking(screen::detect_all)
                 .await
                 .unwrap_or_default();
-            // 0 件は「kscreen-doctor が一時的に応答していない」ケースとして無視する。
-            // 既知の構成を壊さないよう、明示的に >0 件のときだけ比較する。
+
+            // 0 件は「kscreen-doctor が一時的に応答していない」ケースとして無視
+            // （既知構成を壊さないため、last_detect も更新しない → 次回トリガーで再試行）
             if detected.is_empty() {
                 continue;
             }
+
+            last_detect = Some(Instant::now());
+
             if detected != current {
                 tracing::info!(
                     "screens changed: {} → {} monitor(s)",
@@ -58,8 +77,10 @@ pub fn spawn(initial: Vec<Monitor>, tx: UnboundedSender<TrayCmd>) {
                     detected.len()
                 );
                 current = detected.clone();
-                let _ = tx.send(TrayCmd::ScreensChanged(detected));
+                let _ = cmd_tx.send(TrayCmd::ScreensChanged(detected));
             }
         }
     });
+
+    Some(trigger_tx)
 }
