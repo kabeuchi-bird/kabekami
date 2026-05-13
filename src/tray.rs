@@ -44,6 +44,9 @@ pub enum TrayCmd {
     Quit,
     /// KDE Plasma が再起動した（壁紙を再適用する）
     PlasmaRestarted,
+    /// モニター構成が変化した（解像度変更・モニター抜き差し・起動時の検出遅延等）。
+    /// 新しいモニター情報を持って配信される。
+    ScreensChanged(Vec<crate::screen::Monitor>),
 }
 
 /// 切り替え間隔プリセット（秒）。ラベル表示は `i18n::UiStrings::interval_labels` を使用する。

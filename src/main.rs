@@ -13,6 +13,7 @@ mod provider;
 mod scanner;
 mod scheduler;
 mod screen;
+mod screen_watcher;
 mod session;
 mod shortcuts;
 mod tray;
@@ -96,9 +97,9 @@ async fn main() -> Result<()> {
     }
 
     // モニター検出（マルチモニター対応）
-    let screens = resolve_screens().await;
+    let mut screens = resolve_screens().await;
     // プライマリ解像度: フェッチコンテキスト・プリフェッチに使用
-    let (screen_w, screen_h) = screens
+    let (mut screen_w, mut screen_h) = screens
         .first()
         .map(|m| (m.width, m.height))
         .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
@@ -150,6 +151,9 @@ async fn main() -> Result<()> {
     // セッション管理ウォッチャーを起動（ログアウト検知・Plasma 再起動検知）
     session::spawn_session_watcher(cmd_tx.clone()).await;
 
+    // 画面構成変更の監視（起動時の検出失敗・解像度変更・モニター抜き差しに追従）
+    screen_watcher::spawn(screens.clone(), cmd_tx.clone());
+
     // KDE グローバルショートカットを登録・監視する
     shortcuts::spawn_shortcut_watcher(cmd_tx).await;
 
@@ -181,7 +185,7 @@ async fn main() -> Result<()> {
         }
     };
 
-    let fetch_ctx = provider::FetchContext { screen_w, screen_h };
+    let mut fetch_ctx = provider::FetchContext { screen_w, screen_h };
 
     // 30 分ごとにプロバイダーを確認する（第 1 tick は即時）
     let mut fetch_ticker = tokio::time::interval(Duration::from_secs(1800));
@@ -269,8 +273,12 @@ async fn main() -> Result<()> {
 
             Some(cmd) = cmd_rx.recv() => {
                 let now = std::time::Instant::now();
-                // Quit と PlasmaRestarted と ReloadConfig はスロットリングをバイパスする
-                let throttle_exempt = matches!(cmd, TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ReloadConfig);
+                // システムイベント系（Quit / PlasmaRestarted / ReloadConfig / ScreensChanged）は
+                // スロットリングをバイパスする
+                let throttle_exempt = matches!(
+                    cmd,
+                    TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ReloadConfig | TrayCmd::ScreensChanged(_)
+                );
                 if !throttle_exempt
                     && last_cmd_at.map_or(false, |t| now.duration_since(t) < Duration::from_millis(100))
                 {
@@ -531,6 +539,27 @@ async fn main() -> Result<()> {
                         if let Some(path) = scheduler.current().cloned() {
                             apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
                                 &mut notifier, &tray_handle, &mut prefetcher, &scheduler, "reapply after Plasma restart failed").await;
+                        }
+                    }
+
+                    TrayCmd::ScreensChanged(new_screens) => {
+                        let (new_w, new_h) = new_screens.first()
+                            .map(|m| (m.width, m.height))
+                            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
+                        tracing::info!(
+                            "screens updated: {} monitor(s), primary {}x{}",
+                            new_screens.len(), new_w, new_h
+                        );
+                        screens = new_screens;
+                        screen_w = new_w;
+                        screen_h = new_h;
+                        fetch_ctx = provider::FetchContext { screen_w, screen_h };
+                        // 解像度が変わるとキャッシュキーも変わるため、現在の壁紙を
+                        // 新しい解像度で再加工して適用する。
+                        if let Some(path) = scheduler.current().cloned() {
+                            apply_and_notify(&path, &screens, &config, &cache, &plasma_shell,
+                                &mut notifier, &tray_handle, &mut prefetcher, &scheduler,
+                                "reapply after screen change failed").await;
                         }
                     }
 
