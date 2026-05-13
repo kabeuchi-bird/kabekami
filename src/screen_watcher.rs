@@ -52,10 +52,8 @@ pub fn spawn(
             while trigger_rx.try_recv().is_ok() {}
 
             // スロットル: 前回検出から MIN_INTERVAL 経過していなければスキップ
-            if let Some(t) = last_detect {
-                if t.elapsed() < MIN_INTERVAL {
-                    continue;
-                }
+            if last_detect.is_some_and(|t| t.elapsed() < MIN_INTERVAL) {
+                continue;
             }
 
             let detected = tokio::task::spawn_blocking(screen::detect_all)
@@ -64,15 +62,13 @@ pub fn spawn(
                     tracing::error!("screen detection task panicked: {}", e);
                     Vec::new()
                 });
+            last_detect = Some(Instant::now());
 
             // 0 件は「kscreen-doctor が一時的に応答していない」ケースとして無視
-            // （既知構成を壊さないため送信はスキップするが、throttle は適用する）
+            // （既知構成を壊さないため送信はスキップするが、throttle は適用済み）
             if detected.is_empty() {
-                last_detect = Some(Instant::now());
                 continue;
             }
-
-            last_detect = Some(Instant::now());
 
             if detected != current {
                 tracing::info!(
