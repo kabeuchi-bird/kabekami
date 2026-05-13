@@ -175,6 +175,8 @@ Note: bmp, tiff, and gif are not supported (the `image` crate features are limit
 
 **Multi-monitor: same image on all screens** — Install `kscreen` to enable per-monitor detection.
 
+**Wallpaper looks blurry / not at native resolution** — kabekami falls back to 1920×1080 when `kscreen-doctor` is missing or its output can't be parsed. Install the `kscreen` package, or override the resolution explicitly with `KABEKAMI_SCREEN=2560x1440` (replace with your actual resolution) and restart.
+
 **Online sources download 0 images** — Check API key, network, and `RUST_LOG=kabekami=debug` output.
 
 **Settings not applied after saving** — The daemon reloads `config.toml` via inotify automatically; restart if needed.
