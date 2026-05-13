@@ -81,7 +81,7 @@ pub fn spawn(
                     detected.len()
                 );
                 current = detected.clone();
-                if let Err(_) = cmd_tx.send(TrayCmd::ScreensChanged(detected)) {
+                if cmd_tx.send(TrayCmd::ScreensChanged(detected)).is_err() {
                     tracing::debug!("screen watcher: receiver closed, exiting");
                     break;
                 }
