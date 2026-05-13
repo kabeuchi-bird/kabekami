@@ -66,8 +66,9 @@ pub fn spawn(
                 });
 
             // 0 件は「kscreen-doctor が一時的に応答していない」ケースとして無視
-            // （既知構成を壊さないため、last_detect も更新しない → 次回トリガーで再試行）
+            // （既知構成を壊さないため送信はスキップするが、throttle は適用する）
             if detected.is_empty() {
+                last_detect = Some(Instant::now());
                 continue;
             }
 
@@ -80,7 +81,10 @@ pub fn spawn(
                     detected.len()
                 );
                 current = detected.clone();
-                let _ = cmd_tx.send(TrayCmd::ScreensChanged(detected));
+                if let Err(_) = cmd_tx.send(TrayCmd::ScreensChanged(detected)) {
+                    tracing::debug!("screen watcher: receiver closed, exiting");
+                    break;
+                }
             }
         }
     });
