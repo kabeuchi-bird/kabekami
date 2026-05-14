@@ -27,7 +27,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::signal;
 use tokio::time::{interval_at, Instant, MissedTickBehavior};
-use zbus;
 
 use crate::cache::{Cache, CacheKey};
 use crate::config::Config;
@@ -300,7 +299,7 @@ async fn main() -> Result<()> {
                     TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ReloadConfig | TrayCmd::ScreensChanged(_)
                 );
                 if !throttle_exempt
-                    && last_cmd_at.map_or(false, |t| now.duration_since(t) < Duration::from_millis(100))
+                    && last_cmd_at.is_some_and(|t| now.duration_since(t) < Duration::from_millis(100))
                 {
                     tracing::debug!("command throttled (< 100ms): {:?}", cmd);
                     continue;
@@ -808,10 +807,10 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnNotifyLayer {
 
 fn resolve_lang(config: &Config) -> i18n::Lang {
     if let Ok(val) = std::env::var("KABEKAMI_LANG") {
-        return i18n::Lang::from_str(val.trim());
+        return i18n::Lang::from_code(val.trim());
     }
     if !config.ui.language.is_empty() {
-        return i18n::Lang::from_str(&config.ui.language);
+        return i18n::Lang::from_code(&config.ui.language);
     }
     i18n::Lang::default()
 }
@@ -900,16 +899,11 @@ async fn process_image(
         tracing::debug!("cache hit: {}", src.display());
         return Ok(cached);
     }
-    let src_owned = src.to_path_buf();
     let cache_owned = Arc::clone(cache);
-    let mode = config.display.mode;
-    let blur_sigma = config.display.blur_sigma;
-    let bg_darken = config.display.bg_darken;
-    tokio::task::spawn_blocking(move || {
-        prefetch::process_for_cache(&src_owned, screen_w, screen_h, mode, blur_sigma, bg_darken, &cache_owned)
-    })
-    .await
-    .context("image processing task panicked")?
+    let key_owned = key;
+    tokio::task::spawn_blocking(move || prefetch::process_for_cache(&key_owned, &cache_owned))
+        .await
+        .context("image processing task panicked")?
 }
 
 /// 壁紙を加工してキャッシュし、Plasma に反映する。
@@ -1051,14 +1045,14 @@ fn start_prefetch(
         return;
     }
     if let Some(next) = scheduler.peek_next() {
-        prefetcher.start(
-            next.clone(),
+        let key = CacheKey {
+            src: next.clone(),
             screen_w,
             screen_h,
-            config.display.mode,
-            config.display.blur_sigma,
-            config.display.bg_darken,
-            cache.clone(),
-        );
+            mode: config.display.mode,
+            blur_sigma: config.display.blur_sigma,
+            bg_darken: config.display.bg_darken,
+        };
+        prefetcher.start(key, cache.clone());
     }
 }

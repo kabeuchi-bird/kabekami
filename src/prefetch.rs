@@ -18,7 +18,6 @@ use image::ImageDecoder;
 use tokio::task::JoinHandle;
 
 use crate::cache::{Cache, CacheKey};
-use crate::config::DisplayMode;
 
 /// 先読みタスクの管理。
 ///
@@ -33,43 +32,23 @@ impl Prefetcher {
         Self { pending: None }
     }
 
-    /// 指定した画像の先読み加工をバックグラウンドで開始する。
+    /// 指定したキャッシュキーに対応する画像の先読み加工をバックグラウンドで開始する。
     ///
     /// すでに先読み中のタスクがある場合は abort してから新しいタスクを起動する。
     /// キャッシュにすでにある場合はタスクを起動せずに即座に返る。
-    pub fn start(
-        &mut self,
-        image: PathBuf,
-        screen_w: u32,
-        screen_h: u32,
-        mode: DisplayMode,
-        blur_sigma: f32,
-        bg_darken: f32,
-        cache: Arc<Cache>,
-    ) {
+    pub fn start(&mut self, key: CacheKey, cache: Arc<Cache>) {
         self.abort();
-
-        let key = CacheKey {
-            src: image.clone(),
-            screen_w,
-            screen_h,
-            mode,
-            blur_sigma,
-            bg_darken,
-        };
 
         // キャッシュにすでにある場合はタスク不要
         if cache.get(&key).is_some() {
-            tracing::debug!("prefetch: cache hit, skipping {}", image.display());
+            tracing::debug!("prefetch: cache hit, skipping {}", key.src.display());
             return;
         }
 
-        tracing::debug!("prefetch: starting for {}", image.display());
+        tracing::debug!("prefetch: starting for {}", key.src.display());
         self.pending = Some(tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                process_for_cache(&image, screen_w, screen_h, mode, blur_sigma, bg_darken, &cache)
-            })
-            .await;
+            let result =
+                tokio::task::spawn_blocking(move || process_for_cache(&key, &cache)).await;
 
             match result {
                 Ok(Ok(path)) => tracing::debug!("prefetch: done → {}", path.display()),
@@ -94,30 +73,15 @@ impl Default for Prefetcher {
     }
 }
 
-/// 画像を読み込み、加工してキャッシュに保存する（ブロッキング処理）。
+/// `CacheKey` で指定された画像を読み込み・加工してキャッシュに保存する（ブロッキング処理）。
 ///
 /// この関数は `spawn_blocking` から呼ばれることを想定している。
 /// キャッシュにすでにある場合は二重書き込みを避けるためスキップする。
-pub fn process_for_cache(
-    src: &std::path::Path,
-    screen_w: u32,
-    screen_h: u32,
-    mode: DisplayMode,
-    blur_sigma: f32,
-    bg_darken: f32,
-    cache: &Arc<Cache>,
-) -> anyhow::Result<PathBuf> {
-    let key = CacheKey {
-        src: src.to_path_buf(),
-        screen_w,
-        screen_h,
-        mode,
-        blur_sigma,
-        bg_darken,
-    };
+pub fn process_for_cache(key: &CacheKey, cache: &Arc<Cache>) -> anyhow::Result<PathBuf> {
+    let src = key.src.as_path();
 
     // 二重チェック（並列 prefetch が先に書いた可能性）
-    if let Some(cached) = cache.get(&key) {
+    if let Some(cached) = cache.get(key) {
         return Ok(cached);
     }
 
@@ -158,8 +122,14 @@ pub fn process_for_cache(
         img.apply_orientation(orientation);
     }
 
-    let processed =
-        crate::display_mode::process(&img, screen_w, screen_h, mode, blur_sigma, bg_darken);
+    let processed = crate::display_mode::process(
+        &img,
+        key.screen_w,
+        key.screen_h,
+        key.mode,
+        key.blur_sigma,
+        key.bg_darken,
+    );
 
-    cache.store(&key, &processed)
+    cache.store(key, &processed)
 }

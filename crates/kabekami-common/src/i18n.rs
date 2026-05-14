@@ -17,8 +17,11 @@ pub enum Lang {
 }
 
 impl Lang {
-    /// 文字列から `Lang` を解析する。未知の値は `En` にフォールバック。
-    pub fn from_str(s: &str) -> Self {
+    /// 言語コード文字列（"en", "ja" 等）から `Lang` を解析する。
+    /// 未知の値は `En` にフォールバック。
+    ///
+    /// `FromStr` トレイトとは別で lossy な独自パーサ（`Result` を返さない）。
+    pub fn from_code(s: &str) -> Self {
         let key = s.trim().to_ascii_lowercase();
         REGISTRY
             .iter()
@@ -153,18 +156,18 @@ mod tests {
 
     #[test]
     fn from_str_en() {
-        assert_eq!(Lang::from_str("en"), Lang::En);
-        assert_eq!(Lang::from_str("EN"), Lang::En);
-        assert_eq!(Lang::from_str(" en "), Lang::En);
+        assert_eq!(Lang::from_code("en"), Lang::En);
+        assert_eq!(Lang::from_code("EN"), Lang::En);
+        assert_eq!(Lang::from_code(" en "), Lang::En);
     }
 
     #[test]
     fn from_str_ja_and_fallback() {
-        assert_eq!(Lang::from_str("ja"), Lang::Ja);
-        assert_eq!(Lang::from_str("JA"), Lang::Ja);
-        assert_eq!(Lang::from_str(" ja "), Lang::Ja);
-        assert_eq!(Lang::from_str(""), Lang::En);   // 未知 → 英語
-        assert_eq!(Lang::from_str("fr"), Lang::En); // 未知 → 英語
+        assert_eq!(Lang::from_code("ja"), Lang::Ja);
+        assert_eq!(Lang::from_code("JA"), Lang::Ja);
+        assert_eq!(Lang::from_code(" ja "), Lang::Ja);
+        assert_eq!(Lang::from_code(""), Lang::En);   // 未知 → 英語
+        assert_eq!(Lang::from_code("fr"), Lang::En); // 未知 → 英語
     }
 
     #[test]

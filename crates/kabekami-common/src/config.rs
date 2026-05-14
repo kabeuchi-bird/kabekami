@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// 壁紙切り替え間隔の下限（秒）。
 pub const MIN_INTERVAL_SECS: u64 = 5;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub sources: Sources,
@@ -23,19 +23,6 @@ pub struct Config {
     /// オンライン壁紙プロバイダー設定（`[[online_sources]]` 配列）。
     #[serde(default)]
     pub online_sources: Vec<OnlineSourceConfig>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            sources: Sources::default(),
-            rotation: Rotation::default(),
-            display: Display::default(),
-            cache: Cache::default(),
-            ui: Ui::default(),
-            online_sources: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
