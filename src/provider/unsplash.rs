@@ -46,13 +46,19 @@ pub async fn fetch(
     // count は 1〜30 の範囲（API 制限）
     let count = cfg.count.clamp(1, 30);
 
+    // API キーは URL クエリ (`client_id`) ではなく Authorization ヘッダで送る。
+    // クエリだと `RUST_LOG=reqwest=debug` 等で URL がログ出力された際に
+    // キーが平文で漏洩しうるため、Unsplash 公式が推奨するヘッダ送信を採用。
     let photos: Vec<UnsplashPhoto> = client
         .get(API_URL)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Client-ID {}", api_key),
+        )
         .query(&[
             ("count", count.to_string()),
             ("query", query.to_string()),
             ("orientation", "landscape".to_string()),
-            ("client_id", api_key.to_string()),
         ])
         .send()
         .await?

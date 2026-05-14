@@ -258,6 +258,22 @@ impl Config {
             );
             self.rotation.interval_secs = MIN_INTERVAL_SECS;
         }
+
+        // f32 フィールドは TOML 直編集で `nan` / `inf` が入りうる。
+        // 画像処理側の前提を壊さないよう、非有限値はデフォルトに戻して clamp する。
+        sanitize_f32(
+            &mut self.display.blur_sigma,
+            BLUR_SIGMA_RANGE,
+            default_blur_sigma(),
+            "blur_sigma",
+        );
+        sanitize_f32(
+            &mut self.display.bg_darken,
+            BG_DARKEN_RANGE,
+            default_bg_darken(),
+            "bg_darken",
+        );
+
         self.sources.directories = self
             .sources
             .directories
@@ -273,6 +289,30 @@ impl Config {
                 oc.download_dir = Some(expand_tilde(dir));
             }
         }
+    }
+}
+
+/// `display.blur_sigma` の有効範囲（kabekami-config GUI のスライダーと同じ値）。
+const BLUR_SIGMA_RANGE: std::ops::RangeInclusive<f32> = 1.0..=50.0;
+/// `display.bg_darken` の有効範囲。
+const BG_DARKEN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.0;
+
+/// f32 フィールドの正規化:
+/// 1. 非有限値 (`NaN` / `±inf`) なら `default_value` に戻す
+/// 2. それ以外は `range` にクランプ
+fn sanitize_f32(value: &mut f32, range: std::ops::RangeInclusive<f32>, default_value: f32, name: &str) {
+    if !value.is_finite() {
+        tracing::warn!("{} is not finite ({}), resetting to default {}", name, value, default_value);
+        *value = default_value;
+        return;
+    }
+    if !range.contains(value) {
+        let clamped = value.clamp(*range.start(), *range.end());
+        tracing::warn!(
+            "{} {} is out of range {}..={}, clamping to {}",
+            name, value, range.start(), range.end(), clamped
+        );
+        *value = clamped;
     }
 }
 
@@ -543,5 +583,43 @@ max_size_mb = 123
     fn home_dir_empty_string_returns_none() {
         let _guard = EnvGuard::set("HOME", "");
         assert_eq!(home_dir(), None);
+    }
+
+    #[test]
+    fn normalize_resets_non_finite_floats() {
+        let mut cfg = Config::default();
+        cfg.display.blur_sigma = f32::NAN;
+        cfg.display.bg_darken = f32::INFINITY;
+        cfg.normalize();
+        assert_eq!(cfg.display.blur_sigma, default_blur_sigma());
+        assert_eq!(cfg.display.bg_darken, default_bg_darken());
+
+        cfg.display.blur_sigma = f32::NEG_INFINITY;
+        cfg.normalize();
+        assert_eq!(cfg.display.blur_sigma, default_blur_sigma());
+    }
+
+    #[test]
+    fn normalize_clamps_out_of_range_floats() {
+        let mut cfg = Config::default();
+        cfg.display.blur_sigma = 1000.0;
+        cfg.display.bg_darken = -5.0;
+        cfg.normalize();
+        assert_eq!(cfg.display.blur_sigma, 50.0);
+        assert_eq!(cfg.display.bg_darken, 0.0);
+
+        cfg.display.blur_sigma = 0.0; // below 1.0
+        cfg.normalize();
+        assert_eq!(cfg.display.blur_sigma, 1.0);
+    }
+
+    #[test]
+    fn normalize_preserves_in_range_floats() {
+        let mut cfg = Config::default();
+        cfg.display.blur_sigma = 12.5;
+        cfg.display.bg_darken = 0.7;
+        cfg.normalize();
+        assert!((cfg.display.blur_sigma - 12.5).abs() < f32::EPSILON);
+        assert!((cfg.display.bg_darken - 0.7).abs() < f32::EPSILON);
     }
 }
