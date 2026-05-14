@@ -999,19 +999,33 @@ fn try_spawn_fetch(
     ctx: provider::FetchContext,
     force: bool,
 ) -> bool {
-    if configs.is_empty() || in_progress.load(Ordering::Acquire) {
+    if configs.is_empty() {
         return false;
     }
-    in_progress.store(true, Ordering::Release);
+    // 取得＋セットを単一の atomic 操作で行う。`true` を返したなら既に走行中。
+    if in_progress.swap(true, Ordering::AcqRel) {
+        return false;
+    }
     let client = client.clone();
     tokio::spawn(async move {
+        // パニックしてもスタック巻き戻し中に Drop が走り、フラグが false に戻る。
+        // これによりタスクが死んでも以降のフェッチが永久にブロックされなくなる。
+        let _guard = FlagGuard(in_progress);
         let results = provider::fetch_all_due(&configs, &client, ctx, force).await;
         for r in results {
             let _ = tx.send(r);
         }
-        in_progress.store(false, Ordering::Release);
     });
     true
+}
+
+/// `Arc<AtomicBool>` を `Drop` で `false` に戻す RAII ガード。
+/// 非同期タスクのパニックでも確実にフラグが解放されるようにするために使う。
+struct FlagGuard(Arc<AtomicBool>);
+impl Drop for FlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 fn start_prefetch(

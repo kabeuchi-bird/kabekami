@@ -55,6 +55,8 @@ impl Blacklist {
         Ok(())
     }
 
+    /// 一時ファイル → `rename` の atomic-write でブラックリストを保存する。
+    /// 電源断や並列書き込みで `blacklist.txt` が中途半端な状態で残らないようにする。
     fn save(&self) -> Result<()> {
         if let Some(dir) = self.file_path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -64,7 +66,13 @@ impl Blacklist {
             .iter()
             .map(|p| format!("{}\n", p.display()))
             .collect();
-        std::fs::write(&self.file_path, content)?;
+
+        let tmp = self.file_path.with_extension("txt.tmp");
+        std::fs::write(&tmp, &content)?;
+        if let Err(e) = std::fs::rename(&tmp, &self.file_path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
         Ok(())
     }
 }

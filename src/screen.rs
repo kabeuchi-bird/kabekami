@@ -132,17 +132,32 @@ fn parse_json_monitors(cfg: &KScreenJson) -> Vec<Monitor> {
         .iter()
         .filter(|o| o.enabled)
         .filter_map(|o| {
-            let current_id = o.current_mode_id.as_deref()?;
-            let mode = o.modes.iter().find(|m| m.id == current_id)?;
-            if mode.size.width > 100 && mode.size.height > 100 {
-                Some(Monitor {
-                    name: o.name.clone(),
-                    width: mode.size.width,
-                    height: mode.size.height,
-                })
-            } else {
-                None
+            let Some(current_id) = o.current_mode_id.as_deref() else {
+                tracing::warn!(
+                    "kscreen JSON: enabled output {:?} has no currentModeId, skipping",
+                    o.name
+                );
+                return None;
+            };
+            let Some(mode) = o.modes.iter().find(|m| m.id == current_id) else {
+                tracing::warn!(
+                    "kscreen JSON: enabled output {:?} references unknown currentModeId {:?}, skipping",
+                    o.name, current_id
+                );
+                return None;
+            };
+            if mode.size.width <= 100 || mode.size.height <= 100 {
+                tracing::warn!(
+                    "kscreen JSON: enabled output {:?} has implausible size {}x{}, skipping",
+                    o.name, mode.size.width, mode.size.height
+                );
+                return None;
             }
+            Some(Monitor {
+                name: o.name.clone(),
+                width: mode.size.width,
+                height: mode.size.height,
+            })
         })
         .collect()
 }
