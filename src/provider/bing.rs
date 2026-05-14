@@ -10,12 +10,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use url::Url;
 
 use kabekami_common::config::OnlineSourceConfig;
 
 use super::{download_image, FetchContext};
 
-const BASE_URL: &str = "https://www.bing.com";
+const BASE_URL: &str = "https://www.bing.com/";
+/// `urlbase` の resolve 後にこのホスト以外を返したら拒否する。
+/// Bing API が改ざんされた `urlbase`（例: `//attacker/`）を返しても外部ホストには辿り着かない。
+const ALLOWED_HOST: &str = "www.bing.com";
 
 #[derive(Deserialize)]
 struct BingResponse {
@@ -59,6 +63,7 @@ pub async fn fetch(
         .context("failed to parse Bing API response")?;
 
     let res_suffix = resolution_suffix(ctx.screen_w, ctx.screen_h);
+    let base = Url::parse(BASE_URL).expect("BASE_URL is a hardcoded valid URL");
     let mut available = Vec::new();
 
     for img in &resp.images {
@@ -73,8 +78,25 @@ pub async fn fetch(
             continue;
         }
 
-        let url = format!("{}{}{}", BASE_URL, img.urlbase, res_suffix);
-        match download_image(client, &url, &dest).await {
+        // `urlbase + res_suffix` を `base` 相対で resolve し、ホストが Bing 以外なら拒否する。
+        // 単純な文字列連結だと `urlbase = "//attacker/foo"` で別ホストへ誘導されうるため。
+        let relative = format!("{}{}", img.urlbase, res_suffix);
+        let url = match base.join(&relative) {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!("bing: malformed urlbase {:?}: {}", img.urlbase, e);
+                continue;
+            }
+        };
+        if url.host_str() != Some(ALLOWED_HOST) {
+            tracing::warn!(
+                "bing: urlbase resolved to unexpected host {:?}, skipping",
+                url.host_str()
+            );
+            continue;
+        }
+
+        match download_image(client, url.as_str(), &dest).await {
             Ok(()) => {
                 tracing::debug!("bing: downloaded {}", dest.display());
                 available.push(dest);

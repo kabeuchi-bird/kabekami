@@ -13,10 +13,15 @@ pub mod reddit;
 pub mod unsplash;
 pub mod wallhaven;
 
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use futures_util::StreamExt as _;
+use reqwest::redirect;
+use tokio::io::AsyncWriteExt as _;
+
 use kabekami_common::config::OnlineSourceConfig;
 
 /// 画面サイズ（ピクセル）。プロバイダーが解像度を選択するために使用する。
@@ -199,11 +204,23 @@ pub async fn download_image(client: &reqwest::Client, url: &str, dest: &Path) ->
     Err(last_err)
 }
 
+/// ダウンロード 1 ファイルあたりの最大バイト数。
+/// `Content-Length` ヘッダを信用せず、実受信バイト数で強制する。
+const MAX_BYTES: u64 = 50 * 1024 * 1024;
+
 async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Result<()> {
     let resp = client.get(url).send().await?;
     let status = resp.status();
     if !status.is_success() {
         anyhow::bail!("HTTP {} downloading {}", status, url);
+    }
+
+    // 最終 URL（リダイレクト後）のホストが内部ネットワークでないことを再確認。
+    // make_client() の redirect ポリシーで既に拒否しているが、念のため二重防衛する。
+    if let Some(host) = resp.url().host_str() {
+        if is_private_host(host) {
+            anyhow::bail!("refusing to read response from private host {}", host);
+        }
     }
 
     let content_type = resp
@@ -220,23 +237,68 @@ async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Resul
         );
     }
 
-    const MAX_BYTES: u64 = 50 * 1024 * 1024; // 50 MB
-    if resp.content_length().unwrap_or(0) > MAX_BYTES {
-        anyhow::bail!("response too large for {}", url);
+    // Content-Length が信用できる場合の早期拒否（無駄な接続維持を避ける）
+    if let Some(len) = resp.content_length() {
+        if len > MAX_BYTES {
+            anyhow::bail!("response too large ({} bytes, claimed) for {}", len, url);
+        }
     }
-    let bytes = resp.bytes().await?;
-    if bytes.len() as u64 > MAX_BYTES {
-        anyhow::bail!("response too large ({} bytes) for {}", bytes.len(), url);
-    }
+
+    // ストリーミング受信: チャンクごとに上限チェックして直接 tmp に書き出す。
+    // 全体を一度にメモリへ載せないので、悪意のあるサーバが Content-Length を偽って
+    // 巨大なボディを送ってきても OOM にならない。
     let tmp = dest.with_extension("tmp");
-    tokio::fs::write(&tmp, &bytes).await?;
+    let mut file = tokio::fs::File::create(&tmp).await?;
+    let mut received: u64 = 0;
+    let mut stream = resp.bytes_stream();
+    let result: Result<()> = async {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            received = received.saturating_add(chunk.len() as u64);
+            if received > MAX_BYTES {
+                anyhow::bail!("response too large (> {} bytes) for {}", MAX_BYTES, url);
+            }
+            file.write_all(&chunk).await?;
+        }
+        file.flush().await?;
+        Ok(())
+    }
+    .await;
+
+    drop(file);
+    if let Err(e) = result {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
     tokio::fs::rename(&tmp, dest).await?;
     Ok(())
 }
 
 /// `reqwest::Client` を生成する。`reqwest::Client` は内部で `Arc` を使っているため
 /// `.clone()` は安価で、外側の `Arc` ラップは不要。
+///
+/// SSRF 対策:
+/// - リダイレクトは最大 5 回まで（古典的な無限リダイレクトループ防止）
+/// - 各リダイレクト先のホストが loopback / private / link-local / multicast
+///   等の内部ネットワークアドレスならエラー
 pub fn make_client() -> Result<reqwest::Client> {
+    let policy = redirect::Policy::custom(|attempt| {
+        const MAX_REDIRECTS: usize = 5;
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            return attempt.error("too many redirects");
+        }
+        let host = attempt.url().host_str().map(|h| h.to_string());
+        if let Some(host) = host {
+            if is_private_host(&host) {
+                return attempt.error(format!(
+                    "refusing to follow redirect to private host {}",
+                    host
+                ));
+            }
+        }
+        attempt.follow()
+    });
+
     let client = reqwest::Client::builder()
         .user_agent(concat!(
             "kabekami/",
@@ -244,6 +306,93 @@ pub fn make_client() -> Result<reqwest::Client> {
             " (Linux wallpaper tool)"
         ))
         .timeout(Duration::from_secs(30))
+        .redirect(policy)
         .build()?;
     Ok(client)
+}
+
+/// ホスト名 / IP リテラルが「内部ネットワーク向け」かを判定する。
+///
+/// 真を返す場合: loopback (127.0.0.0/8, ::1), private (RFC1918, ULA),
+/// link-local, unspecified (0.0.0.0, ::), broadcast, multicast, `localhost`。
+/// この判定はリダイレクトに対する SSRF 防御で使う。
+fn is_private_host(host: &str) -> bool {
+    // IPv6 リテラルの `[::1]` を除いた素のアドレスを取り出す
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+
+    if bare.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    if let Ok(ip) = bare.parse::<Ipv4Addr>() {
+        return ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || ip.is_unspecified()
+            || ip.is_broadcast()
+            || ip.is_multicast();
+    }
+
+    if let Ok(ip) = bare.parse::<Ipv6Addr>() {
+        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+            return true;
+        }
+        let s = ip.segments();
+        // ULA fc00::/7
+        if (s[0] & 0xfe00) == 0xfc00 {
+            return true;
+        }
+        // Link-local fe80::/10
+        if (s[0] & 0xffc0) == 0xfe80 {
+            return true;
+        }
+        return false;
+    }
+
+    false
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::is_private_host;
+
+    #[test]
+    fn rejects_loopback_and_localhost() {
+        assert!(is_private_host("localhost"));
+        assert!(is_private_host("LOCALHOST"));
+        assert!(is_private_host("127.0.0.1"));
+        assert!(is_private_host("127.1.2.3"));
+        assert!(is_private_host("::1"));
+        assert!(is_private_host("[::1]"));
+    }
+
+    #[test]
+    fn rejects_private_ipv4() {
+        assert!(is_private_host("10.0.0.1"));
+        assert!(is_private_host("172.16.0.1"));
+        assert!(is_private_host("172.31.255.255"));
+        assert!(is_private_host("192.168.1.1"));
+        assert!(is_private_host("169.254.1.1")); // link-local
+        assert!(is_private_host("0.0.0.0"));
+        assert!(is_private_host("255.255.255.255")); // broadcast
+        assert!(is_private_host("224.0.0.1")); // multicast
+    }
+
+    #[test]
+    fn rejects_private_ipv6() {
+        assert!(is_private_host("fc00::1")); // ULA
+        assert!(is_private_host("fd12:3456::1")); // ULA
+        assert!(is_private_host("fe80::1")); // link-local
+        assert!(is_private_host("::")); // unspecified
+        assert!(is_private_host("ff02::1")); // multicast
+    }
+
+    #[test]
+    fn accepts_public_hosts() {
+        assert!(!is_private_host("www.bing.com"));
+        assert!(!is_private_host("api.unsplash.com"));
+        assert!(!is_private_host("8.8.8.8"));
+        assert!(!is_private_host("1.1.1.1"));
+        assert!(!is_private_host("2606:4700:4700::1111")); // Cloudflare IPv6
+    }
 }
