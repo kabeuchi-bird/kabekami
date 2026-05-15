@@ -111,7 +111,7 @@ mod tests {
         touch(&root.join("ignore.txt"));
         touch(&root.join("c.webp"));
 
-        let found = scan(&[root.clone()], false).unwrap();
+        let found = scan(std::slice::from_ref(&root), false).unwrap();
         assert_eq!(found.len(), 3);
         assert!(found.iter().all(|p| is_image(p)));
     }
@@ -122,10 +122,10 @@ mod tests {
         touch(&root.join("top.jpg"));
         touch(&root.join("sub/nested.jpg"));
 
-        let flat = scan(&[root.clone()], false).unwrap();
+        let flat = scan(std::slice::from_ref(&root), false).unwrap();
         assert_eq!(flat.len(), 1);
 
-        let recursive = scan(&[root.clone()], true).unwrap();
+        let recursive = scan(std::slice::from_ref(&root), true).unwrap();
         assert_eq!(recursive.len(), 2);
     }
 

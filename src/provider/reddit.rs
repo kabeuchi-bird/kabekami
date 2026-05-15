@@ -96,7 +96,10 @@ pub async fn fetch(
         let ext = post.url.rsplit('.').next().unwrap_or("jpg");
         let ext: String = ext.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
         let ext = if ext.is_empty() { "jpg".to_owned() } else { ext };
-        let id = post.name.trim_start_matches("t3_");
+        // `trim_start_matches` は文字集合 `"t3_"` を繰り返し剥がしてしまうため
+        // (`"tt3_abc"` → `"abc"` のような誤動作になる)、prefix 完全一致の
+        // `strip_prefix` を使う。
+        let id = post.name.strip_prefix("t3_").unwrap_or(&post.name);
         let filename = format!("reddit_{}.{}", id, ext);
         let dest = dir.join(&filename);
 

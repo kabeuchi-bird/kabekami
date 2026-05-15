@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// 壁紙切り替え間隔の下限（秒）。
 pub const MIN_INTERVAL_SECS: u64 = 5;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub sources: Sources,
@@ -23,19 +23,6 @@ pub struct Config {
     /// オンライン壁紙プロバイダー設定（`[[online_sources]]` 配列）。
     #[serde(default)]
     pub online_sources: Vec<OnlineSourceConfig>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            sources: Sources::default(),
-            rotation: Rotation::default(),
-            display: Display::default(),
-            cache: Cache::default(),
-            ui: Ui::default(),
-            online_sources: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -227,16 +214,16 @@ impl Config {
     }
 
     /// 設定を TOML として指定パスに書き出す。
+    ///
+    /// `atomic_write::atomic_write` 経由で:
+    /// - 一意な tmp 名（PID + nanos）で別プロセスの並列書き込みと衝突しない
+    /// - tmp に書き込んだ後 `sync_all()` し、`rename` で差し替え、親ディレクトリも fsync
+    /// - 電源断時にも `config.toml` が途中状態で残らない
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create config dir: {}", parent.display()))?;
-        }
         let text = toml::to_string_pretty(self)
             .context("failed to serialize config")?;
-        std::fs::write(path, text)
-            .with_context(|| format!("failed to write config: {}", path.display()))?;
-        Ok(())
+        crate::atomic_write::atomic_write(path, text.as_bytes())
+            .with_context(|| format!("failed to write config: {}", path.display()))
     }
 
     /// 設定値を正規化する。
@@ -249,6 +236,22 @@ impl Config {
             );
             self.rotation.interval_secs = MIN_INTERVAL_SECS;
         }
+
+        // f32 フィールドは TOML 直編集で `nan` / `inf` が入りうる。
+        // 画像処理側の前提を壊さないよう、非有限値はデフォルトに戻して clamp する。
+        sanitize_f32(
+            &mut self.display.blur_sigma,
+            BLUR_SIGMA_RANGE,
+            default_blur_sigma(),
+            "blur_sigma",
+        );
+        sanitize_f32(
+            &mut self.display.bg_darken,
+            BG_DARKEN_RANGE,
+            default_bg_darken(),
+            "bg_darken",
+        );
+
         self.sources.directories = self
             .sources
             .directories
@@ -264,6 +267,30 @@ impl Config {
                 oc.download_dir = Some(expand_tilde(dir));
             }
         }
+    }
+}
+
+/// `display.blur_sigma` の有効範囲（kabekami-config GUI のスライダーと同じ値）。
+const BLUR_SIGMA_RANGE: std::ops::RangeInclusive<f32> = 1.0..=50.0;
+/// `display.bg_darken` の有効範囲。
+const BG_DARKEN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=1.0;
+
+/// f32 フィールドの正規化:
+/// 1. 非有限値 (`NaN` / `±inf`) なら `default_value` に戻す
+/// 2. それ以外は `range` にクランプ
+fn sanitize_f32(value: &mut f32, range: std::ops::RangeInclusive<f32>, default_value: f32, name: &str) {
+    if !value.is_finite() {
+        tracing::warn!("{} is not finite ({}), resetting to default {}", name, value, default_value);
+        *value = default_value;
+        return;
+    }
+    if !range.contains(value) {
+        let clamped = value.clamp(*range.start(), *range.end());
+        tracing::warn!(
+            "{} {} is out of range {}..={}, clamping to {}",
+            name, value, range.start(), range.end(), clamped
+        );
+        *value = clamped;
     }
 }
 
@@ -534,5 +561,43 @@ max_size_mb = 123
     fn home_dir_empty_string_returns_none() {
         let _guard = EnvGuard::set("HOME", "");
         assert_eq!(home_dir(), None);
+    }
+
+    #[test]
+    fn normalize_resets_non_finite_floats() {
+        let mut cfg = Config::default();
+        cfg.display.blur_sigma = f32::NAN;
+        cfg.display.bg_darken = f32::INFINITY;
+        cfg.normalize();
+        assert_eq!(cfg.display.blur_sigma, default_blur_sigma());
+        assert_eq!(cfg.display.bg_darken, default_bg_darken());
+
+        cfg.display.blur_sigma = f32::NEG_INFINITY;
+        cfg.normalize();
+        assert_eq!(cfg.display.blur_sigma, default_blur_sigma());
+    }
+
+    #[test]
+    fn normalize_clamps_out_of_range_floats() {
+        let mut cfg = Config::default();
+        cfg.display.blur_sigma = 1000.0;
+        cfg.display.bg_darken = -5.0;
+        cfg.normalize();
+        assert_eq!(cfg.display.blur_sigma, 50.0);
+        assert_eq!(cfg.display.bg_darken, 0.0);
+
+        cfg.display.blur_sigma = 0.0; // below 1.0
+        cfg.normalize();
+        assert_eq!(cfg.display.blur_sigma, 1.0);
+    }
+
+    #[test]
+    fn normalize_preserves_in_range_floats() {
+        let mut cfg = Config::default();
+        cfg.display.blur_sigma = 12.5;
+        cfg.display.bg_darken = 0.7;
+        cfg.normalize();
+        assert!((cfg.display.blur_sigma - 12.5).abs() < f32::EPSILON);
+        assert!((cfg.display.bg_darken - 0.7).abs() < f32::EPSILON);
     }
 }

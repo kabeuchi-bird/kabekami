@@ -125,6 +125,10 @@ impl Cache {
     ///
     /// すでに退避タスクが走行中ならスキップする（`eviction_running` フラグ）。
     /// tokio ランタイムが利用できない場合（テストなど）は同期実行にフォールバック。
+    ///
+    /// `EvictionGuard` 経由でフラグをリセットするため、`evict_if_needed()` が
+    /// パニックしても `eviction_running` が `true` のまま固定されず、
+    /// 以降の退避がブロックされない。
     fn spawn_eviction(self: &Arc<Self>) {
         if self.eviction_running.swap(true, Ordering::AcqRel) {
             return; // 既に走行中
@@ -133,18 +137,18 @@ impl Cache {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn_blocking(move || {
+                    let _guard = EvictionGuard(&cache);
                     if let Err(e) = cache.evict_if_needed() {
                         tracing::warn!("background eviction failed: {}", e);
                     }
-                    cache.eviction_running.store(false, Ordering::Release);
                 });
             }
             Err(_) => {
                 // ランタイム外（テスト等）。同期で実行。
+                let _guard = EvictionGuard(self);
                 if let Err(e) = self.evict_if_needed() {
                     tracing::warn!("eviction failed: {}", e);
                 }
-                self.eviction_running.store(false, Ordering::Release);
             }
         }
     }
@@ -206,6 +210,16 @@ impl Cache {
         h.write(&key.blur_sigma.to_bits().to_le_bytes());
         h.write(&key.bg_darken.to_bits().to_le_bytes());
         format!("{:016x}", h.finish())
+    }
+}
+
+/// `Cache::eviction_running` フラグを `Drop` で `false` に戻す RAII ガード。
+/// 退避タスクがパニックしてもスタック巻き戻し時にフラグが解放され、
+/// 以降の退避がブロックされ続けることを防ぐ。
+struct EvictionGuard<'a>(&'a Cache);
+impl Drop for EvictionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.eviction_running.store(false, Ordering::Release);
     }
 }
 

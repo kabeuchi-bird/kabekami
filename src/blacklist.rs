@@ -55,16 +55,16 @@ impl Blacklist {
         Ok(())
     }
 
+    /// `kabekami_common::atomic_write` でブラックリストを永続化する。
+    /// 一意な tmp 名 (PID + nanos) + fsync + 親ディレクトリ fsync で
+    /// 電源断・並列書き込み耐性を確保する。
     fn save(&self) -> Result<()> {
-        if let Some(dir) = self.file_path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let content: String = self
             .paths
             .iter()
             .map(|p| format!("{}\n", p.display()))
             .collect();
-        std::fs::write(&self.file_path, content)?;
+        kabekami_common::atomic_write::atomic_write(&self.file_path, content.as_bytes())?;
         Ok(())
     }
 }
