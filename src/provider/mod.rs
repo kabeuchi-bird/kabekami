@@ -209,27 +209,62 @@ pub async fn download_image(client: &reqwest::Client, url: &str, dest: &Path) ->
 const MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Result<()> {
+    try_download_impl(client, url, dest, 0).await
+}
+
+async fn try_download_impl(client: &reqwest::Client, url: &str, dest: &Path, redirect_count: usize) -> Result<()> {
+    const MAX_REDIRECTS: usize = 5;
+    if redirect_count > MAX_REDIRECTS {
+        anyhow::bail!("too many redirects (> {})", MAX_REDIRECTS);
+    }
+
     // pre-request: 接続を確立する前に URL のホストを検証する。
     // 内部ネットワーク向け URL がプロバイダー応答に紛れ込んでも、TCP コネクション自体を張らない。
     let parsed = url::Url::parse(url).with_context(|| format!("invalid URL: {}", url))?;
-    if let Some(host) = parsed.host_str() {
-        if is_resolved_host_private(host).await? {
-            anyhow::bail!("refusing to connect to host {} (resolves to private IP)", host);
+    let host = parsed.host_str().context("URL has no host")?;
+    let port = parsed.port_or_known_default().context("URL has no port")?;
+
+    // DNS 解決して全ての IP アドレスを検証
+    let addrs = resolve_and_validate_host(host, port).await?;
+
+    // 検証済みの最初の IP アドレスを使用して接続 (TOCTOU 対策)
+    let resolved_ip = addrs.first().context("no resolved addresses")?;
+
+    // 元の URL スキームとパスを保持しつつ、IP アドレスに接続
+    let mut resolved_url = parsed.clone();
+    resolved_url.set_host(Some(&resolved_ip.ip().to_string()))?;
+    if let Some(p) = parsed.port() {
+        resolved_url.set_port(Some(p)).ok();
+    }
+
+    // リダイレクトを無効化して手動で処理
+    let resp = client.get(resolved_url.as_str())
+        .header(reqwest::header::HOST, host)
+        .send()
+        .await?;
+
+    let status = resp.status();
+
+    // リダイレクトを手動処理
+    if status.is_redirection() {
+        if let Some(location) = resp.headers().get(reqwest::header::LOCATION) {
+            let redirect_url = location.to_str().context("invalid Location header")?;
+            // 相対 URL を絶対 URL に変換
+            let redirect_parsed = parsed.join(redirect_url)?;
+
+            // リダイレクト先も検証
+            if let Some(redirect_host) = redirect_parsed.host_str() {
+                let redirect_port = redirect_parsed.port_or_known_default().context("redirect URL has no port")?;
+                resolve_and_validate_host(redirect_host, redirect_port).await?;
+            }
+
+            // 検証済みのリダイレクト先へ再帰呼び出し
+            return try_download_impl(client, redirect_parsed.as_str(), dest, redirect_count + 1).await;
         }
     }
 
-    let resp = client.get(url).send().await?;
-    let status = resp.status();
     if !status.is_success() {
         anyhow::bail!("HTTP {} downloading {}", status, url);
-    }
-
-    // post-request: リダイレクト後の最終 URL のホストも再検証。
-    // make_client() の redirect ポリシーで既に拒否しているが、二重防衛。
-    if let Some(host) = resp.url().host_str() {
-        if is_resolved_host_private(host).await? {
-            anyhow::bail!("refusing to read response from host {} (resolves to private IP)", host);
-        }
     }
 
     let content_type = resp
@@ -287,29 +322,9 @@ async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Resul
 /// `.clone()` は安価で、外側の `Arc` ラップは不要。
 ///
 /// SSRF 対策:
-/// - リダイレクトは最大 5 回まで（古典的な無限リダイレクトループ防止）
-/// - 各リダイレクト先のホストが loopback / private / link-local / multicast
-///   等の内部ネットワークアドレスならエラー
+/// - リダイレクトは手動で処理し、各リダイレクト先の DNS 解決を検証
+/// - 解決済み IP アドレスへの直接接続で TOCTOU 攻撃を防止
 pub fn make_client() -> Result<reqwest::Client> {
-    let policy = redirect::Policy::custom(|attempt| {
-        const MAX_REDIRECTS: usize = 5;
-        if attempt.previous().len() >= MAX_REDIRECTS {
-            return attempt.error("too many redirects");
-        }
-        let host = attempt.url().host_str().map(|h| h.to_string());
-        if let Some(host) = host {
-            // Quick string-based check (cannot perform DNS resolution in sync callback).
-            // Full DNS resolution check happens in try_download() pre-request/post-request.
-            if is_private_host(&host) {
-                return attempt.error(format!(
-                    "refusing to follow redirect to private host {}",
-                    host
-                ));
-            }
-        }
-        attempt.follow()
-    });
-
     let client = reqwest::Client::builder()
         .user_agent(concat!(
             "kabekami/",
@@ -317,78 +332,75 @@ pub fn make_client() -> Result<reqwest::Client> {
             " (Linux wallpaper tool)"
         ))
         .timeout(Duration::from_secs(30))
-        .redirect(policy)
+        .redirect(redirect::Policy::none())
         .build()?;
     Ok(client)
 }
 
-/// ホスト名を DNS 解決し、いずれかの解決先アドレスが内部ネットワーク向けかを判定する。
+/// ホスト名を DNS 解決し、全ての解決先アドレスを検証して返す。
 ///
 /// この関数はホスト名を実際に解決して全ての IP アドレスを検証するため、
 /// `attacker.com` が `127.0.0.1` に解決される場合などを検出できる。
 /// punycode や末尾ドット付きホスト名にも対応する。
-async fn is_resolved_host_private(host: &str) -> Result<bool> {
+async fn resolve_and_validate_host(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>> {
     // まず文字列ベースの高速チェック（IP リテラルや "localhost" など）
     if is_private_host(host) {
-        return Ok(true);
+        anyhow::bail!("refusing to connect to host {} (private by string check)", host);
     }
 
-    // DNS 解決を試みる。ポート番号は任意（実際には接続しない）。
+    // DNS 解決を試みる。タプル形式を使用して IPv6 リテラルにも対応。
     // tokio::net::lookup_host は内部で getaddrinfo を呼び出し、
     // IPv4/IPv6 両方のアドレスを返す。
-    let lookup_target = format!("{}:443", host);
-    let addrs = match tokio::net::lookup_host(&lookup_target).await {
-        Ok(addrs) => addrs,
+    let addrs: Vec<std::net::SocketAddr> = match tokio::net::lookup_host((host, port)).await {
+        Ok(addrs) => addrs.collect(),
         Err(e) => {
             // DNS 解決失敗は警告して安全側に倒す（拒否）
-            tracing::warn!("DNS lookup failed for {}: {}", host, e);
-            return Ok(true);
+            anyhow::bail!("DNS lookup failed for {}: {}", host, e);
         }
     };
 
+    if addrs.is_empty() {
+        anyhow::bail!("DNS lookup for {} returned no addresses", host);
+    }
+
     // 解決された全アドレスをチェック
-    for addr in addrs {
+    for addr in &addrs {
         let ip = addr.ip();
         match ip {
             std::net::IpAddr::V4(ipv4) => {
                 if is_private_ipv4(ipv4) {
-                    tracing::warn!("host {} resolves to private IPv4 {}", host, ipv4);
-                    return Ok(true);
+                    anyhow::bail!("host {} resolves to private IPv4 {}", host, ipv4);
                 }
             }
             std::net::IpAddr::V6(ipv6) => {
                 // IPv4-mapped IPv6 を先にチェック
                 if let Some(v4) = ipv4_mapped(&ipv6) {
                     if is_private_ipv4(v4) {
-                        tracing::warn!(
+                        anyhow::bail!(
                             "host {} resolves to IPv4-mapped private address {}",
                             host,
                             ipv6
                         );
-                        return Ok(true);
                     }
                 }
                 // 純粋な IPv6 プライベートアドレス
                 if ipv6.is_loopback() || ipv6.is_unspecified() || ipv6.is_multicast() {
-                    tracing::warn!("host {} resolves to private IPv6 {}", host, ipv6);
-                    return Ok(true);
+                    anyhow::bail!("host {} resolves to private IPv6 {}", host, ipv6);
                 }
                 let s = ipv6.segments();
                 // ULA fc00::/7
                 if (s[0] & 0xfe00) == 0xfc00 {
-                    tracing::warn!("host {} resolves to ULA {}", host, ipv6);
-                    return Ok(true);
+                    anyhow::bail!("host {} resolves to ULA {}", host, ipv6);
                 }
                 // Link-local fe80::/10
                 if (s[0] & 0xffc0) == 0xfe80 {
-                    tracing::warn!("host {} resolves to link-local {}", host, ipv6);
-                    return Ok(true);
+                    anyhow::bail!("host {} resolves to link-local {}", host, ipv6);
                 }
             }
         }
     }
 
-    Ok(false)
+    Ok(addrs)
 }
 
 /// ホスト名 / IP リテラルが「内部ネットワーク向け」かを判定する。
