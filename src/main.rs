@@ -38,29 +38,6 @@ use crate::tray::TrayCmd;
 const FALLBACK_SCREEN_W: u32 = 1920;
 const FALLBACK_SCREEN_H: u32 = 1080;
 
-/// `apply_and_notify` の `ApplyCtx` を構築するヘルパー。
-/// 識別子を `$:ident` で受け取ることでマクロハイジーンを越え、
-/// 呼び出し側スコープのローカル変数を借用できるようにする。
-macro_rules! apply_ctx {
-    (
-        $screens:ident, $config:ident, $cache:ident, $plasma:ident,
-        $tray:ident, $scheduler:ident, $screen_check:ident,
-        $notifier:ident, $prefetcher:ident $(,)?
-    ) => {
-        ApplyCtx {
-            screens: &$screens,
-            config: &$config,
-            cache: &$cache,
-            plasma: &$plasma,
-            tray_handle: &$tray,
-            scheduler: &$scheduler,
-            screen_check_tx: $screen_check.as_ref(),
-            notifier: &mut $notifier,
-            prefetcher: &mut $prefetcher,
-        }
-    };
-}
-
 /// CLI サブコマンド。デーモンへの 1 回限りの操作を表す。
 enum CliCmd {
     Next,
@@ -228,7 +205,7 @@ async fn main() -> Result<()> {
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
-            apply_and_notify(&mut apply_ctx!(screens, config, cache, plasma_shell, tray_handle, scheduler, screen_check_tx, notifier, prefetcher), &path, "initial apply failed").await;
+            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "initial apply failed").await;
         }
     }
 
@@ -275,7 +252,7 @@ async fn main() -> Result<()> {
                     }
                     if was_empty {
                         if let Some(path) = scheduler.next() {
-                            apply_and_notify(&mut apply_ctx!(screens, config, cache, plasma_shell, tray_handle, scheduler, screen_check_tx, notifier, prefetcher), &path, "online: initial apply failed").await;
+                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "online: initial apply failed").await;
                         }
                     }
                 }
@@ -286,7 +263,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if let Some(path) = scheduler.next() {
-                    apply_and_notify(&mut apply_ctx!(screens, config, cache, plasma_shell, tray_handle, scheduler, screen_check_tx, notifier, prefetcher), &path, "auto apply failed").await;
+                    apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "auto apply failed").await;
                 }
             }
 
@@ -309,14 +286,14 @@ async fn main() -> Result<()> {
                     TrayCmd::Next => {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
-                            apply_and_notify(&mut apply_ctx!(screens, config, cache, plasma_shell, tray_handle, scheduler, screen_check_tx, notifier, prefetcher), &path, "tray Next failed").await;
+                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "tray Next failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
 
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
-                            apply_and_notify(&mut apply_ctx!(screens, config, cache, plasma_shell, tray_handle, scheduler, screen_check_tx, notifier, prefetcher), &path, "tray Prev failed").await;
+                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "tray Prev failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -388,7 +365,7 @@ async fn main() -> Result<()> {
                                     scheduler.remove_image(&path);
                                     prefetcher.abort();
                                     if let Some(next) = scheduler.next() {
-                                        apply_and_notify(&mut apply_ctx!(screens, config, cache, plasma_shell, tray_handle, scheduler, screen_check_tx, notifier, prefetcher), &next, "apply after trash failed").await;
+                                        apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &next, "apply after trash failed").await;
                                     }
                                     if let Some(ref h) = tray_handle {
                                         h.update(|t| t.image_count = scheduler.image_count()).await;
@@ -411,7 +388,7 @@ async fn main() -> Result<()> {
                                 prefetcher.abort();
                                 match scheduler.next() {
                                     Some(next) => {
-                                        apply_and_notify(&mut apply_ctx!(screens, config, cache, plasma_shell, tray_handle, scheduler, screen_check_tx, notifier, prefetcher), &next, "apply after blacklist failed").await;
+                                        apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &next, "apply after blacklist failed").await;
                                         if let Some(ref h) = tray_handle {
                                             h.update(|t| t.image_count = scheduler.image_count()).await;
                                         }
@@ -514,7 +491,7 @@ async fn main() -> Result<()> {
                                 config = new_cfg;
 
                                 if let Some(cur) = prev_current {
-                                    apply_and_notify(&mut apply_ctx!(screens, config, cache, plasma_shell, tray_handle, scheduler, screen_check_tx, notifier, prefetcher), &cur, "reload: reapply failed").await;
+                                    apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &cur, "reload: reapply failed").await;
                                 }
 
                                 if let Some(ref h) = tray_handle {
@@ -549,7 +526,7 @@ async fn main() -> Result<()> {
                     TrayCmd::PlasmaRestarted => {
                         tracing::info!("Plasma restarted, re-applying wallpaper");
                         if let Some(path) = scheduler.current().cloned() {
-                            apply_and_notify(&mut apply_ctx!(screens, config, cache, plasma_shell, tray_handle, scheduler, screen_check_tx, notifier, prefetcher), &path, "reapply after Plasma restart failed").await;
+                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "reapply after Plasma restart failed").await;
                         }
                     }
 
@@ -568,7 +545,7 @@ async fn main() -> Result<()> {
                         // 解像度が変わるとキャッシュキーも変わるため、現在の壁紙を
                         // 新しい解像度で再加工して適用する。
                         if let Some(path) = scheduler.current().cloned() {
-                            apply_and_notify(&mut apply_ctx!(screens, config, cache, plasma_shell, tray_handle, scheduler, screen_check_tx, notifier, prefetcher), &path, "reapply after screen change failed").await;
+                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "reapply after screen change failed").await;
                         }
                     }
 
@@ -950,6 +927,33 @@ struct ApplyCtx<'a> {
     screen_check_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<()>>,
     notifier: &'a mut notify::Notifier,
     prefetcher: &'a mut Prefetcher,
+}
+
+/// `ApplyCtx` を構築するコンストラクタ。`apply_and_notify` 呼び出しの直前で
+/// メインループ局所変数を渡して使う。引数が多いがすべて struct のフィールドに 1:1 対応。
+#[allow(clippy::too_many_arguments)]
+fn build_apply_ctx<'a>(
+    screens: &'a [screen::Monitor],
+    config: &'a Config,
+    cache: &'a Arc<Cache>,
+    plasma: &'a plasma::PlasmaShell,
+    tray_handle: &'a Option<ksni::Handle<tray::KabekamiTray>>,
+    scheduler: &'a Scheduler,
+    screen_check_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<()>>,
+    notifier: &'a mut notify::Notifier,
+    prefetcher: &'a mut Prefetcher,
+) -> ApplyCtx<'a> {
+    ApplyCtx {
+        screens,
+        config,
+        cache,
+        plasma,
+        tray_handle,
+        scheduler,
+        screen_check_tx,
+        notifier,
+        prefetcher,
+    }
 }
 
 /// apply + 通知 + tray 更新 + prefetch 開始 + 画面構成再検出トリガーをまとめて行う。

@@ -63,7 +63,7 @@ pub async fn fetch(
         .context("failed to parse Bing API response")?;
 
     let res_suffix = resolution_suffix(ctx.screen_w, ctx.screen_h);
-    let base = Url::parse(BASE_URL).expect("BASE_URL is a hardcoded valid URL");
+    let base = Url::parse(BASE_URL).context("BASE_URL is invalid (compile-time bug)")?;
     let mut available = Vec::new();
 
     for img in &resp.images {

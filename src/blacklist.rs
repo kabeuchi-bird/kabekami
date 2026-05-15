@@ -55,24 +55,16 @@ impl Blacklist {
         Ok(())
     }
 
-    /// 一時ファイル → `rename` の atomic-write でブラックリストを保存する。
-    /// 電源断や並列書き込みで `blacklist.txt` が中途半端な状態で残らないようにする。
+    /// `kabekami_common::atomic_write` でブラックリストを永続化する。
+    /// 一意な tmp 名 (PID + nanos) + fsync + 親ディレクトリ fsync で
+    /// 電源断・並列書き込み耐性を確保する。
     fn save(&self) -> Result<()> {
-        if let Some(dir) = self.file_path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let content: String = self
             .paths
             .iter()
             .map(|p| format!("{}\n", p.display()))
             .collect();
-
-        let tmp = self.file_path.with_extension("txt.tmp");
-        std::fs::write(&tmp, &content)?;
-        if let Err(e) = std::fs::rename(&tmp, &self.file_path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e.into());
-        }
+        kabekami_common::atomic_write::atomic_write(&self.file_path, content.as_bytes())?;
         Ok(())
     }
 }

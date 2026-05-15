@@ -215,24 +215,15 @@ impl Config {
 
     /// 設定を TOML として指定パスに書き出す。
     ///
-    /// 一時ファイル → `rename` の atomic-write を採用。電源断や別プロセスの
-    /// 並列書き込みでも `config.toml` が途中状態で残らないようにする。
+    /// `atomic_write::atomic_write` 経由で:
+    /// - 一意な tmp 名（PID + nanos）で別プロセスの並列書き込みと衝突しない
+    /// - tmp に書き込んだ後 `sync_all()` し、`rename` で差し替え、親ディレクトリも fsync
+    /// - 電源断時にも `config.toml` が途中状態で残らない
     pub fn save_to(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create config dir: {}", parent.display()))?;
-        }
         let text = toml::to_string_pretty(self)
             .context("failed to serialize config")?;
-
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, &text)
-            .with_context(|| format!("failed to write config tmp: {}", tmp.display()))?;
-        if let Err(e) = std::fs::rename(&tmp, path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e).with_context(|| format!("failed to rename config: {}", path.display()));
-        }
-        Ok(())
+        crate::atomic_write::atomic_write(path, text.as_bytes())
+            .with_context(|| format!("failed to write config: {}", path.display()))
     }
 
     /// 設定値を正規化する。

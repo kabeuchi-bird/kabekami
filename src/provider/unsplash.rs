@@ -62,6 +62,8 @@ pub async fn fetch(
         ])
         .send()
         .await?
+        .error_for_status()
+        .context("unsplash API HTTP error (401/429/5xx?)")?
         .json()
         .await
         .context("failed to parse Unsplash API response")?;

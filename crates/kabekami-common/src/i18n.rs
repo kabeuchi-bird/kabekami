@@ -155,14 +155,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_str_en() {
+    fn from_code_en() {
         assert_eq!(Lang::from_code("en"), Lang::En);
         assert_eq!(Lang::from_code("EN"), Lang::En);
         assert_eq!(Lang::from_code(" en "), Lang::En);
     }
 
     #[test]
-    fn from_str_ja_and_fallback() {
+    fn from_code_ja_and_fallback() {
         assert_eq!(Lang::from_code("ja"), Lang::Ja);
         assert_eq!(Lang::from_code("JA"), Lang::Ja);
         assert_eq!(Lang::from_code(" ja "), Lang::Ja);

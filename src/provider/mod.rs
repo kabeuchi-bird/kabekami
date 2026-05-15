@@ -17,7 +17,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures_util::StreamExt as _;
 use reqwest::redirect;
 use tokio::io::AsyncWriteExt as _;
@@ -209,14 +209,23 @@ pub async fn download_image(client: &reqwest::Client, url: &str, dest: &Path) ->
 const MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Result<()> {
+    // pre-request: 接続を確立する前に URL のホストを検証する。
+    // 内部ネットワーク向け URL がプロバイダー応答に紛れ込んでも、TCP コネクション自体を張らない。
+    let parsed = url::Url::parse(url).with_context(|| format!("invalid URL: {}", url))?;
+    if let Some(host) = parsed.host_str() {
+        if is_private_host(host) {
+            anyhow::bail!("refusing to connect to private host {}", host);
+        }
+    }
+
     let resp = client.get(url).send().await?;
     let status = resp.status();
     if !status.is_success() {
         anyhow::bail!("HTTP {} downloading {}", status, url);
     }
 
-    // 最終 URL（リダイレクト後）のホストが内部ネットワークでないことを再確認。
-    // make_client() の redirect ポリシーで既に拒否しているが、念のため二重防衛する。
+    // post-request: リダイレクト後の最終 URL のホストも再検証。
+    // make_client() の redirect ポリシーで既に拒否しているが、二重防衛。
     if let Some(host) = resp.url().host_str() {
         if is_private_host(host) {
             anyhow::bail!("refusing to read response from private host {}", host);
@@ -325,15 +334,17 @@ fn is_private_host(host: &str) -> bool {
     }
 
     if let Ok(ip) = bare.parse::<Ipv4Addr>() {
-        return ip.is_loopback()
-            || ip.is_private()
-            || ip.is_link_local()
-            || ip.is_unspecified()
-            || ip.is_broadcast()
-            || ip.is_multicast();
+        return is_private_ipv4(ip);
     }
 
     if let Ok(ip) = bare.parse::<Ipv6Addr>() {
+        // IPv4-mapped IPv6 (`::ffff:127.0.0.1` 等) は埋め込み IPv4 で判定する。
+        // これを忘れると `::ffff:127.0.0.1` のようなアドレスで loopback への
+        // 接続を許してしまう。`Ipv6Addr::to_ipv4_mapped` は MSRV 1.75 に
+        // 含まれていないため手動で展開する。
+        if let Some(v4) = ipv4_mapped(&ip) {
+            return is_private_ipv4(v4);
+        }
         if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
             return true;
         }
@@ -350,6 +361,31 @@ fn is_private_host(host: &str) -> bool {
     }
 
     false
+}
+
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+}
+
+/// IPv6 が IPv4-mapped 形式 (`::ffff:a.b.c.d`) なら埋め込み IPv4 を返す。
+/// `Ipv6Addr::to_ipv4_mapped()` は Rust 1.80 で安定化されたため、MSRV 1.75 互換で手書き。
+fn ipv4_mapped(ip: &Ipv6Addr) -> Option<Ipv4Addr> {
+    let s = ip.segments();
+    if s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0xffff {
+        Some(Ipv4Addr::new(
+            (s[6] >> 8) as u8,
+            (s[6] & 0xff) as u8,
+            (s[7] >> 8) as u8,
+            (s[7] & 0xff) as u8,
+        ))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -394,5 +430,20 @@ mod download_tests {
         assert!(!is_private_host("8.8.8.8"));
         assert!(!is_private_host("1.1.1.1"));
         assert!(!is_private_host("2606:4700:4700::1111")); // Cloudflare IPv6
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_ipv6_private() {
+        // IPv4-mapped 形式で SSRF を試みるパターンの拒否
+        assert!(is_private_host("::ffff:127.0.0.1"));
+        assert!(is_private_host("::ffff:192.168.1.1"));
+        assert!(is_private_host("[::ffff:10.0.0.1]"));
+        assert!(is_private_host("::ffff:169.254.169.254")); // AWS metadata service
+    }
+
+    #[test]
+    fn accepts_ipv4_mapped_ipv6_public() {
+        assert!(!is_private_host("::ffff:8.8.8.8"));
+        assert!(!is_private_host("::ffff:1.1.1.1"));
     }
 }
