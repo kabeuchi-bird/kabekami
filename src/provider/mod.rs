@@ -213,8 +213,8 @@ async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Resul
     // 内部ネットワーク向け URL がプロバイダー応答に紛れ込んでも、TCP コネクション自体を張らない。
     let parsed = url::Url::parse(url).with_context(|| format!("invalid URL: {}", url))?;
     if let Some(host) = parsed.host_str() {
-        if is_private_host(host) {
-            anyhow::bail!("refusing to connect to private host {}", host);
+        if is_resolved_host_private(host).await? {
+            anyhow::bail!("refusing to connect to host {} (resolves to private IP)", host);
         }
     }
 
@@ -227,8 +227,8 @@ async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Resul
     // post-request: リダイレクト後の最終 URL のホストも再検証。
     // make_client() の redirect ポリシーで既に拒否しているが、二重防衛。
     if let Some(host) = resp.url().host_str() {
-        if is_private_host(host) {
-            anyhow::bail!("refusing to read response from private host {}", host);
+        if is_resolved_host_private(host).await? {
+            anyhow::bail!("refusing to read response from host {} (resolves to private IP)", host);
         }
     }
 
@@ -298,6 +298,8 @@ pub fn make_client() -> Result<reqwest::Client> {
         }
         let host = attempt.url().host_str().map(|h| h.to_string());
         if let Some(host) = host {
+            // Quick string-based check (cannot perform DNS resolution in sync callback).
+            // Full DNS resolution check happens in try_download() pre-request/post-request.
             if is_private_host(&host) {
                 return attempt.error(format!(
                     "refusing to follow redirect to private host {}",
@@ -320,11 +322,83 @@ pub fn make_client() -> Result<reqwest::Client> {
     Ok(client)
 }
 
+/// ホスト名を DNS 解決し、いずれかの解決先アドレスが内部ネットワーク向けかを判定する。
+///
+/// この関数はホスト名を実際に解決して全ての IP アドレスを検証するため、
+/// `attacker.com` が `127.0.0.1` に解決される場合などを検出できる。
+/// punycode や末尾ドット付きホスト名にも対応する。
+async fn is_resolved_host_private(host: &str) -> Result<bool> {
+    // まず文字列ベースの高速チェック（IP リテラルや "localhost" など）
+    if is_private_host(host) {
+        return Ok(true);
+    }
+
+    // DNS 解決を試みる。ポート番号は任意（実際には接続しない）。
+    // tokio::net::lookup_host は内部で getaddrinfo を呼び出し、
+    // IPv4/IPv6 両方のアドレスを返す。
+    let lookup_target = format!("{}:443", host);
+    let addrs = match tokio::net::lookup_host(&lookup_target).await {
+        Ok(addrs) => addrs,
+        Err(e) => {
+            // DNS 解決失敗は警告して安全側に倒す（拒否）
+            tracing::warn!("DNS lookup failed for {}: {}", host, e);
+            return Ok(true);
+        }
+    };
+
+    // 解決された全アドレスをチェック
+    for addr in addrs {
+        let ip = addr.ip();
+        match ip {
+            std::net::IpAddr::V4(ipv4) => {
+                if is_private_ipv4(ipv4) {
+                    tracing::warn!("host {} resolves to private IPv4 {}", host, ipv4);
+                    return Ok(true);
+                }
+            }
+            std::net::IpAddr::V6(ipv6) => {
+                // IPv4-mapped IPv6 を先にチェック
+                if let Some(v4) = ipv4_mapped(&ipv6) {
+                    if is_private_ipv4(v4) {
+                        tracing::warn!(
+                            "host {} resolves to IPv4-mapped private address {}",
+                            host,
+                            ipv6
+                        );
+                        return Ok(true);
+                    }
+                }
+                // 純粋な IPv6 プライベートアドレス
+                if ipv6.is_loopback() || ipv6.is_unspecified() || ipv6.is_multicast() {
+                    tracing::warn!("host {} resolves to private IPv6 {}", host, ipv6);
+                    return Ok(true);
+                }
+                let s = ipv6.segments();
+                // ULA fc00::/7
+                if (s[0] & 0xfe00) == 0xfc00 {
+                    tracing::warn!("host {} resolves to ULA {}", host, ipv6);
+                    return Ok(true);
+                }
+                // Link-local fe80::/10
+                if (s[0] & 0xffc0) == 0xfe80 {
+                    tracing::warn!("host {} resolves to link-local {}", host, ipv6);
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 /// ホスト名 / IP リテラルが「内部ネットワーク向け」かを判定する。
 ///
 /// 真を返す場合: loopback (127.0.0.0/8, ::1), private (RFC1918, ULA),
 /// link-local, unspecified (0.0.0.0, ::), broadcast, multicast, `localhost`。
 /// この判定はリダイレクトに対する SSRF 防御で使う。
+///
+/// **注意**: この関数は文字列ベースの判定のみで DNS 解決を行わない。
+/// DNS 解決が必要な場合は `is_resolved_host_private` を使用すること。
 fn is_private_host(host: &str) -> bool {
     // IPv6 リテラルの `[::1]` を除いた素のアドレスを取り出す
     let bare = host.trim_start_matches('[').trim_end_matches(']');

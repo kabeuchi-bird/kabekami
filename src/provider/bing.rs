@@ -95,6 +95,13 @@ pub async fn fetch(
             );
             continue;
         }
+        if !url.scheme().eq_ignore_ascii_case("https") {
+            tracing::warn!(
+                "bing: urlbase resolved to non-HTTPS scheme {:?}, skipping",
+                url.scheme()
+            );
+            continue;
+        }
 
         match download_image(client, url.as_str(), &dest).await {
             Ok(()) => {
