@@ -29,15 +29,6 @@ impl Lang {
             .map(|e| e.variant)
             .unwrap_or_default()
     }
-
-    /// 言語コード文字列（"en", "ja" 等）から `Lang` を解析する。
-    ///
-    /// **非推奨**: 代わりに [`from_code`](Self::from_code) を使用してください。
-    /// このメソッドは将来のリリースで削除されます。
-    #[deprecated(since = "0.1.0", note = "use `from_code` instead")]
-    pub fn from_str(s: &str) -> Self {
-        Self::from_code(s)
-    }
 }
 
 /// 言語の登録エントリ。`REGISTRY` スライスの要素。
