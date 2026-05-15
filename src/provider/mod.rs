@@ -286,10 +286,12 @@ async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Resul
 /// `reqwest::Client` を生成する。`reqwest::Client` は内部で `Arc` を使っているため
 /// `.clone()` は安価で、外側の `Arc` ラップは不要。
 ///
-/// SSRF 対策:
-/// - リダイレクトは最大 5 回まで（古典的な無限リダイレクトループ防止）
-/// - 各リダイレクト先のホストが loopback / private / link-local / multicast
-///   等の内部ネットワークアドレスならエラー
+/// SSRF 対策（多層）:
+/// - **DNS resolver** (`KabekamiResolver`): ホスト名を解決した全 IP に対して
+///   private 判定を行い、1 つでも private なら接続を拒否（TLS SNI / 証明書検証は
+///   元のホスト名のまま温存される）
+/// - **Redirect policy**: 最大 5 回、各リダイレクト先のホスト文字列を `is_private_host`
+///   で再判定（IP リテラル URL も即時拒否）
 pub fn make_client() -> Result<reqwest::Client> {
     let policy = redirect::Policy::custom(|attempt| {
         const MAX_REDIRECTS: usize = 5;
@@ -316,8 +318,65 @@ pub fn make_client() -> Result<reqwest::Client> {
         ))
         .timeout(Duration::from_secs(30))
         .redirect(policy)
+        .dns_resolver(std::sync::Arc::new(KabekamiResolver))
         .build()?;
     Ok(client)
+}
+
+/// reqwest 用のカスタム DNS resolver。
+///
+/// 解決した全 IP アドレスに対して `is_private_ipv4` / `is_private_ipv6` を適用し、
+/// 1 つでも内部ネットワーク向けなら接続を拒否する。
+///
+/// この resolver は TCP 接続用の `SocketAddr` を返すだけで、reqwest 側は URL の
+/// ホスト名をそのまま TLS SNI と証明書検証に使い続けるため HTTPS が壊れない。
+///
+/// 攻撃シナリオ防御例:
+/// - `evil.com → 127.0.0.1` を返す DNS（公開ホスト名で内部に誘導）
+/// - `metadata.attacker.com → 169.254.169.254`（AWS metadata service 経由の credential 盗用）
+/// - split-horizon DNS で IPv4/IPv6 の片方だけ private（保守的に全件拒否）
+struct KabekamiResolver;
+
+impl reqwest::dns::Resolve for KabekamiResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            // 文字列ベースの fast path: localhost / IP リテラル等は DNS を引かずに弾く
+            if is_private_host(&host) {
+                return Err(boxed_err(format!("refusing private host {}", host)));
+            }
+            // 実際の名前解決（port=0、reqwest 側で正しい port に差し替えられる）
+            let addrs: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0))
+                    .await
+                    .map_err(|e| {
+                        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                    })?
+                    .collect();
+            // 解決された全 IP を検証
+            for sa in &addrs {
+                let is_private = match sa.ip() {
+                    std::net::IpAddr::V4(v4) => is_private_ipv4(v4),
+                    std::net::IpAddr::V6(v6) => is_private_ipv6(&v6),
+                };
+                if is_private {
+                    return Err(boxed_err(format!(
+                        "host {} resolves to private {}",
+                        host,
+                        sa.ip()
+                    )));
+                }
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+fn boxed_err(msg: String) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        msg,
+    ))
 }
 
 /// ホスト名 / IP リテラルが「内部ネットワーク向け」かを判定する。
@@ -338,26 +397,7 @@ fn is_private_host(host: &str) -> bool {
     }
 
     if let Ok(ip) = bare.parse::<Ipv6Addr>() {
-        // IPv4-mapped IPv6 (`::ffff:127.0.0.1` 等) は埋め込み IPv4 で判定する。
-        // これを忘れると `::ffff:127.0.0.1` のようなアドレスで loopback への
-        // 接続を許してしまう。`Ipv6Addr::to_ipv4_mapped` は MSRV 1.75 に
-        // 含まれていないため手動で展開する。
-        if let Some(v4) = ipv4_mapped(&ip) {
-            return is_private_ipv4(v4);
-        }
-        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-            return true;
-        }
-        let s = ip.segments();
-        // ULA fc00::/7
-        if (s[0] & 0xfe00) == 0xfc00 {
-            return true;
-        }
-        // Link-local fe80::/10
-        if (s[0] & 0xffc0) == 0xfe80 {
-            return true;
-        }
-        return false;
+        return is_private_ipv6(&ip);
     }
 
     false
@@ -370,6 +410,27 @@ fn is_private_ipv4(ip: Ipv4Addr) -> bool {
         || ip.is_unspecified()
         || ip.is_broadcast()
         || ip.is_multicast()
+}
+
+/// IPv6 が「内部ネットワーク向け」かを判定する。
+/// IPv4-mapped IPv6 (`::ffff:a.b.c.d`) は埋め込み IPv4 で再判定する。
+fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
+    if let Some(v4) = ipv4_mapped(ip) {
+        return is_private_ipv4(v4);
+    }
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
+    let s = ip.segments();
+    // ULA fc00::/7
+    if (s[0] & 0xfe00) == 0xfc00 {
+        return true;
+    }
+    // Link-local fe80::/10
+    if (s[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
+    false
 }
 
 /// IPv6 が IPv4-mapped 形式 (`::ffff:a.b.c.d`) なら埋め込み IPv4 を返す。
@@ -445,5 +506,56 @@ mod download_tests {
     fn accepts_ipv4_mapped_ipv6_public() {
         assert!(!is_private_host("::ffff:8.8.8.8"));
         assert!(!is_private_host("::ffff:1.1.1.1"));
+    }
+
+    // ── is_private_ipv6 ヘルパー直接テスト ──────────────────────────────────
+
+    #[test]
+    fn is_private_ipv6_helper() {
+        use super::is_private_ipv6;
+        // private
+        assert!(is_private_ipv6(&"::1".parse().unwrap()));
+        assert!(is_private_ipv6(&"::".parse().unwrap()));
+        assert!(is_private_ipv6(&"fc00::1".parse().unwrap()));
+        assert!(is_private_ipv6(&"fe80::1".parse().unwrap()));
+        assert!(is_private_ipv6(&"ff02::1".parse().unwrap()));
+        assert!(is_private_ipv6(&"::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_private_ipv6(&"::ffff:10.0.0.1".parse().unwrap()));
+        // public
+        assert!(!is_private_ipv6(&"2606:4700:4700::1111".parse().unwrap()));
+        assert!(!is_private_ipv6(&"::ffff:8.8.8.8".parse().unwrap()));
+    }
+
+    // ── KabekamiResolver の DNS 解決検証 ────────────────────────────────────
+
+    use reqwest::dns::Resolve;
+
+    /// resolver は `is_private_host` の fast path で localhost を拒否する。
+    /// DNS 解決の往復なしで即座にエラーになる。
+    /// `Addrs` (Ok 側) が Debug を実装しないため if let で取り出す。
+    #[tokio::test]
+    async fn resolver_rejects_private_literal() {
+        let resolver = super::KabekamiResolver;
+        let name: reqwest::dns::Name = "localhost".parse().unwrap();
+        let result = resolver.resolve(name).await;
+        let Err(e) = result else {
+            panic!("localhost must be rejected, got Ok");
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("private"),
+            "error message should mention private, got: {}",
+            msg
+        );
+    }
+
+    /// 127.0.0.1 への解決を意図したホスト名を弾けるか。
+    /// fast path（文字列チェック）は `is_private_host("127.0.0.1")` で即弾く想定。
+    #[tokio::test]
+    async fn resolver_rejects_ip_literal_loopback() {
+        let resolver = super::KabekamiResolver;
+        let name: reqwest::dns::Name = "127.0.0.1".parse().unwrap();
+        let result = resolver.resolve(name).await;
+        assert!(result.is_err(), "127.0.0.1 must be rejected");
     }
 }
