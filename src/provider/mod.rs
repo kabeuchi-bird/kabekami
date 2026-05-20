@@ -354,22 +354,32 @@ impl reqwest::dns::Resolve for KabekamiResolver {
                     })?
                     .collect();
             // 解決された全 IP を検証
-            for sa in &addrs {
-                let is_private = match sa.ip() {
-                    std::net::IpAddr::V4(v4) => is_private_ipv4(v4),
-                    std::net::IpAddr::V6(v6) => is_private_ipv6(&v6),
-                };
-                if is_private {
-                    return Err(boxed_err(format!(
-                        "host {} resolves to private {}",
-                        host,
-                        sa.ip()
-                    )));
-                }
-            }
+            validate_resolved_addrs(&host, &addrs)?;
             Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
         })
     }
+}
+
+/// DNS 解決済みの `SocketAddr` 集合を検証する。
+/// 1 つでも内部ネットワーク向け IP を含む場合は `Err` を返す（保守的に全件拒否）。
+fn validate_resolved_addrs(
+    host: &str,
+    addrs: &[std::net::SocketAddr],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for sa in addrs {
+        let is_private = match sa.ip() {
+            std::net::IpAddr::V4(v4) => is_private_ipv4(v4),
+            std::net::IpAddr::V6(v6) => is_private_ipv6(&v6),
+        };
+        if is_private {
+            return Err(boxed_err(format!(
+                "host {} resolves to private {}",
+                host,
+                sa.ip()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn boxed_err(msg: String) -> Box<dyn std::error::Error + Send + Sync> {
@@ -528,5 +538,46 @@ mod download_tests {
             "error message should mention private, got: {}",
             msg
         );
+    }
+
+    // ── validate_resolved_addrs: DNS 解決後の SocketAddr 検証ループ ──────────
+
+    use super::validate_resolved_addrs;
+
+    /// 全アドレスが public なら Ok。
+    #[test]
+    fn validate_addrs_accepts_all_public() {
+        let addrs = vec![
+            "8.8.8.8:0".parse().unwrap(),
+            "1.1.1.1:0".parse().unwrap(),
+            "[2606:4700:4700::1111]:0".parse().unwrap(),
+        ];
+        assert!(validate_resolved_addrs("public.example", &addrs).is_ok());
+    }
+
+    /// public と private が混在する場合は拒否（保守的に全件拒否）。
+    #[test]
+    fn validate_addrs_rejects_mixed() {
+        let addrs = vec![
+            "8.8.8.8:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(), // private
+        ];
+        let err = validate_resolved_addrs("mixed.example", &addrs)
+            .expect_err("mixed addrs must be rejected");
+        assert!(err.to_string().contains("private"));
+    }
+
+    /// IPv4-mapped IPv6 で内部アドレスを偽装するパターンも拒否。
+    #[test]
+    fn validate_addrs_rejects_ipv4_mapped_private() {
+        let addrs: Vec<std::net::SocketAddr> =
+            vec!["[::ffff:169.254.169.254]:0".parse().unwrap()];
+        assert!(validate_resolved_addrs("metadata.example", &addrs).is_err());
+    }
+
+    /// 空集合は素通り（呼び出し元の lookup_host が空を返すことは通常ないが、安全側）。
+    #[test]
+    fn validate_addrs_empty_is_ok() {
+        assert!(validate_resolved_addrs("empty.example", &[]).is_ok());
     }
 }
