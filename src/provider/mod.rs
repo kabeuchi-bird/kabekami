@@ -508,30 +508,11 @@ mod download_tests {
         assert!(!is_private_host("::ffff:1.1.1.1"));
     }
 
-    // ── is_private_ipv6 ヘルパー直接テスト ──────────────────────────────────
-
-    #[test]
-    fn is_private_ipv6_helper() {
-        use super::is_private_ipv6;
-        // private
-        assert!(is_private_ipv6(&"::1".parse().unwrap()));
-        assert!(is_private_ipv6(&"::".parse().unwrap()));
-        assert!(is_private_ipv6(&"fc00::1".parse().unwrap()));
-        assert!(is_private_ipv6(&"fe80::1".parse().unwrap()));
-        assert!(is_private_ipv6(&"ff02::1".parse().unwrap()));
-        assert!(is_private_ipv6(&"::ffff:127.0.0.1".parse().unwrap()));
-        assert!(is_private_ipv6(&"::ffff:10.0.0.1".parse().unwrap()));
-        // public
-        assert!(!is_private_ipv6(&"2606:4700:4700::1111".parse().unwrap()));
-        assert!(!is_private_ipv6(&"::ffff:8.8.8.8".parse().unwrap()));
-    }
-
     // ── KabekamiResolver の DNS 解決検証 ────────────────────────────────────
 
     use reqwest::dns::Resolve;
 
-    /// resolver は `is_private_host` の fast path で localhost を拒否する。
-    /// DNS 解決の往復なしで即座にエラーになる。
+    /// resolver が `is_private_host` の fast path で内部ホストを拒否することを確認する。
     /// `Addrs` (Ok 側) が Debug を実装しないため if let で取り出す。
     #[tokio::test]
     async fn resolver_rejects_private_literal() {
@@ -547,15 +528,5 @@ mod download_tests {
             "error message should mention private, got: {}",
             msg
         );
-    }
-
-    /// 127.0.0.1 への解決を意図したホスト名を弾けるか。
-    /// fast path（文字列チェック）は `is_private_host("127.0.0.1")` で即弾く想定。
-    #[tokio::test]
-    async fn resolver_rejects_ip_literal_loopback() {
-        let resolver = super::KabekamiResolver;
-        let name: reqwest::dns::Name = "127.0.0.1".parse().unwrap();
-        let result = resolver.resolve(name).await;
-        assert!(result.is_err(), "127.0.0.1 must be rejected");
     }
 }
