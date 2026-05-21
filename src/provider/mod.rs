@@ -286,10 +286,12 @@ async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Resul
 /// `reqwest::Client` を生成する。`reqwest::Client` は内部で `Arc` を使っているため
 /// `.clone()` は安価で、外側の `Arc` ラップは不要。
 ///
-/// SSRF 対策:
-/// - リダイレクトは最大 5 回まで（古典的な無限リダイレクトループ防止）
-/// - 各リダイレクト先のホストが loopback / private / link-local / multicast
-///   等の内部ネットワークアドレスならエラー
+/// SSRF 対策（多層）:
+/// - **DNS resolver** (`KabekamiResolver`): ホスト名を解決した全 IP に対して
+///   private 判定を行い、1 つでも private なら接続を拒否（TLS SNI / 証明書検証は
+///   元のホスト名のまま温存される）
+/// - **Redirect policy**: 最大 5 回、各リダイレクト先のホスト文字列を `is_private_host`
+///   で再判定（IP リテラル URL も即時拒否）
 pub fn make_client() -> Result<reqwest::Client> {
     let policy = redirect::Policy::custom(|attempt| {
         const MAX_REDIRECTS: usize = 5;
@@ -316,8 +318,75 @@ pub fn make_client() -> Result<reqwest::Client> {
         ))
         .timeout(Duration::from_secs(30))
         .redirect(policy)
+        .dns_resolver(std::sync::Arc::new(KabekamiResolver))
         .build()?;
     Ok(client)
+}
+
+/// reqwest 用のカスタム DNS resolver。
+///
+/// 解決した全 IP アドレスに対して `is_private_ipv4` / `is_private_ipv6` を適用し、
+/// 1 つでも内部ネットワーク向けなら接続を拒否する。
+///
+/// この resolver は TCP 接続用の `SocketAddr` を返すだけで、reqwest 側は URL の
+/// ホスト名をそのまま TLS SNI と証明書検証に使い続けるため HTTPS が壊れない。
+///
+/// 攻撃シナリオ防御例:
+/// - `evil.com → 127.0.0.1` を返す DNS（公開ホスト名で内部に誘導）
+/// - `metadata.attacker.com → 169.254.169.254`（AWS metadata service 経由の credential 盗用）
+/// - split-horizon DNS で IPv4/IPv6 の片方だけ private（保守的に全件拒否）
+struct KabekamiResolver;
+
+impl reqwest::dns::Resolve for KabekamiResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            // 文字列ベースの fast path: localhost / IP リテラル等は DNS を引かずに弾く
+            if is_private_host(&host) {
+                return Err(boxed_err(format!("refusing private host {}", host)));
+            }
+            // 実際の名前解決（port=0、reqwest 側で正しい port に差し替えられる）
+            let addrs: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host((host.as_str(), 0))
+                    .await
+                    .map_err(|e| {
+                        Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                    })?
+                    .collect();
+            // 解決された全 IP を検証
+            validate_resolved_addrs(&host, &addrs)?;
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// DNS 解決済みの `SocketAddr` 集合を検証する。
+/// 1 つでも内部ネットワーク向け IP を含む場合は `Err` を返す（保守的に全件拒否）。
+fn validate_resolved_addrs(
+    host: &str,
+    addrs: &[std::net::SocketAddr],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for sa in addrs {
+        let is_private = match sa.ip() {
+            std::net::IpAddr::V4(v4) => is_private_ipv4(v4),
+            std::net::IpAddr::V6(v6) => is_private_ipv6(&v6),
+        };
+        if is_private {
+            return Err(boxed_err(format!(
+                "host {} resolves to private {}",
+                host,
+                sa.ip()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn boxed_err(msg: String) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        msg,
+    ))
 }
 
 /// ホスト名 / IP リテラルが「内部ネットワーク向け」かを判定する。
@@ -338,26 +407,7 @@ fn is_private_host(host: &str) -> bool {
     }
 
     if let Ok(ip) = bare.parse::<Ipv6Addr>() {
-        // IPv4-mapped IPv6 (`::ffff:127.0.0.1` 等) は埋め込み IPv4 で判定する。
-        // これを忘れると `::ffff:127.0.0.1` のようなアドレスで loopback への
-        // 接続を許してしまう。`Ipv6Addr::to_ipv4_mapped` は MSRV 1.75 に
-        // 含まれていないため手動で展開する。
-        if let Some(v4) = ipv4_mapped(&ip) {
-            return is_private_ipv4(v4);
-        }
-        if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
-            return true;
-        }
-        let s = ip.segments();
-        // ULA fc00::/7
-        if (s[0] & 0xfe00) == 0xfc00 {
-            return true;
-        }
-        // Link-local fe80::/10
-        if (s[0] & 0xffc0) == 0xfe80 {
-            return true;
-        }
-        return false;
+        return is_private_ipv6(&ip);
     }
 
     false
@@ -370,6 +420,27 @@ fn is_private_ipv4(ip: Ipv4Addr) -> bool {
         || ip.is_unspecified()
         || ip.is_broadcast()
         || ip.is_multicast()
+}
+
+/// IPv6 が「内部ネットワーク向け」かを判定する。
+/// IPv4-mapped IPv6 (`::ffff:a.b.c.d`) は埋め込み IPv4 で再判定する。
+fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
+    if let Some(v4) = ipv4_mapped(ip) {
+        return is_private_ipv4(v4);
+    }
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
+    let s = ip.segments();
+    // ULA fc00::/7
+    if (s[0] & 0xfe00) == 0xfc00 {
+        return true;
+    }
+    // Link-local fe80::/10
+    if (s[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
+    false
 }
 
 /// IPv6 が IPv4-mapped 形式 (`::ffff:a.b.c.d`) なら埋め込み IPv4 を返す。
@@ -445,5 +516,68 @@ mod download_tests {
     fn accepts_ipv4_mapped_ipv6_public() {
         assert!(!is_private_host("::ffff:8.8.8.8"));
         assert!(!is_private_host("::ffff:1.1.1.1"));
+    }
+
+    // ── KabekamiResolver の DNS 解決検証 ────────────────────────────────────
+
+    use reqwest::dns::Resolve;
+
+    /// resolver が `is_private_host` の fast path で内部ホストを拒否することを確認する。
+    /// `Addrs` (Ok 側) が Debug を実装しないため if let で取り出す。
+    #[tokio::test]
+    async fn resolver_rejects_private_literal() {
+        let resolver = super::KabekamiResolver;
+        let name: reqwest::dns::Name = "localhost".parse().unwrap();
+        let result = resolver.resolve(name).await;
+        let Err(e) = result else {
+            panic!("localhost must be rejected, got Ok");
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("private"),
+            "error message should mention private, got: {}",
+            msg
+        );
+    }
+
+    // ── validate_resolved_addrs: DNS 解決後の SocketAddr 検証ループ ──────────
+
+    use super::validate_resolved_addrs;
+
+    /// 全アドレスが public なら Ok。
+    #[test]
+    fn validate_addrs_accepts_all_public() {
+        let addrs = vec![
+            "8.8.8.8:0".parse().unwrap(),
+            "1.1.1.1:0".parse().unwrap(),
+            "[2606:4700:4700::1111]:0".parse().unwrap(),
+        ];
+        assert!(validate_resolved_addrs("public.example", &addrs).is_ok());
+    }
+
+    /// public と private が混在する場合は拒否（保守的に全件拒否）。
+    #[test]
+    fn validate_addrs_rejects_mixed() {
+        let addrs = vec![
+            "8.8.8.8:0".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(), // private
+        ];
+        let err = validate_resolved_addrs("mixed.example", &addrs)
+            .expect_err("mixed addrs must be rejected");
+        assert!(err.to_string().contains("private"));
+    }
+
+    /// IPv4-mapped IPv6 で内部アドレスを偽装するパターンも拒否。
+    #[test]
+    fn validate_addrs_rejects_ipv4_mapped_private() {
+        let addrs: Vec<std::net::SocketAddr> =
+            vec!["[::ffff:169.254.169.254]:0".parse().unwrap()];
+        assert!(validate_resolved_addrs("metadata.example", &addrs).is_err());
+    }
+
+    /// 空集合は素通り（呼び出し元の lookup_host が空を返すことは通常ないが、安全側）。
+    #[test]
+    fn validate_addrs_empty_is_ok() {
+        assert!(validate_resolved_addrs("empty.example", &[]).is_ok());
     }
 }
