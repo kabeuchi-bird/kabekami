@@ -131,6 +131,8 @@ kabekami --quit
 
 コマンドは D-Bus（`org.kabekami.Daemon`）経由でデーモンに転送されます。
 
+> **KRunner で実行する場合の注意**: KRunner（Alt+Space）で `kabekami --next` 等を実行すると、ShellRunner と AppRunner / HistoryRunner の両方が同じ入力にマッチして二重発火することがあります。kabekami 側で 500 ms のスロットルを入れているため通常の二重発火は吸収されますが、安定して使いたい場合は下記の **グローバルショートカット** の利用を推奨します。
+
 ### グローバルショートカット
 
 **システム設定 → ショートカット → kabekami** で任意のキーを割り当てられます（デフォルトなし）:
