@@ -270,15 +270,19 @@ async fn main() -> Result<()> {
             Some(cmd) = cmd_rx.recv() => {
                 let now = std::time::Instant::now();
                 // システムイベント系（Quit / PlasmaRestarted / ReloadConfig / ScreensChanged）は
-                // スロットリングをバイパスする
+                // スロットリングをバイパスする。
+                //
+                // 500ms スロットルの理由: KRunner で `kabekami --next` を実行すると
+                // CLI バイナリの起動 + D-Bus 接続 (50-200ms) を 2 回経由して daemon に
+                // 届くケースがあり、短いスロットル (100ms 等) だと二重実行を吸収しきれない。
                 let throttle_exempt = matches!(
                     cmd,
                     TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ReloadConfig | TrayCmd::ScreensChanged(_)
                 );
                 if !throttle_exempt
-                    && last_cmd_at.is_some_and(|t| now.duration_since(t) < Duration::from_millis(100))
+                    && last_cmd_at.is_some_and(|t| now.duration_since(t) < Duration::from_millis(500))
                 {
-                    tracing::debug!("command throttled (< 100ms): {:?}", cmd);
+                    tracing::debug!("command throttled (< 500ms): {:?}", cmd);
                     continue;
                 }
                 last_cmd_at = Some(now);
