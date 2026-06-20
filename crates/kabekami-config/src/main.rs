@@ -14,14 +14,11 @@ use kabekami_common::config::{Config, DisplayMode, OnlineSourceConfig, Order, Pr
 use kabekami_common::i18n::{self, Lang};
 
 fn main() -> eframe::Result<()> {
-    // タイトルは ViewportBuilder で 1 回しか設定できないので、起動時の language で固定。
-    // 言語切替後に再起動するとタイトルバーも切り替わる。
-    let initial_lang = Config::load()
-        .map(|c| Lang::from_code(&c.ui.language))
-        .unwrap_or_default();
+    // タイトルバーは英語固定。ViewportBuilder の仕様で実行中に変更できないこと、
+    // および OS のタスクバーで識別しやすいよう "Kabekami Configuration" を採用。
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(i18n::pick(initial_lang, "kabekami 設定", "Settings"))
+            .with_title("Kabekami Configuration")
             .with_inner_size([720.0, 580.0])
             .with_resizable(true),
         ..Default::default()
