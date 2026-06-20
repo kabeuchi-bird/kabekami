@@ -31,6 +31,21 @@ impl Lang {
     }
 }
 
+/// 2 言語のリテラルから現在の `Lang` に対応する文字列を選ぶ軽量ヘルパー。
+///
+/// kabekami-config のように UI 文字列が多く `UiStrings` 構造体に追加するのが
+/// 過剰な場面で、使用箇所で in-line に翻訳を書くために使う:
+///
+/// ```ignore
+/// ui.heading(i18n::pick(self.lang, "kabekami 設定", "Settings"));
+/// ```
+pub fn pick(lang: Lang, ja: &'static str, en: &'static str) -> &'static str {
+    match lang {
+        Lang::Ja => ja,
+        Lang::En => en,
+    }
+}
+
 /// 言語の登録エントリ。`REGISTRY` スライスの要素。
 pub struct LangEntry {
     /// config.toml / 環境変数で使う識別子（例: `"ja"`）
