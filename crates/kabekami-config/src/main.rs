@@ -451,7 +451,7 @@ impl KabekamiApp {
                 .unwrap_or_default();
             if ui.add(
                 egui::TextEdit::singleline(&mut fav_str)
-                    .hint_text(i18n::pick(self.lang, "~/Pictures/Favorites  (空欄=無効", "empty=disabled)"))
+                    .hint_text(i18n::pick(self.lang, "~/Pictures/Favorites (空欄=無効)", "(empty=disabled)"))
                     .desired_width(400.0),
             ).changed() {
                 self.config.sources.favorites_dir = if fav_str.trim().is_empty() {
@@ -537,13 +537,14 @@ impl KabekamiApp {
         ui.separator();
 
         let mut mode_changed = false;
-        for (mode, label) in [
-            (DisplayMode::BlurPad, "BlurPad (ぼかし背景＋前景)"),
-            (DisplayMode::Smart, "Smart (アスペクト比で自動選択)"),
-            (DisplayMode::Fill, "Fill (クロップ)"),
-            (DisplayMode::Fit, "Fit (レターボックス)"),
-            (DisplayMode::Stretch, "Stretch (引き伸ばし)"),
+        for (mode, ja, en) in [
+            (DisplayMode::BlurPad, "BlurPad (ぼかし背景＋前景)", "BlurPad (blur background + foreground)"),
+            (DisplayMode::Smart, "Smart (アスペクト比で自動選択)", "Smart (auto by aspect ratio)"),
+            (DisplayMode::Fill, "Fill (クロップ)", "Fill (crop)"),
+            (DisplayMode::Fit, "Fit (レターボックス)", "Fit (letterbox)"),
+            (DisplayMode::Stretch, "Stretch (引き伸ばし)", "Stretch"),
         ] {
+            let label = i18n::pick(self.lang, ja, en);
             if ui
                 .radio_value(&mut self.config.display.mode, mode, label)
                 .clicked()
@@ -592,7 +593,7 @@ impl KabekamiApp {
                 ui.button(i18n::pick(self.lang, "▶ プレビュー", "▶ Preview")).clicked()
                 || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 || mode_changed;
-            if self.browse_button(ui, "📁 参照") {
+            if self.browse_button(ui, i18n::pick(self.lang, "📁 参照", "Browse…")) {
                 let cur_path = std::path::Path::new(self.preview_image_path.trim());
                 let start = cur_path
                     .parent()
@@ -639,7 +640,7 @@ impl KabekamiApp {
                 self.config.cache.directory = PathBuf::from(dir_str);
                 self.cache_size_bytes = None; // ディレクトリ変更時はリセット
             }
-            if self.browse_button(ui, "📁 参照") {
+            if self.browse_button(ui, i18n::pick(self.lang, "📁 参照", "Browse…")) {
                 if let Some(path) = pick_folder(self.lang, Some(&self.config.cache.directory)) {
                     self.config.cache.directory = path;
                     self.cache_size_bytes = None;
@@ -651,7 +652,7 @@ impl KabekamiApp {
             ui.label(i18n::pick(self.lang, "最大サイズ", "Max size (MB):"));
             ui.add(egui::DragValue::new(&mut self.config.cache.max_size_mb).range(0..=100_000));
         });
-        ui.label(i18n::pick(self.lang, "0 = 無制限", "unlimited"));
+        ui.label(i18n::pick(self.lang, "0 = 無制限", "0 = unlimited"));
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -813,7 +814,11 @@ impl KabekamiApp {
             }
         });
         ui.add_space(4.0);
-        ui.label("💡 ダウンロード先: ~/.local/share/kabekami/<provider>/");
+        ui.label(i18n::pick(
+            self.lang,
+            "💡 ダウンロード先: ~/.local/share/kabekami/<provider>/",
+            "💡 Download dir: ~/.local/share/kabekami/<provider>/",
+        ));
     }
 
     fn ui_ui_tab(&mut self, ui: &mut egui::Ui) {
