@@ -453,7 +453,7 @@ impl KabekamiApp {
                 .unwrap_or_default();
             if ui.add(
                 egui::TextEdit::singleline(&mut fav_str)
-                    .hint_text(i18n::pick(self.lang, "~/Pictures/Favorites (空欄=無効)", "(empty=disabled)"))
+                    .hint_text(i18n::pick(self.lang, "~/Pictures/Favorites (空欄=無効)", "~/Pictures/Favorites (empty=disabled)"))
                     .desired_width(400.0),
             ).changed() {
                 self.config.sources.favorites_dir = if fav_str.trim().is_empty() {
@@ -753,7 +753,7 @@ impl KabekamiApp {
                     });
                     // ダウンロード先ディレクトリ
                     ui.horizontal(|ui| {
-                        ui.label("Download dir:");
+                        ui.label(i18n::pick(self.lang, "ダウンロード先", "Download dir:"));
                         let mut dir_str = oc.download_dir.as_deref()
                             .map(|p| p.to_string_lossy().into_owned())
                             .unwrap_or_default();
