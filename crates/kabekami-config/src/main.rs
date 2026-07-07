@@ -304,8 +304,10 @@ impl KabekamiApp {
     }
 
     /// 「📁 参照」ボタンを描画する（kdialog 不在時は無効化＆ツールチップ）。
-    /// クリックされたら `true` を返す。
-    fn browse_button(&self, ui: &mut egui::Ui, label: &str) -> bool {
+    /// クリックされたら `true` を返す。ラベルはここで一元管理し、呼び出し側での
+    /// 翻訳漏れを構造的に防ぐ。
+    fn browse_button(&self, ui: &mut egui::Ui) -> bool {
+        let label = i18n::pick(self.lang, "📁 参照", "📁 Browse…");
         let resp = ui.add_enabled(self.has_kdialog, egui::Button::new(label));
         let clicked = resp.clicked();
         if !self.has_kdialog {
@@ -394,7 +396,7 @@ impl eframe::App for KabekamiApp {
                     (i18n::pick(self.lang, "ローテーション", "Rotation"), Tab::Rotation),
                     (i18n::pick(self.lang, "表示", "Display"), Tab::Display),
                     (i18n::pick(self.lang, "キャッシュ", "Cache"), Tab::Cache),
-                    (i18n::pick(self.lang, "UI", "UI"), Tab::Ui),
+                    ("UI", Tab::Ui),
                 ] {
                     ui.selectable_value(&mut self.tab, tab, label);
                 }
@@ -451,7 +453,7 @@ impl KabekamiApp {
                 .unwrap_or_default();
             if ui.add(
                 egui::TextEdit::singleline(&mut fav_str)
-                    .hint_text(i18n::pick(self.lang, "~/Pictures/Favorites  (空欄=無効", "empty=disabled)"))
+                    .hint_text(i18n::pick(self.lang, "~/Pictures/Favorites (空欄=無効)", "~/Pictures/Favorites (empty=disabled)"))
                     .desired_width(400.0),
             ).changed() {
                 self.config.sources.favorites_dir = if fav_str.trim().is_empty() {
@@ -464,9 +466,8 @@ impl KabekamiApp {
         ui.add_space(8.0);
 
         ui.label(i18n::pick(self.lang, "ディレクトリ", "Directories:"));
-        let dirs = self.config.sources.directories.clone();
         let mut remove_idx = None;
-        for (i, dir) in dirs.iter().enumerate() {
+        for (i, dir) in self.config.sources.directories.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(dir.to_string_lossy().as_ref());
                 if ui.small_button("✖").clicked() {
@@ -494,7 +495,7 @@ impl KabekamiApp {
                     self.new_dir_input.clear();
                 }
             }
-            if self.browse_button(ui, i18n::pick(self.lang, "📁 参照", "Browse…")) {
+            if self.browse_button(ui) {
                 if let Some(path) = pick_folder(self.lang, None) {
                     self.config.sources.directories.push(path);
                     self.new_dir_input.clear();
@@ -537,13 +538,14 @@ impl KabekamiApp {
         ui.separator();
 
         let mut mode_changed = false;
-        for (mode, label) in [
-            (DisplayMode::BlurPad, "BlurPad (ぼかし背景＋前景)"),
-            (DisplayMode::Smart, "Smart (アスペクト比で自動選択)"),
-            (DisplayMode::Fill, "Fill (クロップ)"),
-            (DisplayMode::Fit, "Fit (レターボックス)"),
-            (DisplayMode::Stretch, "Stretch (引き伸ばし)"),
+        for (mode, ja, en) in [
+            (DisplayMode::BlurPad, "BlurPad (ぼかし背景＋前景)", "BlurPad (blur background + foreground)"),
+            (DisplayMode::Smart, "Smart (アスペクト比で自動選択)", "Smart (auto by aspect ratio)"),
+            (DisplayMode::Fill, "Fill (クロップ)", "Fill (crop)"),
+            (DisplayMode::Fit, "Fit (レターボックス)", "Fit (letterbox)"),
+            (DisplayMode::Stretch, "Stretch (引き伸ばし)", "Stretch"),
         ] {
+            let label = i18n::pick(self.lang, ja, en);
             if ui
                 .radio_value(&mut self.config.display.mode, mode, label)
                 .clicked()
@@ -592,7 +594,7 @@ impl KabekamiApp {
                 ui.button(i18n::pick(self.lang, "▶ プレビュー", "▶ Preview")).clicked()
                 || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 || mode_changed;
-            if self.browse_button(ui, "📁 参照") {
+            if self.browse_button(ui) {
                 let cur_path = std::path::Path::new(self.preview_image_path.trim());
                 let start = cur_path
                     .parent()
@@ -639,7 +641,7 @@ impl KabekamiApp {
                 self.config.cache.directory = PathBuf::from(dir_str);
                 self.cache_size_bytes = None; // ディレクトリ変更時はリセット
             }
-            if self.browse_button(ui, "📁 参照") {
+            if self.browse_button(ui) {
                 if let Some(path) = pick_folder(self.lang, Some(&self.config.cache.directory)) {
                     self.config.cache.directory = path;
                     self.cache_size_bytes = None;
@@ -651,7 +653,7 @@ impl KabekamiApp {
             ui.label(i18n::pick(self.lang, "最大サイズ", "Max size (MB):"));
             ui.add(egui::DragValue::new(&mut self.config.cache.max_size_mb).range(0..=100_000));
         });
-        ui.label(i18n::pick(self.lang, "0 = 無制限", "unlimited"));
+        ui.label(i18n::pick(self.lang, "0 = 無制限", "0 = unlimited"));
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -700,9 +702,10 @@ impl KabekamiApp {
         ui.add_space(8.0);
 
         let mut remove_idx: Option<usize> = None;
-        let sources = self.config.online_sources.clone();
-        for (i, oc) in sources.iter().enumerate() {
-            let mut oc = oc.clone();
+        // ループ中に self.browse_button()（&self 借用）を呼ぶため、Vec を take して
+        // 所有権を手元に移す。deep clone と違い take/戻しは O(1)。
+        let mut sources = std::mem::take(&mut self.config.online_sources);
+        for (i, oc) in sources.iter_mut().enumerate() {
             ui.group(|ui| {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut oc.enabled, format!("**{}**", oc.provider));
@@ -750,7 +753,7 @@ impl KabekamiApp {
                     });
                     // ダウンロード先ディレクトリ
                     ui.horizontal(|ui| {
-                        ui.label("Download dir:");
+                        ui.label(i18n::pick(self.lang, "ダウンロード先", "Download dir:"));
                         let mut dir_str = oc.download_dir.as_deref()
                             .map(|p| p.to_string_lossy().into_owned())
                             .unwrap_or_default();
@@ -766,7 +769,7 @@ impl KabekamiApp {
                                 Some(PathBuf::from(dir_str))
                             };
                         }
-                        if self.browse_button(ui, "📁") {
+                        if self.browse_button(ui) {
                             if let Some(path) = pick_folder(self.lang, oc.download_dir.as_deref()) {
                                 oc.download_dir = Some(path);
                             }
@@ -774,9 +777,9 @@ impl KabekamiApp {
                     });
                 });
             });
-            self.config.online_sources[i] = oc;
             ui.add_space(4.0);
         }
+        self.config.online_sources = sources;
         if let Some(idx) = remove_idx {
             self.config.online_sources.remove(idx);
         }
@@ -813,7 +816,11 @@ impl KabekamiApp {
             }
         });
         ui.add_space(4.0);
-        ui.label("💡 ダウンロード先: ~/.local/share/kabekami/<provider>/");
+        ui.label(i18n::pick(
+            self.lang,
+            "💡 ダウンロード先: ~/.local/share/kabekami/<provider>/",
+            "💡 Download dir: ~/.local/share/kabekami/<provider>/",
+        ));
     }
 
     fn ui_ui_tab(&mut self, ui: &mut egui::Ui) {

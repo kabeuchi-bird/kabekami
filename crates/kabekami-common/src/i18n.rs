@@ -22,10 +22,10 @@ impl Lang {
     ///
     /// `FromStr` トレイトとは別で lossy な独自パーサ（`Result` を返さない）。
     pub fn from_code(s: &str) -> Self {
-        let key = s.trim().to_ascii_lowercase();
+        let trimmed = s.trim();
         REGISTRY
             .iter()
-            .find(|e| e.id == key.as_str())
+            .find(|e| e.id.eq_ignore_ascii_case(trimmed))
             .map(|e| e.variant)
             .unwrap_or_default()
     }
