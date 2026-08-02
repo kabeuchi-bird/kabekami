@@ -259,12 +259,13 @@ pub async fn spawn_tray(
     lang: Lang,
     has_favorites_dir: bool,
     blacklist_enabled: bool,
+    paused: bool,
 ) -> Option<ksni::Handle<KabekamiTray>> {
     use ksni::TrayMethods;
 
     let tray = KabekamiTray {
         notifier,
-        paused: false,
+        paused,
         mode,
         interval_secs,
         current_name: String::new(),

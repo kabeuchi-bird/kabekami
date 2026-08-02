@@ -16,6 +16,7 @@ mod screen;
 mod screen_watcher;
 mod session;
 mod shortcuts;
+mod state;
 mod tray;
 mod watcher;
 
@@ -109,6 +110,11 @@ async fn main() -> Result<()> {
         config.cache.max_size_mb,
     ));
     let mut scheduler = Scheduler::new(images, config.rotation.order);
+    let daemon_state = state::DaemonState::load(&kabekami_config_dir);
+    if daemon_state.paused {
+        scheduler.pause();
+        tracing::info!("restored paused state from previous session");
+    }
     let mut prefetcher = Prefetcher::new();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
@@ -138,6 +144,7 @@ async fn main() -> Result<()> {
         lang,
         config.sources.favorites_dir.is_some(),
         config.ui.enable_blacklist,
+        scheduler.is_paused(),
     )
     .await;
 
@@ -310,8 +317,12 @@ async fn main() -> Result<()> {
                             scheduler.pause();
                             tracing::info!("paused");
                         }
+                        let paused = scheduler.is_paused();
+                        let st = state::DaemonState { paused };
+                        if let Err(e) = st.save(&kabekami_config_dir) {
+                            tracing::warn!("failed to persist paused state: {:#}", e);
+                        }
                         if let Some(ref h) = tray_handle {
-                            let paused = scheduler.is_paused();
                             h.update(|t| t.paused = paused).await;
                         }
                     }
