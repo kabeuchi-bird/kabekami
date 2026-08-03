@@ -17,15 +17,28 @@ reviews:
     - "!target/**"
     - "!**/target/**"
     - "!packaging/**"
+    - "!Cargo.lock"
 
   path_instructions:
     - path: "src/**/*.rs"
       instructions: |
         Rust コードをレビューする際は以下の点に注意してください:
         - 非同期コード（tokio）の正しさ: タスクリーク、デッドロック、キャンセル安全性
+        - デーモンは `worker_threads = 1` で動作します。async 関数内の同期 I/O
+          （ファイル書き込み・fsync・プロセス起動）はランタイム全体を止めるため、
+          `spawn_blocking` の要否を確認してください
         - エラー処理: unwrap/expect の使用箇所（テスト外では原則 NG）
         - D-Bus（zbus）呼び出しのエラー処理漏れ
         - `Arc`/`Mutex` の使い方と不要なクローン
+        - メインループ（`main.rs` の `select!`）に処理を足す場合、既存の
+          スロットル・重複排除の前提を壊していないか
+    - path: "src/state.rs"
+      instructions: |
+        デーモンの実行時状態を `~/.config/kabekami/state.toml` に永続化します。
+        - 書き込みは `kabekami_common::atomic_write` 経由であること
+        - ファイル欠損・破損時にデフォルトへフォールバックし、起動を妨げないこと
+        - 壁紙適用ごとに呼ばれる経路のため、内容に変化がない場合に
+          書き込みを省いているか
     - path: "crates/**/*.rs"
       instructions: |
         ライブラリクレートのレビューです。公開 API の安定性と
