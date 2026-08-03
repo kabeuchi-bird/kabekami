@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DaemonState {
     /// 自動切り替えが一時停止中か。
     #[serde(default)]
@@ -72,9 +72,13 @@ impl StateWriter {
 
     /// 状態が前回と変わっていれば保存する。
     ///
+    /// 書き込み（fsync 2 回）は `spawn_blocking` に逃がす。デーモンは
+    /// `worker_threads = 1` で動くため、ここで同期 I/O を行うと fsync の間
+    /// D-Bus 応答・トレイ更新・タイマーがすべて止まる。
+    ///
     /// 壁紙適用のたびに呼ばれるため、保存失敗は警告に留めて処理を続行する
     /// （state の書き込み失敗で壁紙切り替え自体を止めたくない）。
-    pub fn persist(&mut self, paused: bool, current: Option<&Path>) {
+    pub async fn persist(&mut self, paused: bool, current: Option<&Path>) {
         let next = DaemonState {
             paused,
             current: current.map(|p| p.to_path_buf()),
@@ -82,11 +86,13 @@ impl StateWriter {
         if next == self.last {
             return;
         }
-        if let Err(e) = next.save(&self.dir) {
-            tracing::warn!("failed to persist daemon state: {:#}", e);
-            return;
+        let dir = self.dir.clone();
+        let to_save = next.clone();
+        match tokio::task::spawn_blocking(move || to_save.save(&dir)).await {
+            Ok(Ok(())) => self.last = next,
+            Ok(Err(e)) => tracing::warn!("failed to persist daemon state: {:#}", e),
+            Err(e) => tracing::warn!("state persist task panicked: {}", e),
         }
-        self.last = next;
     }
 }
 
@@ -111,43 +117,43 @@ mod tests {
         assert_eq!(st.current, None);
     }
 
-    #[test]
-    fn roundtrip_preserves_fields() {
+    #[tokio::test]
+    async fn roundtrip_preserves_fields() {
         let dir = tempfile::tempdir().unwrap();
         let img = PathBuf::from("/home/u/Pictures/a b.jpg");
         let mut w = StateWriter::new(dir.path().to_path_buf(), DaemonState::default());
-        w.persist(true, Some(&img));
+        w.persist(true, Some(&img)).await;
 
         let loaded = DaemonState::load(dir.path());
         assert!(loaded.paused);
         assert_eq!(loaded.current, Some(img));
     }
 
-    #[test]
-    fn roundtrip_without_current() {
+    #[tokio::test]
+    async fn roundtrip_without_current() {
         let dir = tempfile::tempdir().unwrap();
         let mut w = StateWriter::new(
             dir.path().to_path_buf(),
             DaemonState { paused: true, current: None },
         );
-        w.persist(false, None);
+        w.persist(false, None).await;
 
         let loaded = DaemonState::load(dir.path());
         assert!(!loaded.paused);
         assert_eq!(loaded.current, None);
     }
 
-    #[test]
-    fn unchanged_state_is_not_rewritten() {
+    #[tokio::test]
+    async fn unchanged_state_is_not_rewritten() {
         let dir = tempfile::tempdir().unwrap();
         let img = PathBuf::from("/home/u/Pictures/a.jpg");
         let mut w = StateWriter::new(dir.path().to_path_buf(), DaemonState::default());
 
-        w.persist(false, Some(&img));
+        w.persist(false, Some(&img)).await;
         let first = std::fs::metadata(dir.path().join("state.toml")).unwrap().modified().unwrap();
 
         // 同じ値での再呼び出しはファイルに触れない（Plasma 再起動・画面構成変更の経路）
-        w.persist(false, Some(&img));
+        w.persist(false, Some(&img)).await;
         let second = std::fs::metadata(dir.path().join("state.toml")).unwrap().modified().unwrap();
         assert_eq!(first, second, "identical state should not rewrite the file");
     }

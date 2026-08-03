@@ -356,7 +356,7 @@ async fn main() -> Result<()> {
                             tracing::info!("paused");
                         }
                         let paused = scheduler.is_paused();
-                        state_writer.persist(paused, scheduler.current().map(|p| p.as_path()));
+                        state_writer.persist(paused, scheduler.current().map(|p| p.as_path())).await;
                         if let Some(ref h) = tray_handle {
                             h.update(|t| t.paused = paused).await;
                         }
@@ -367,7 +367,7 @@ async fn main() -> Result<()> {
                         config.display.mode = mode;
                         // トレイでの変更を再起動後も保つ。保存で発生する監視イベントは
                         // ReloadConfig 側の同値スキップで吸収される。
-                        persist_config(&config, "display mode");
+                        persist_config(&config, "display mode").await;
                         if let Some(cur) = scheduler.current().cloned() {
                             if let Err(e) = apply(&cur, &screens, &config, &cache, &plasma_shell).await {
                                 tracing::error!(error = %e, "reapply after mode change failed");
@@ -386,7 +386,7 @@ async fn main() -> Result<()> {
                         let secs = secs.max(crate::config::MIN_INTERVAL_SECS);
                         tracing::info!("interval → {}s", secs);
                         config.rotation.interval_secs = secs;
-                        persist_config(&config, "interval");
+                        persist_config(&config, "interval").await;
                         ticker = make_ticker(secs);
                         if let Some(ref h) = tray_handle {
                             h.update(|t| t.interval_secs = secs).await;
@@ -496,8 +496,6 @@ async fn main() -> Result<()> {
                             Ok(new_cfg) => {
                                 tracing::info!("reloading config");
 
-                                let prev_current = scheduler.current().cloned();
-
                                 let mut reload_scan_dirs = new_cfg.sources.directories.clone();
                                 for oc in &new_cfg.online_sources {
                                     if oc.enabled {
@@ -551,7 +549,10 @@ async fn main() -> Result<()> {
                                 *online_configs.lock().unwrap_or_else(|e| e.into_inner()) = new_cfg.online_sources.clone();
                                 config = new_cfg;
 
-                                if let Some(cur) = prev_current {
+                                // rebuild 後の current を使う。新しいソースから外れた画像や
+                                // ブラックリスト入りした画像は rebuild で current から落ちるため、
+                                // ここで拾わないことで「除外したはずの画像が再適用される」のを防ぐ。
+                                if let Some(cur) = scheduler.current().cloned() {
                                     apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
                                 }
 
@@ -1032,7 +1033,7 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
         ctx.notifier.clear();
         update_tray_ok(ctx.tray_handle, path).await;
         // 現在の壁紙を記録しておき、再起動後も同じ画像を「現在」として扱えるようにする
-        ctx.state_writer.persist(ctx.scheduler.is_paused(), Some(path));
+        ctx.state_writer.persist(ctx.scheduler.is_paused(), Some(path)).await;
         let (w, h) = ctx.screens
             .first()
             .map(|m| (m.width, m.height))
@@ -1078,9 +1079,15 @@ async fn update_tray_ok(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>, 
 
 /// 設定を保存し、失敗しても警告に留めて処理を続行する。
 /// `what` は失敗ログに出す変更内容（例: `"display mode"`）。
-fn persist_config(config: &Config, what: &str) {
-    if let Err(e) = config.save() {
-        tracing::warn!("failed to persist {}: {:#}", what, e);
+///
+/// `Config::save` も `atomic_write`（fsync 2 回）を行うため、`state` の保存と
+/// 同様に `spawn_blocking` へ逃がしてワーカースレッドを止めない。
+async fn persist_config(config: &Config, what: &str) {
+    let owned = config.clone();
+    match tokio::task::spawn_blocking(move || owned.save()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("failed to persist {}: {:#}", what, e),
+        Err(e) => tracing::warn!("config persist task panicked: {}", e),
     }
 }
 

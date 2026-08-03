@@ -17,7 +17,6 @@ reviews:
     - "!target/**"
     - "!**/target/**"
     - "!packaging/**"
-    - "!Cargo.lock"
 
   path_instructions:
     - path: "src/**/*.rs"

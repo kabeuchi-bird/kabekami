@@ -166,9 +166,11 @@ Config file: `~/.config/kabekami/config.toml`
 See [`config.toml`](config.toml) in this repository for a fully annotated reference covering every setting and its default value.
 
 kabekami also writes `~/.config/kabekami/state.toml`, which holds runtime state (pause
-state and the current wallpaper) rather than user settings. It is managed automatically —
-you don't need to edit it, and deleting it simply resets that state. Blacklisted images are
-stored separately in `~/.config/kabekami/blacklist.txt`.
+state and the current wallpaper) rather than user settings. It is managed automatically and
+you don't need to edit it. It is read once at startup, so to reset that state, stop the
+daemon, delete the file, and start it again — deleting it while the daemon is running has
+no effect and the file will simply be rewritten. Blacklisted images are stored separately in
+`~/.config/kabekami/blacklist.txt`.
 
 ### Supported Image Formats
 
