@@ -112,6 +112,20 @@ impl Scheduler {
         self.current.map(|idx| &self.images[idx])
     }
 
+    /// 保存された「現在の壁紙」を復元する（再起動・設定リロード時に使う）。
+    ///
+    /// `path` が画像リストに含まれていれば `current` に設定し、キューから取り除く
+    /// （直後に同じ画像が再び選ばれるのを防ぐ）。含まれていなければ何もせず
+    /// `false` を返す（画像が削除された・ブラックリスト入りしたケース）。
+    pub fn restore_current(&mut self, path: &Path) -> bool {
+        let Some(idx) = self.images.iter().position(|p| p == path) else {
+            return false;
+        };
+        self.queue.retain(|&i| i != idx);
+        self.current = Some(idx);
+        true
+    }
+
     /// タイマー自動切り替えを一時停止する。
     pub fn pause(&mut self) {
         self.paused = true;
@@ -305,6 +319,26 @@ mod tests {
         assert!(s.is_paused());
         s.resume();
         assert!(!s.is_paused());
+    }
+
+    #[test]
+    fn restore_current_sets_current_and_skips_it_in_queue() {
+        let all = paths(5);
+        let target = all[2].clone();
+        let mut s = Scheduler::new(all, Order::Sequential);
+
+        assert!(s.restore_current(&target));
+        assert_eq!(s.current(), Some(&target));
+
+        // 復元した画像は直後に再度選ばれない
+        assert_ne!(s.next().as_ref(), Some(&target));
+    }
+
+    #[test]
+    fn restore_current_returns_false_for_unknown_path() {
+        let mut s = Scheduler::new(paths(3), Order::Sequential);
+        assert!(!s.restore_current(Path::new("/nonexistent/img.jpg")));
+        assert_eq!(s.current(), None);
     }
 
     #[test]
