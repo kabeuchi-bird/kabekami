@@ -247,8 +247,10 @@ async fn main() -> Result<()> {
         };
     }
 
-    // 起動時の即時切り替え
-    if config.rotation.change_on_start {
+    // 起動時の即時切り替え。
+    // 一時停止状態は再起動をまたいで復元されるため、停止中なら切り替えない
+    // （停止したまま再起動したのに壁紙が変わる、という挙動を避ける）。
+    if config.rotation.change_on_start && !scheduler.is_paused() {
         if let Some(path) = scheduler.next() {
             apply_and_notify(apply_ctx!(), &path, "initial apply failed").await;
         }
@@ -295,7 +297,8 @@ async fn main() -> Result<()> {
                             .replace("{count}", &added.to_string());
                         notifier.info(strings.notify_fetch_title, &body).await;
                     }
-                    if was_empty {
+                    // 初回取得時の即時適用も一時停止中は行わない
+                    if was_empty && !scheduler.is_paused() {
                         if let Some(path) = scheduler.next() {
                             apply_and_notify(apply_ctx!(), &path, "online: initial apply failed").await;
                         }
@@ -552,8 +555,15 @@ async fn main() -> Result<()> {
                                 // rebuild 後の current を使う。新しいソースから外れた画像や
                                 // ブラックリスト入りした画像は rebuild で current から落ちるため、
                                 // ここで拾わないことで「除外したはずの画像が再適用される」のを防ぐ。
-                                if let Some(cur) = scheduler.current().cloned() {
-                                    apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
+                                match scheduler.current().cloned() {
+                                    Some(cur) => {
+                                        apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
+                                    }
+                                    None => {
+                                        // current が落ちた場合、state とトレイに残る旧画像を消す
+                                        // （apply_and_notify を通らないので明示的に更新する）。
+                                        state_writer.persist(scheduler.is_paused(), None).await;
+                                    }
                                 }
 
                                 if let Some(ref h) = tray_handle {
@@ -563,6 +573,7 @@ async fn main() -> Result<()> {
                                     let count = scheduler.image_count();
                                     let has_fav = config.sources.favorites_dir.is_some();
                                     let bl_enabled = config.ui.enable_blacklist;
+                                    let name = tray_display_name(scheduler.current().map(|p| p.as_path()));
                                     h.update(|t| {
                                         t.mode = mode;
                                         t.interval_secs = secs;
@@ -570,6 +581,7 @@ async fn main() -> Result<()> {
                                         t.image_count = count;
                                         t.has_favorites_dir = has_fav;
                                         t.blacklist_enabled = bl_enabled;
+                                        t.current_name = name;
                                     }).await;
                                 }
 
