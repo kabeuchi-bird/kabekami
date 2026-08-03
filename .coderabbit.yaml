@@ -12,6 +12,16 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
+    # push のたびの増分レビューを止め、PR 作成時の 1 回のみ自動レビューする。
+    # レビュー回数の上限に達して修正コミットがレビューされない事態を防ぐため。
+    # 修正を push した後に再レビューが必要なときは、PR に
+    # `@coderabbitai review` とコメントして手動で起動する。
+    auto_incremental_review: false
+    # WIP の PR はレビュー対象外にする（drafts: false と併用）
+    ignore_title_keywords:
+      - "WIP"
+      - "wip"
+      - "DO NOT MERGE"
 
   path_filters:
     - "!target/**"
