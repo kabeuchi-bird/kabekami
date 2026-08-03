@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct DaemonState {
     /// 自動切り替えが一時停止中か。
     #[serde(default)]
@@ -42,7 +42,7 @@ impl DaemonState {
     }
 
     /// 状態を `atomic_write` で永続化する（電源断時に壊れた state が残らない）。
-    pub fn save(&self, config_dir: &Path) -> Result<()> {
+    fn save(&self, config_dir: &Path) -> Result<()> {
         let path = Self::path(config_dir);
         let text = toml::to_string_pretty(self).context("failed to serialize state")?;
         kabekami_common::atomic_write::atomic_write(&path, text.as_bytes())
@@ -54,16 +54,39 @@ impl DaemonState {
     }
 }
 
-/// 現在の状態を保存し、失敗しても警告のみで処理を続行する。
+/// `state.toml` への書き込み担当。「いつ・どこへ書くか」をここ 1 箇所に集約する。
 ///
-/// 壁紙適用のたびに呼ばれるため、保存失敗で壁紙切り替え自体を止めたくない。
-pub fn persist(config_dir: &Path, paused: bool, current: Option<&Path>) {
-    let st = DaemonState {
-        paused,
-        current: current.map(|p| p.to_path_buf()),
-    };
-    if let Err(e) = st.save(config_dir) {
-        tracing::warn!("failed to persist daemon state: {:#}", e);
+/// 直近に書き出した内容を保持し、同じ値なら書き込みを省く。Plasma 再起動・画面構成
+/// 変更では同じ壁紙を再適用するため、この抑止がないと内容の変わらない
+/// `atomic_write`（fsync 2 回）を繰り返すことになる。
+pub struct StateWriter {
+    dir: PathBuf,
+    last: DaemonState,
+}
+
+impl StateWriter {
+    /// 起動時に読み込んだ状態を「書き込み済みの内容」として初期化する。
+    pub fn new(dir: PathBuf, initial: DaemonState) -> Self {
+        Self { dir, last: initial }
+    }
+
+    /// 状態が前回と変わっていれば保存する。
+    ///
+    /// 壁紙適用のたびに呼ばれるため、保存失敗は警告に留めて処理を続行する
+    /// （state の書き込み失敗で壁紙切り替え自体を止めたくない）。
+    pub fn persist(&mut self, paused: bool, current: Option<&Path>) {
+        let next = DaemonState {
+            paused,
+            current: current.map(|p| p.to_path_buf()),
+        };
+        if next == self.last {
+            return;
+        }
+        if let Err(e) = next.save(&self.dir) {
+            tracing::warn!("failed to persist daemon state: {:#}", e);
+            return;
+        }
+        self.last = next;
     }
 }
 
@@ -91,24 +114,41 @@ mod tests {
     #[test]
     fn roundtrip_preserves_fields() {
         let dir = tempfile::tempdir().unwrap();
-        let st = DaemonState {
-            paused: true,
-            current: Some(PathBuf::from("/home/u/Pictures/a b.jpg")),
-        };
-        st.save(dir.path()).unwrap();
+        let img = PathBuf::from("/home/u/Pictures/a b.jpg");
+        let mut w = StateWriter::new(dir.path().to_path_buf(), DaemonState::default());
+        w.persist(true, Some(&img));
 
         let loaded = DaemonState::load(dir.path());
         assert!(loaded.paused);
-        assert_eq!(loaded.current, Some(PathBuf::from("/home/u/Pictures/a b.jpg")));
+        assert_eq!(loaded.current, Some(img));
     }
 
     #[test]
     fn roundtrip_without_current() {
         let dir = tempfile::tempdir().unwrap();
-        persist(dir.path(), false, None);
+        let mut w = StateWriter::new(
+            dir.path().to_path_buf(),
+            DaemonState { paused: true, current: None },
+        );
+        w.persist(false, None);
 
         let loaded = DaemonState::load(dir.path());
         assert!(!loaded.paused);
         assert_eq!(loaded.current, None);
+    }
+
+    #[test]
+    fn unchanged_state_is_not_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = PathBuf::from("/home/u/Pictures/a.jpg");
+        let mut w = StateWriter::new(dir.path().to_path_buf(), DaemonState::default());
+
+        w.persist(false, Some(&img));
+        let first = std::fs::metadata(dir.path().join("state.toml")).unwrap().modified().unwrap();
+
+        // 同じ値での再呼び出しはファイルに触れない（Plasma 再起動・画面構成変更の経路）
+        w.persist(false, Some(&img));
+        let second = std::fs::metadata(dir.path().join("state.toml")).unwrap().modified().unwrap();
+        assert_eq!(first, second, "identical state should not rewrite the file");
     }
 }

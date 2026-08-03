@@ -125,6 +125,8 @@ async fn main() -> Result<()> {
             tracing::info!("saved wallpaper no longer available: {}", cur.display());
         }
     }
+    let mut state_writer =
+        state::StateWriter::new(kabekami_config_dir.clone(), daemon_state);
     let mut prefetcher = Prefetcher::new();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
@@ -216,12 +218,7 @@ async fn main() -> Result<()> {
     // トレイに初期画像枚数と復元した現在画像名を反映
     if let Some(ref h) = tray_handle {
         let count = scheduler.image_count();
-        let name = scheduler
-            .current()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
+        let name = tray_display_name(scheduler.current().map(|p| p.as_path()));
         h.update(|t| {
             t.image_count = count;
             t.current_name = name;
@@ -229,10 +226,31 @@ async fn main() -> Result<()> {
         .await;
     }
 
+    // `apply_and_notify` に渡す `ApplyCtx` を組み立てる。参照するローカル変数が多く
+    // 呼び出しが 10 箇所あるため、引数リストの重複をここ 1 箇所に閉じ込める。
+    // マクロにすることで、借用がステートメント単位で完結する（関数に切り出すと
+    // `&mut notifier` 等を保持するクロージャが main 全体を借用してしまう）。
+    macro_rules! apply_ctx {
+        () => {
+            &mut build_apply_ctx(
+                &screens,
+                &config,
+                &cache,
+                &plasma_shell,
+                &tray_handle,
+                &scheduler,
+                screen_check_tx.as_ref(),
+                &mut notifier,
+                &mut prefetcher,
+                &mut state_writer,
+            )
+        };
+    }
+
     // 起動時の即時切り替え
     if config.rotation.change_on_start {
         if let Some(path) = scheduler.next() {
-            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher, &kabekami_config_dir), &path, "initial apply failed").await;
+            apply_and_notify(apply_ctx!(), &path, "initial apply failed").await;
         }
     }
 
@@ -279,7 +297,7 @@ async fn main() -> Result<()> {
                     }
                     if was_empty {
                         if let Some(path) = scheduler.next() {
-                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher, &kabekami_config_dir), &path, "online: initial apply failed").await;
+                            apply_and_notify(apply_ctx!(), &path, "online: initial apply failed").await;
                         }
                     }
                 }
@@ -290,7 +308,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if let Some(path) = scheduler.next() {
-                    apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher, &kabekami_config_dir), &path, "auto apply failed").await;
+                    apply_and_notify(apply_ctx!(), &path, "auto apply failed").await;
                 }
             }
 
@@ -317,14 +335,14 @@ async fn main() -> Result<()> {
                     TrayCmd::Next => {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
-                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher, &kabekami_config_dir), &path, "tray Next failed").await;
+                            apply_and_notify(apply_ctx!(), &path, "tray Next failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
 
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
-                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher, &kabekami_config_dir), &path, "tray Prev failed").await;
+                            apply_and_notify(apply_ctx!(), &path, "tray Prev failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -338,7 +356,7 @@ async fn main() -> Result<()> {
                             tracing::info!("paused");
                         }
                         let paused = scheduler.is_paused();
-                        state::persist(&kabekami_config_dir, paused, scheduler.current().map(|p| p.as_path()));
+                        state_writer.persist(paused, scheduler.current().map(|p| p.as_path()));
                         if let Some(ref h) = tray_handle {
                             h.update(|t| t.paused = paused).await;
                         }
@@ -349,9 +367,7 @@ async fn main() -> Result<()> {
                         config.display.mode = mode;
                         // トレイでの変更を再起動後も保つ。保存で発生する監視イベントは
                         // ReloadConfig 側の同値スキップで吸収される。
-                        if let Err(e) = config.save() {
-                            tracing::warn!("failed to persist display mode: {:#}", e);
-                        }
+                        persist_config(&config, "display mode");
                         if let Some(cur) = scheduler.current().cloned() {
                             if let Err(e) = apply(&cur, &screens, &config, &cache, &plasma_shell).await {
                                 tracing::error!(error = %e, "reapply after mode change failed");
@@ -370,9 +386,7 @@ async fn main() -> Result<()> {
                         let secs = secs.max(crate::config::MIN_INTERVAL_SECS);
                         tracing::info!("interval → {}s", secs);
                         config.rotation.interval_secs = secs;
-                        if let Err(e) = config.save() {
-                            tracing::warn!("failed to persist interval: {:#}", e);
-                        }
+                        persist_config(&config, "interval");
                         ticker = make_ticker(secs);
                         if let Some(ref h) = tray_handle {
                             h.update(|t| t.interval_secs = secs).await;
@@ -405,7 +419,7 @@ async fn main() -> Result<()> {
                                     scheduler.remove_image(&path);
                                     prefetcher.abort();
                                     if let Some(next) = scheduler.next() {
-                                        apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher, &kabekami_config_dir), &next, "apply after trash failed").await;
+                                        apply_and_notify(apply_ctx!(), &next, "apply after trash failed").await;
                                     }
                                     if let Some(ref h) = tray_handle {
                                         h.update(|t| t.image_count = scheduler.image_count()).await;
@@ -428,7 +442,7 @@ async fn main() -> Result<()> {
                                 prefetcher.abort();
                                 match scheduler.next() {
                                     Some(next) => {
-                                        apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher, &kabekami_config_dir), &next, "apply after blacklist failed").await;
+                                        apply_and_notify(apply_ctx!(), &next, "apply after blacklist failed").await;
                                         if let Some(ref h) = tray_handle {
                                             h.update(|t| t.image_count = scheduler.image_count()).await;
                                         }
@@ -483,7 +497,6 @@ async fn main() -> Result<()> {
                                 tracing::info!("reloading config");
 
                                 let prev_current = scheduler.current().cloned();
-                                let was_paused = scheduler.is_paused();
 
                                 let mut reload_scan_dirs = new_cfg.sources.directories.clone();
                                 for oc in &new_cfg.online_sources {
@@ -494,14 +507,8 @@ async fn main() -> Result<()> {
                                 match build_filtered_images_list(&reload_scan_dirs, new_cfg.sources.recursive, &blacklist) {
                                     Ok(images) if !images.is_empty() => {
                                         tracing::info!("reload: {} image(s) found", images.len());
-                                        scheduler = Scheduler::new(images, new_cfg.rotation.order);
-                                        // 作り直しで失われる一時停止状態と現在画像を引き継ぐ
-                                        if was_paused {
-                                            scheduler.pause();
-                                        }
-                                        if let Some(ref cur) = prev_current {
-                                            scheduler.restore_current(cur);
-                                        }
+                                        // 一時停止状態と現在画像は rebuild が引き継ぐ
+                                        scheduler.rebuild(images, new_cfg.rotation.order);
                                     }
                                     Ok(_) => tracing::warn!("reload: no images found, keeping current list"),
                                     Err(e) => tracing::warn!("reload: scan error: {}", e),
@@ -545,7 +552,7 @@ async fn main() -> Result<()> {
                                 config = new_cfg;
 
                                 if let Some(cur) = prev_current {
-                                    apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher, &kabekami_config_dir), &cur, "reload: reapply failed").await;
+                                    apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
                                 }
 
                                 if let Some(ref h) = tray_handle {
@@ -580,7 +587,7 @@ async fn main() -> Result<()> {
                     TrayCmd::PlasmaRestarted => {
                         tracing::info!("Plasma restarted, re-applying wallpaper");
                         if let Some(path) = scheduler.current().cloned() {
-                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher, &kabekami_config_dir), &path, "reapply after Plasma restart failed").await;
+                            apply_and_notify(apply_ctx!(), &path, "reapply after Plasma restart failed").await;
                         }
                     }
 
@@ -599,7 +606,7 @@ async fn main() -> Result<()> {
                         // 解像度が変わるとキャッシュキーも変わるため、現在の壁紙を
                         // 新しい解像度で再加工して適用する。
                         if let Some(path) = scheduler.current().cloned() {
-                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher, &kabekami_config_dir), &path, "reapply after screen change failed").await;
+                            apply_and_notify(apply_ctx!(), &path, "reapply after screen change failed").await;
                         }
                     }
 
@@ -981,8 +988,8 @@ struct ApplyCtx<'a> {
     screen_check_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<()>>,
     notifier: &'a mut notify::Notifier,
     prefetcher: &'a mut Prefetcher,
-    /// `state.toml` の置き場所（適用のたびに現在の壁紙を記録する）。
-    state_dir: &'a Path,
+    /// 適用のたびに現在の壁紙を記録する（内容に変化がなければ書き込みは省かれる）。
+    state_writer: &'a mut state::StateWriter,
 }
 
 /// `ApplyCtx` を構築するコンストラクタ。`apply_and_notify` 呼び出しの直前で
@@ -998,7 +1005,7 @@ fn build_apply_ctx<'a>(
     screen_check_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<()>>,
     notifier: &'a mut notify::Notifier,
     prefetcher: &'a mut Prefetcher,
-    state_dir: &'a Path,
+    state_writer: &'a mut state::StateWriter,
 ) -> ApplyCtx<'a> {
     ApplyCtx {
         screens,
@@ -1010,7 +1017,7 @@ fn build_apply_ctx<'a>(
         screen_check_tx,
         notifier,
         prefetcher,
-        state_dir,
+        state_writer,
     }
 }
 
@@ -1025,7 +1032,7 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
         ctx.notifier.clear();
         update_tray_ok(ctx.tray_handle, path).await;
         // 現在の壁紙を記録しておき、再起動後も同じ画像を「現在」として扱えるようにする
-        state::persist(ctx.state_dir, ctx.scheduler.is_paused(), Some(path));
+        ctx.state_writer.persist(ctx.scheduler.is_paused(), Some(path));
         let (w, h) = ctx.screens
             .first()
             .map(|m| (m.width, m.height))
@@ -1053,10 +1060,27 @@ async fn update_tray_clear_error(tray_handle: &Option<ksni::Handle<tray::Kabekam
     }
 }
 
+/// トレイに表示する壁紙名（拡張子付きファイル名）。
+/// 取得できない場合は空文字列を返す。
+fn tray_display_name(path: Option<&Path>) -> String {
+    path.and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 async fn update_tray_ok(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>, path: &Path) {
     if let Some(ref h) = tray_handle {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let name = tray_display_name(Some(path));
         h.update(|t| { t.last_error = None; t.current_name = name; }).await;
+    }
+}
+
+/// 設定を保存し、失敗しても警告に留めて処理を続行する。
+/// `what` は失敗ログに出す変更内容（例: `"display mode"`）。
+fn persist_config(config: &Config, what: &str) {
+    if let Err(e) = config.save() {
+        tracing::warn!("failed to persist {}: {:#}", what, e);
     }
 }
 
