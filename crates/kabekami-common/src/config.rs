@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// 壁紙切り替え間隔の下限（秒）。
 pub const MIN_INTERVAL_SECS: u64 = 5;
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub sources: Sources,
@@ -25,7 +25,7 @@ pub struct Config {
     pub online_sources: Vec<OnlineSourceConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Sources {
     #[serde(default)]
     pub directories: Vec<PathBuf>,
@@ -46,7 +46,7 @@ impl Default for Sources {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Rotation {
     #[serde(default = "default_interval_secs")]
     pub interval_secs: u64,
@@ -77,7 +77,7 @@ pub enum Order {
     Random,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Display {
     #[serde(default)]
     pub mode: DisplayMode,
@@ -108,7 +108,7 @@ pub enum DisplayMode {
     Smart,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Cache {
     #[serde(default = "default_cache_dir")]
     pub directory: PathBuf,
@@ -126,7 +126,7 @@ impl Default for Cache {
 }
 
 /// UI 表示言語の設定。
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Ui {
     /// `"ja"` または `"en"`。空文字列はデフォルト（英語）として扱う。
     #[serde(default)]
@@ -335,7 +335,7 @@ impl std::fmt::Display for ProviderKind {
 }
 
 /// オンライン壁紙ソース 1 件の設定。TOML では `[[online_sources]]` 配列。
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct OnlineSourceConfig {
     /// プロバイダー種別。
     pub provider: ProviderKind,

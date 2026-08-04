@@ -16,6 +16,7 @@ mod screen;
 mod screen_watcher;
 mod session;
 mod shortcuts;
+mod state;
 mod tray;
 mod watcher;
 
@@ -109,6 +110,23 @@ async fn main() -> Result<()> {
         config.cache.max_size_mb,
     ));
     let mut scheduler = Scheduler::new(images, config.rotation.order);
+    let daemon_state = state::DaemonState::load(&kabekami_config_dir);
+    if daemon_state.paused {
+        scheduler.pause();
+        tracing::info!("restored paused state from previous session");
+    }
+    // 前回の壁紙を復元する。デスクトップには Plasma 側の設定で既に表示されているため
+    // 再適用はせず、内部ポインタ（トレイのツールチップ・ゴミ箱/お気に入り操作の対象）
+    // だけを合わせる。画像が削除済みの場合は復元をスキップする。
+    if let Some(ref cur) = daemon_state.current {
+        if scheduler.restore_current(cur) {
+            tracing::info!("restored current wallpaper: {}", cur.display());
+        } else {
+            tracing::info!("saved wallpaper no longer available: {}", cur.display());
+        }
+    }
+    let mut state_writer =
+        state::StateWriter::new(kabekami_config_dir.clone(), daemon_state);
     let mut prefetcher = Prefetcher::new();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
@@ -138,6 +156,7 @@ async fn main() -> Result<()> {
         lang,
         config.sources.favorites_dir.is_some(),
         config.ui.enable_blacklist,
+        scheduler.is_paused(),
     )
     .await;
 
@@ -196,16 +215,44 @@ async fn main() -> Result<()> {
 
     let fetch_in_progress = Arc::new(AtomicBool::new(false));
 
-    // トレイに初期画像枚数を反映
+    // トレイに初期画像枚数と復元した現在画像名を反映
     if let Some(ref h) = tray_handle {
         let count = scheduler.image_count();
-        h.update(|t| t.image_count = count).await;
+        let name = tray_display_name(scheduler.current().map(|p| p.as_path()));
+        h.update(|t| {
+            t.image_count = count;
+            t.current_name = name;
+        })
+        .await;
     }
 
-    // 起動時の即時切り替え
-    if config.rotation.change_on_start {
+    // `apply_and_notify` に渡す `ApplyCtx` を組み立てる。参照するローカル変数が多く
+    // 呼び出しが 10 箇所あるため、引数リストの重複をここ 1 箇所に閉じ込める。
+    // マクロにすることで、借用がステートメント単位で完結する（関数に切り出すと
+    // `&mut notifier` 等を保持するクロージャが main 全体を借用してしまう）。
+    macro_rules! apply_ctx {
+        () => {
+            &mut build_apply_ctx(
+                &screens,
+                &config,
+                &cache,
+                &plasma_shell,
+                &tray_handle,
+                &scheduler,
+                screen_check_tx.as_ref(),
+                &mut notifier,
+                &mut prefetcher,
+                &mut state_writer,
+            )
+        };
+    }
+
+    // 起動時の即時切り替え。
+    // 一時停止状態は再起動をまたいで復元されるため、停止中なら切り替えない
+    // （停止したまま再起動したのに壁紙が変わる、という挙動を避ける）。
+    if config.rotation.change_on_start && !scheduler.is_paused() {
         if let Some(path) = scheduler.next() {
-            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "initial apply failed").await;
+            apply_and_notify(apply_ctx!(), &path, "initial apply failed").await;
         }
     }
 
@@ -250,9 +297,10 @@ async fn main() -> Result<()> {
                             .replace("{count}", &added.to_string());
                         notifier.info(strings.notify_fetch_title, &body).await;
                     }
-                    if was_empty {
+                    // 初回取得時の即時適用も一時停止中は行わない
+                    if was_empty && !scheduler.is_paused() {
                         if let Some(path) = scheduler.next() {
-                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "online: initial apply failed").await;
+                            apply_and_notify(apply_ctx!(), &path, "online: initial apply failed").await;
                         }
                     }
                 }
@@ -263,7 +311,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 if let Some(path) = scheduler.next() {
-                    apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "auto apply failed").await;
+                    apply_and_notify(apply_ctx!(), &path, "auto apply failed").await;
                 }
             }
 
@@ -290,14 +338,14 @@ async fn main() -> Result<()> {
                     TrayCmd::Next => {
                         prefetcher.abort();
                         if let Some(path) = scheduler.next() {
-                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "tray Next failed").await;
+                            apply_and_notify(apply_ctx!(), &path, "tray Next failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
 
                     TrayCmd::Prev => {
                         if let Some(path) = scheduler.prev() {
-                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "tray Prev failed").await;
+                            apply_and_notify(apply_ctx!(), &path, "tray Prev failed").await;
                         }
                         ticker = make_ticker(config.rotation.interval_secs);
                     }
@@ -310,8 +358,9 @@ async fn main() -> Result<()> {
                             scheduler.pause();
                             tracing::info!("paused");
                         }
+                        let paused = scheduler.is_paused();
+                        state_writer.persist(paused, scheduler.current().map(|p| p.as_path())).await;
                         if let Some(ref h) = tray_handle {
-                            let paused = scheduler.is_paused();
                             h.update(|t| t.paused = paused).await;
                         }
                     }
@@ -319,6 +368,9 @@ async fn main() -> Result<()> {
                     TrayCmd::SetMode(mode) => {
                         tracing::info!("display mode → {:?}", mode);
                         config.display.mode = mode;
+                        // トレイでの変更を再起動後も保つ。保存で発生する監視イベントは
+                        // ReloadConfig 側の同値スキップで吸収される。
+                        persist_config(&config, "display mode").await;
                         if let Some(cur) = scheduler.current().cloned() {
                             if let Err(e) = apply(&cur, &screens, &config, &cache, &plasma_shell).await {
                                 tracing::error!(error = %e, "reapply after mode change failed");
@@ -337,6 +389,7 @@ async fn main() -> Result<()> {
                         let secs = secs.max(crate::config::MIN_INTERVAL_SECS);
                         tracing::info!("interval → {}s", secs);
                         config.rotation.interval_secs = secs;
+                        persist_config(&config, "interval").await;
                         ticker = make_ticker(secs);
                         if let Some(ref h) = tray_handle {
                             h.update(|t| t.interval_secs = secs).await;
@@ -369,7 +422,7 @@ async fn main() -> Result<()> {
                                     scheduler.remove_image(&path);
                                     prefetcher.abort();
                                     if let Some(next) = scheduler.next() {
-                                        apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &next, "apply after trash failed").await;
+                                        apply_and_notify(apply_ctx!(), &next, "apply after trash failed").await;
                                     }
                                     if let Some(ref h) = tray_handle {
                                         h.update(|t| t.image_count = scheduler.image_count()).await;
@@ -392,7 +445,7 @@ async fn main() -> Result<()> {
                                 prefetcher.abort();
                                 match scheduler.next() {
                                     Some(next) => {
-                                        apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &next, "apply after blacklist failed").await;
+                                        apply_and_notify(apply_ctx!(), &next, "apply after blacklist failed").await;
                                         if let Some(ref h) = tray_handle {
                                             h.update(|t| t.image_count = scheduler.image_count()).await;
                                         }
@@ -437,10 +490,14 @@ async fn main() -> Result<()> {
                                 notifier.error(&msg, None).await;
                                 update_tray_error(&tray_handle, msg).await;
                             }
+                            Ok(new_cfg) if new_cfg == config => {
+                                // 内容が同一なら何もしない。トレイからのモード／間隔変更で
+                                // デーモン自身が config.toml を保存した場合もここで弾かれ、
+                                // 不要な再スキャンとスケジューラ再構築を避けられる。
+                                tracing::debug!("config unchanged, skipping reload");
+                            }
                             Ok(new_cfg) => {
                                 tracing::info!("reloading config");
-
-                                let prev_current = scheduler.current().cloned();
 
                                 let mut reload_scan_dirs = new_cfg.sources.directories.clone();
                                 for oc in &new_cfg.online_sources {
@@ -451,7 +508,8 @@ async fn main() -> Result<()> {
                                 match build_filtered_images_list(&reload_scan_dirs, new_cfg.sources.recursive, &blacklist) {
                                     Ok(images) if !images.is_empty() => {
                                         tracing::info!("reload: {} image(s) found", images.len());
-                                        scheduler = Scheduler::new(images, new_cfg.rotation.order);
+                                        // 一時停止状態と現在画像は rebuild が引き継ぐ
+                                        scheduler.rebuild(images, new_cfg.rotation.order);
                                     }
                                     Ok(_) => tracing::warn!("reload: no images found, keeping current list"),
                                     Err(e) => tracing::warn!("reload: scan error: {}", e),
@@ -494,8 +552,18 @@ async fn main() -> Result<()> {
                                 *online_configs.lock().unwrap_or_else(|e| e.into_inner()) = new_cfg.online_sources.clone();
                                 config = new_cfg;
 
-                                if let Some(cur) = prev_current {
-                                    apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &cur, "reload: reapply failed").await;
+                                // rebuild 後の current を使う。新しいソースから外れた画像や
+                                // ブラックリスト入りした画像は rebuild で current から落ちるため、
+                                // ここで拾わないことで「除外したはずの画像が再適用される」のを防ぐ。
+                                match scheduler.current().cloned() {
+                                    Some(cur) => {
+                                        apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
+                                    }
+                                    None => {
+                                        // current が落ちた場合、state とトレイに残る旧画像を消す
+                                        // （apply_and_notify を通らないので明示的に更新する）。
+                                        state_writer.persist(scheduler.is_paused(), None).await;
+                                    }
                                 }
 
                                 if let Some(ref h) = tray_handle {
@@ -505,6 +573,7 @@ async fn main() -> Result<()> {
                                     let count = scheduler.image_count();
                                     let has_fav = config.sources.favorites_dir.is_some();
                                     let bl_enabled = config.ui.enable_blacklist;
+                                    let name = tray_display_name(scheduler.current().map(|p| p.as_path()));
                                     h.update(|t| {
                                         t.mode = mode;
                                         t.interval_secs = secs;
@@ -512,6 +581,7 @@ async fn main() -> Result<()> {
                                         t.image_count = count;
                                         t.has_favorites_dir = has_fav;
                                         t.blacklist_enabled = bl_enabled;
+                                        t.current_name = name;
                                     }).await;
                                 }
 
@@ -530,7 +600,7 @@ async fn main() -> Result<()> {
                     TrayCmd::PlasmaRestarted => {
                         tracing::info!("Plasma restarted, re-applying wallpaper");
                         if let Some(path) = scheduler.current().cloned() {
-                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "reapply after Plasma restart failed").await;
+                            apply_and_notify(apply_ctx!(), &path, "reapply after Plasma restart failed").await;
                         }
                     }
 
@@ -549,7 +619,7 @@ async fn main() -> Result<()> {
                         // 解像度が変わるとキャッシュキーも変わるため、現在の壁紙を
                         // 新しい解像度で再加工して適用する。
                         if let Some(path) = scheduler.current().cloned() {
-                            apply_and_notify(&mut build_apply_ctx(&screens, &config, &cache, &plasma_shell, &tray_handle, &scheduler, screen_check_tx.as_ref(), &mut notifier, &mut prefetcher), &path, "reapply after screen change failed").await;
+                            apply_and_notify(apply_ctx!(), &path, "reapply after screen change failed").await;
                         }
                     }
 
@@ -931,6 +1001,8 @@ struct ApplyCtx<'a> {
     screen_check_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<()>>,
     notifier: &'a mut notify::Notifier,
     prefetcher: &'a mut Prefetcher,
+    /// 適用のたびに現在の壁紙を記録する（内容に変化がなければ書き込みは省かれる）。
+    state_writer: &'a mut state::StateWriter,
 }
 
 /// `ApplyCtx` を構築するコンストラクタ。`apply_and_notify` 呼び出しの直前で
@@ -946,6 +1018,7 @@ fn build_apply_ctx<'a>(
     screen_check_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<()>>,
     notifier: &'a mut notify::Notifier,
     prefetcher: &'a mut Prefetcher,
+    state_writer: &'a mut state::StateWriter,
 ) -> ApplyCtx<'a> {
     ApplyCtx {
         screens,
@@ -957,6 +1030,7 @@ fn build_apply_ctx<'a>(
         screen_check_tx,
         notifier,
         prefetcher,
+        state_writer,
     }
 }
 
@@ -970,6 +1044,8 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
     } else {
         ctx.notifier.clear();
         update_tray_ok(ctx.tray_handle, path).await;
+        // 現在の壁紙を記録しておき、再起動後も同じ画像を「現在」として扱えるようにする
+        ctx.state_writer.persist(ctx.scheduler.is_paused(), Some(path)).await;
         let (w, h) = ctx.screens
             .first()
             .map(|m| (m.width, m.height))
@@ -997,10 +1073,33 @@ async fn update_tray_clear_error(tray_handle: &Option<ksni::Handle<tray::Kabekam
     }
 }
 
+/// トレイに表示する壁紙名（拡張子付きファイル名）。
+/// 取得できない場合は空文字列を返す。
+fn tray_display_name(path: Option<&Path>) -> String {
+    path.and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 async fn update_tray_ok(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>, path: &Path) {
     if let Some(ref h) = tray_handle {
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        let name = tray_display_name(Some(path));
         h.update(|t| { t.last_error = None; t.current_name = name; }).await;
+    }
+}
+
+/// 設定を保存し、失敗しても警告に留めて処理を続行する。
+/// `what` は失敗ログに出す変更内容（例: `"display mode"`）。
+///
+/// `Config::save` も `atomic_write`（fsync 2 回）を行うため、`state` の保存と
+/// 同様に `spawn_blocking` へ逃がしてワーカースレッドを止めない。
+async fn persist_config(config: &Config, what: &str) {
+    let owned = config.clone();
+    match tokio::task::spawn_blocking(move || owned.save()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("failed to persist {}: {:#}", what, e),
+        Err(e) => tracing::warn!("config persist task panicked: {}", e),
     }
 }
 

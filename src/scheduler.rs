@@ -112,6 +112,44 @@ impl Scheduler {
         self.current.map(|idx| &self.images[idx])
     }
 
+    /// 保存された「現在の壁紙」を復元する（再起動・設定リロード時に使う）。
+    ///
+    /// `path` が画像リストに含まれていれば `current` に設定し、キューから取り除く
+    /// （直後に同じ画像が再び選ばれるのを防ぐ）。含まれていなければ何もせず
+    /// `false` を返す（画像が削除された・ブラックリスト入りしたケース）。
+    pub fn restore_current(&mut self, path: &Path) -> bool {
+        let Some(idx) = self.find_index(path) else {
+            return false;
+        };
+        self.queue.retain(|&i| i != idx);
+        self.current = Some(idx);
+        true
+    }
+
+    /// 画像リストを丸ごと差し替えつつ、一時停止状態と現在の壁紙を引き継ぐ
+    /// （設定リロードで使う）。
+    ///
+    /// キューと履歴は新しいリストに対して作り直す。現在の壁紙が新リストにも
+    /// 残っていれば `current` として復元する。呼び出し側で `pause()` や
+    /// `restore_current()` を呼び直す必要はないため、`Scheduler` にフィールドが
+    /// 増えても引き継ぎ漏れが起きない。
+    pub fn rebuild(&mut self, images: Vec<PathBuf>, order: Order) {
+        let prev_current = self.current.map(|idx| self.images[idx].clone());
+        let paused = self.paused;
+
+        *self = Self::new(images, order);
+
+        self.paused = paused;
+        if let Some(ref cur) = prev_current {
+            self.restore_current(cur);
+        }
+    }
+
+    /// パスから画像インデックスを引く。
+    fn find_index(&self, path: &Path) -> Option<usize> {
+        self.images.iter().position(|p| p == path)
+    }
+
     /// タイマー自動切り替えを一時停止する。
     pub fn pause(&mut self) {
         self.paused = true;
@@ -154,7 +192,7 @@ impl Scheduler {
     /// 内部では `swap_remove` で削除位置に末尾要素を埋めるため、
     /// 末尾要素のインデックスを参照しているキュー・履歴・現在画像を再マップする。
     pub fn remove_image(&mut self, path: &Path) {
-        let Some(idx) = self.images.iter().position(|p| p == path) else {
+        let Some(idx) = self.find_index(path) else {
             return;
         };
         self.image_set.remove(path);
@@ -305,6 +343,55 @@ mod tests {
         assert!(s.is_paused());
         s.resume();
         assert!(!s.is_paused());
+    }
+
+    #[test]
+    fn restore_current_sets_current_and_skips_it_in_queue() {
+        let all = paths(5);
+        let target = all[2].clone();
+        let mut s = Scheduler::new(all, Order::Sequential);
+
+        assert!(s.restore_current(&target));
+        assert_eq!(s.current(), Some(&target));
+
+        // 復元した画像は直後に再度選ばれない
+        assert_ne!(s.next().as_ref(), Some(&target));
+    }
+
+    #[test]
+    fn restore_current_returns_false_for_unknown_path() {
+        let mut s = Scheduler::new(paths(3), Order::Sequential);
+        assert!(!s.restore_current(Path::new("/nonexistent/img.jpg")));
+        assert_eq!(s.current(), None);
+    }
+
+    #[test]
+    fn rebuild_carries_over_paused_and_current() {
+        let all = paths(5);
+        let keep = all[2].clone();
+        let mut s = Scheduler::new(all.clone(), Order::Sequential);
+        s.restore_current(&keep);
+        s.pause();
+
+        // 同じ画像を含む新しいリストへ差し替え
+        s.rebuild(all, Order::Sequential);
+
+        assert!(s.is_paused(), "paused state should survive rebuild");
+        assert_eq!(s.current(), Some(&keep), "current should survive rebuild");
+    }
+
+    #[test]
+    fn rebuild_drops_current_when_image_is_gone() {
+        let all = paths(5);
+        let removed = all[4].clone();
+        let mut s = Scheduler::new(all.clone(), Order::Sequential);
+        s.restore_current(&removed);
+
+        // 末尾を除いたリストへ差し替え（画像が削除されたケース）
+        s.rebuild(all[..4].to_vec(), Order::Sequential);
+
+        assert_eq!(s.current(), None);
+        assert_eq!(s.image_count(), 4);
     }
 
     #[test]

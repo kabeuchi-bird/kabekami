@@ -9,6 +9,7 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 - **Multi-monitor**: per-screen resolution-optimised images via `kscreen-doctor`
 - **Online sources**: Bing Daily, Unsplash, Wallhaven, Reddit — auto-downloaded on a schedule
 - **GUI settings tool** (`kabekami-config`) with real-time BlurPad preview
+- **State is remembered across restarts**: pause state, current wallpaper, display mode, and interval
 
 ## Requirements
 
@@ -117,6 +118,11 @@ paru -S kabekami-git
 └── Quit
 ```
 
+Pause state and the current wallpaper survive a restart, so pausing before logout keeps
+rotation paused on the next login, and actions like *Move to Trash* work on the wallpaper
+already on screen without waiting for the first rotation. Changing **Display Mode** or
+**Rotation Interval** from the tray is written back to `config.toml`.
+
 ### CLI
 
 ```bash
@@ -158,6 +164,13 @@ Register shortcuts in **System Settings → Shortcuts → kabekami** (no default
 Config file: `~/.config/kabekami/config.toml`
 
 See [`config.toml`](config.toml) in this repository for a fully annotated reference covering every setting and its default value.
+
+kabekami also writes `~/.config/kabekami/state.toml`, which holds runtime state (pause
+state and the current wallpaper) rather than user settings. It is managed automatically and
+you don't need to edit it. It is read once at startup, so to reset that state, stop the
+daemon, delete the file, and start it again — deleting it while the daemon is running has
+no effect and the file will simply be rewritten. Blacklisted images are stored separately in
+`~/.config/kabekami/blacklist.txt`.
 
 ### Supported Image Formats
 
