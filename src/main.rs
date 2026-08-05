@@ -205,8 +205,20 @@ async fn main() -> Result<()> {
 
     let mut fetch_ctx = provider::FetchContext { screen_w, screen_h };
 
-    // 30 分ごとにプロバイダーを確認する（第 1 tick は即時）
-    let mut fetch_ticker = tokio::time::interval(Duration::from_secs(1800));
+    // 30 分ごとにプロバイダーを確認する。
+    //
+    // `tokio::time::interval` は既定で第 1 tick が即座に完了する。この直後の
+    // select! ループでは SNI トレイ登録・KGlobalAccel・D-Bus インターフェースの
+    // セットアップが完了した直後というタイミングになる。ここで複数プロバイダー
+    // への TLS ハンドシェイクが同時に走ると、`worker_threads = 1` の唯一の
+    // ワーカースレッドを（yield 点のない同期的な暗号演算で）数百 ms〜数秒
+    // 占有し、その間 kabekami は D-Bus 応答を返せなくなる。KDE のシステムトレイ
+    // はアイコン登録直後にプロパティを同期（ブロッキング）取得することがあり、
+    // これが Plasma パネル全体の一時的なフリーズとして観測される。
+    // `interval_at` で第 1 tick を数秒後にずらし、D-Bus 周りの初期化が
+    // 落ち着いてからフェッチが始まるようにする。
+    const FIRST_FETCH_DELAY: Duration = Duration::from_secs(5);
+    let mut fetch_ticker = interval_at(Instant::now() + FIRST_FETCH_DELAY, Duration::from_secs(1800));
     fetch_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let online_configs = std::sync::Arc::new(std::sync::Mutex::new(
