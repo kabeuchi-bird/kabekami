@@ -83,6 +83,20 @@ impl Scheduler {
         Some(self.images[idx].clone())
     }
 
+    /// タイマー・起動時・オンライン初回取得など「自動での」切り替えに使う。
+    ///
+    /// 一時停止中は `None` を返して切り替えを行わない。自動切り替えの経路が
+    /// 増えても `is_paused()` のチェックを書き忘れないよう、一時停止の判定を
+    /// 呼び出し側の規約ではなく `Scheduler` 側の性質にしている。
+    /// ユーザーが明示的に操作する Next / Prev は一時停止中でも動くべきなので、
+    /// そちらは `next()` / `prev()` を直接使う。
+    pub fn auto_next(&mut self) -> Option<PathBuf> {
+        if self.paused {
+            return None;
+        }
+        self.next()
+    }
+
     /// 直前の壁紙に戻る。
     ///
     /// 履歴がなければ `None` を返す（最古の壁紙より前には戻れない）。
@@ -130,9 +144,11 @@ impl Scheduler {
     /// （設定リロードで使う）。
     ///
     /// キューと履歴は新しいリストに対して作り直す。現在の壁紙が新リストにも
-    /// 残っていれば `current` として復元する。呼び出し側で `pause()` や
-    /// `restore_current()` を呼び直す必要はないため、`Scheduler` にフィールドが
-    /// 増えても引き継ぎ漏れが起きない。
+    /// 残っていれば `current` として復元する。
+    ///
+    /// 引き継ぐフィールドはここに明示的に列挙している。リロードをまたいで
+    /// 保持すべきフィールドを `Scheduler` に追加した場合は、ここにも追加すること
+    /// （漏らすと設定リロードのたびに既定値へ戻る、気づきにくい不具合になる）。
     pub fn rebuild(&mut self, images: Vec<PathBuf>, order: Order) {
         let prev_current = self.current.map(|idx| self.images[idx].clone());
         let paused = self.paused;
@@ -343,6 +359,22 @@ mod tests {
         assert!(s.is_paused());
         s.resume();
         assert!(!s.is_paused());
+    }
+
+    #[test]
+    fn auto_next_respects_pause_but_next_does_not() {
+        let mut s = Scheduler::new(paths(3), Order::Sequential);
+        s.pause();
+
+        // 自動切り替えは一時停止中は進まない
+        assert_eq!(s.auto_next(), None);
+        assert_eq!(s.current(), None);
+
+        // ユーザーの明示操作（Next）は一時停止中でも進む
+        assert!(s.next().is_some());
+
+        s.resume();
+        assert!(s.auto_next().is_some());
     }
 
     #[test]

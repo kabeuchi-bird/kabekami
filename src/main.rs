@@ -217,6 +217,14 @@ async fn main() -> Result<()> {
     // これが Plasma パネル全体の一時的なフリーズとして観測される。
     // `interval_at` で第 1 tick を数秒後にずらし、D-Bus 周りの初期化が
     // 落ち着いてからフェッチが始まるようにする。
+    //
+    // これは競合ウィンドウを狭めるだけで、競合そのものは無くならない
+    // （初期化が 5 秒を超えれば再発しうる）。競合を構造的に無くすなら
+    // `worker_threads = 2` にして D-Bus / トレイのポーリングを別スレッドへ
+    // 逃がすのが本筋だが、常駐デーモンとしてアイドル時のスレッド・メモリ
+    // コストを増やしたくないため、起動直後の数秒だけの問題に対しては
+    // この遅延で足りると判断している。再発するようなら worker_threads を
+    // 見直すこと。
     const FIRST_FETCH_DELAY: Duration = Duration::from_secs(5);
     let mut fetch_ticker = interval_at(Instant::now() + FIRST_FETCH_DELAY, Duration::from_secs(1800));
     fetch_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -262,8 +270,8 @@ async fn main() -> Result<()> {
     // 起動時の即時切り替え。
     // 一時停止状態は再起動をまたいで復元されるため、停止中なら切り替えない
     // （停止したまま再起動したのに壁紙が変わる、という挙動を避ける）。
-    if config.rotation.change_on_start && !scheduler.is_paused() {
-        if let Some(path) = scheduler.next() {
+    if config.rotation.change_on_start {
+        if let Some(path) = scheduler.auto_next() {
             apply_and_notify(apply_ctx!(), &path, "initial apply failed").await;
         }
     }
@@ -309,9 +317,8 @@ async fn main() -> Result<()> {
                             .replace("{count}", &added.to_string());
                         notifier.info(strings.notify_fetch_title, &body).await;
                     }
-                    // 初回取得時の即時適用も一時停止中は行わない
-                    if was_empty && !scheduler.is_paused() {
-                        if let Some(path) = scheduler.next() {
+                    if was_empty {
+                        if let Some(path) = scheduler.auto_next() {
                             apply_and_notify(apply_ctx!(), &path, "online: initial apply failed").await;
                         }
                     }
@@ -319,10 +326,7 @@ async fn main() -> Result<()> {
             }
 
             _ = ticker.tick() => {
-                if scheduler.is_paused() {
-                    continue;
-                }
-                if let Some(path) = scheduler.next() {
+                if let Some(path) = scheduler.auto_next() {
                     apply_and_notify(apply_ctx!(), &path, "auto apply failed").await;
                 }
             }
@@ -567,15 +571,13 @@ async fn main() -> Result<()> {
                                 // rebuild 後の current を使う。新しいソースから外れた画像や
                                 // ブラックリスト入りした画像は rebuild で current から落ちるため、
                                 // ここで拾わないことで「除外したはずの画像が再適用される」のを防ぐ。
-                                match scheduler.current().cloned() {
-                                    Some(cur) => {
-                                        apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
-                                    }
-                                    None => {
-                                        // current が落ちた場合、state とトレイに残る旧画像を消す
-                                        // （apply_and_notify を通らないので明示的に更新する）。
-                                        state_writer.persist(scheduler.is_paused(), None).await;
-                                    }
+                                // current が落ちた場合は state に残る旧画像も消す必要がある。
+                                // persist は内容が変わらなければ書き込みを省くので、
+                                // 再適用する場合に重ねて呼んでも余計な I/O は発生しない。
+                                let cur = scheduler.current().cloned();
+                                state_writer.persist(scheduler.is_paused(), cur.as_deref()).await;
+                                if let Some(cur) = cur {
+                                    apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
                                 }
 
                                 if let Some(ref h) = tray_handle {
@@ -1103,16 +1105,9 @@ async fn update_tray_ok(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>, 
 
 /// 設定を保存し、失敗しても警告に留めて処理を続行する。
 /// `what` は失敗ログに出す変更内容（例: `"display mode"`）。
-///
-/// `Config::save` も `atomic_write`（fsync 2 回）を行うため、`state` の保存と
-/// 同様に `spawn_blocking` へ逃がしてワーカースレッドを止めない。
 async fn persist_config(config: &Config, what: &str) {
     let owned = config.clone();
-    match tokio::task::spawn_blocking(move || owned.save()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!("failed to persist {}: {:#}", what, e),
-        Err(e) => tracing::warn!("config persist task panicked: {}", e),
-    }
+    state::save_offloaded(move || owned.save(), what).await;
 }
 
 fn try_spawn_fetch(
