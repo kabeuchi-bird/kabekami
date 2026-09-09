@@ -6,13 +6,18 @@
 //! （例: `fr.toml`）で下記のいずれかに置くだけです。**再ビルドは不要**で、
 //! 設定 GUI の言語ドロップダウンにも自動で並びます。
 //!
-//! | 置き場所 | 用途 |
-//! |---|---|
-//! | `$KABEKAMI_I18N_DIR` | 開発・テスト用の上書き（最優先） |
-//! | `~/.config/kabekami/i18n/` | ユーザー個別 |
-//! | `/usr/share/kabekami/i18n/` | システム全体 |
+//! | 置き場所 | 用途 | 優先度 |
+//! |---|---|---|
+//! | （バイナリ埋め込み） | 同梱の `ja.toml` | 最低 |
+//! | `/usr/share/kabekami/i18n/` | システム全体 | ↓ |
+//! | `~/.config/kabekami/i18n/` | ユーザー個別 | ↓ |
+//! | `$KABEKAMI_I18N_DIR` | 開発・テスト用の上書き | 最高 |
 //!
-//! 同じ言語コードが複数見つかった場合は上の表で優先度の高いものが勝ちます。
+//! 同じ言語コードが複数の層にある場合、**置き換えではなく重ね合わせ**になります。
+//! 優先度の高いファイルに書かれたキーだけが上書きされ、書かれていないキーは
+//! 下の層の値がそのまま残ります。そのためユーザーは気に入らない訳語だけを
+//! 数行のファイルで差し替えられ、残りは同梱の翻訳（とその更新）に追従します。
+//!
 //! `ja.toml` はバイナリに埋め込まれているため、ファイルを 1 つも設置しなくても
 //! 日本語は利用できます。
 //!
@@ -73,6 +78,16 @@ macro_rules! string_table {
                     $( $field: leak_str(self.$field, base.$field), )*
                     $( $lfield: leak_list(self.$lfield, base.$lfield), )*
                 }
+            }
+
+            /// 優先度の高い層の内容を重ねる（指定されたキーだけ上書き）。
+            ///
+            /// 置き換えではなく重ね合わせにすることで、ユーザーは気に入らない
+            /// 訳語だけを数行のファイルで差し替えられ、残りは同梱の翻訳が
+            /// そのまま使われる（更新にも追従する）。
+            fn overlay(&mut self, other: Self) {
+                $( if other.$field.is_some() { self.$field = other.$field; } )*
+                $( if other.$lfield.is_some() { self.$lfield = other.$lfield; } )*
             }
         }
     };
@@ -304,34 +319,32 @@ pub fn config_strings(lang: Lang) -> &'static ConfigStrings {
 // ── 言語ファイルの読み込み ────────────────────────────────────────────────────
 
 /// 言語ファイル 1 つ分の内容。
-#[derive(Deserialize)]
+///
+/// 全フィールドが `Option`（未指定を表現できる形）なので、探索パスをまたいだ
+/// 重ね合わせと、英語へのフォールバックが同じ仕組みで扱える。
+#[derive(Default, Deserialize)]
 struct LangFile {
+    #[serde(default)]
     display_name: Option<String>,
-    #[serde(default = "default_true")]
-    gui_visible: bool,
+    #[serde(default)]
+    gui_visible: Option<bool>,
     #[serde(default)]
     tray: RawUiStrings,
     #[serde(default)]
     config: RawConfigStrings,
 }
 
-fn default_true() -> bool {
-    true
-}
-
-/// `Default` は「ファイルが無い」場合の英語エントリ生成に使う。
-///
-/// `#[serde(default = ...)]` はデシリアライズ時にしか効かないため、
-/// derive した `Default` だと `gui_visible` が `false` になり英語が
-/// 言語ドロップダウンから消えてしまう。ここで明示的に揃えておく。
-impl Default for LangFile {
-    fn default() -> Self {
-        Self {
-            display_name: None,
-            gui_visible: default_true(),
-            tray: RawUiStrings::default(),
-            config: RawConfigStrings::default(),
+impl LangFile {
+    /// 優先度の高いファイルの内容を重ねる。
+    fn overlay(&mut self, other: Self) {
+        if other.display_name.is_some() {
+            self.display_name = other.display_name;
         }
+        if other.gui_visible.is_some() {
+            self.gui_visible = other.gui_visible;
+        }
+        self.tray.overlay(other.tray);
+        self.config.overlay(other.config);
     }
 }
 
@@ -352,21 +365,29 @@ fn search_dirs() -> Vec<PathBuf> {
 }
 
 fn build_registry() -> Vec<LangEntry> {
+    build_registry_from(&search_dirs())
+}
+
+/// 探索パスを指定してレジストリを構築する（`build_registry` の本体）。
+///
+/// `registry()` はプロセスに 1 つしか作れないため、優先順位の検証が
+/// できるようディレクトリを引数に取る形へ分離してある。
+fn build_registry_from(dirs: &[PathBuf]) -> Vec<LangEntry> {
     // id → 内容。後から挿入したものが前のものを置き換える。
     let mut files: BTreeMap<String, LangFile> = BTreeMap::new();
 
     for (id, text) in BUNDLED {
         match toml::from_str::<LangFile>(text) {
             Ok(f) => {
-                files.insert((*id).to_string(), f);
+                files.entry((*id).to_string()).or_default().overlay(f);
             }
             // 埋め込みファイルはテストで検証済みなので通常ここには来ない
             Err(e) => tracing::warn!("i18n: bundled {}.toml is malformed: {}", id, e),
         }
     }
 
-    for dir in search_dirs() {
-        load_dir(&dir, &mut files);
+    for dir in dirs {
+        load_dir(dir, &mut files);
     }
 
     // 英語は常に先頭。ディスク上に en.toml があればその内容を上書き適用する。
@@ -403,7 +424,9 @@ fn load_dir(dir: &std::path::Path, out: &mut BTreeMap<String, LangFile>) {
         match toml::from_str::<LangFile>(&text) {
             Ok(f) => {
                 tracing::debug!("i18n: loaded {} from {}", id, path.display());
-                out.insert(id.to_ascii_lowercase(), f);
+                // 置き換えではなく重ね合わせ。優先度の低い層で訳されたキーは
+                // 上書きされない限りそのまま残る。
+                out.entry(id.to_ascii_lowercase()).or_default().overlay(f);
             }
             Err(e) => tracing::warn!("i18n: {} is malformed, ignored: {}", path.display(), e),
         }
@@ -421,7 +444,7 @@ fn make_entry(
     LangEntry {
         id: Box::leak(id.to_string().into_boxed_str()),
         display_name: leak_str(file.display_name, Box::leak(fallback_name.to_string().into_boxed_str())),
-        gui_visible: file.gui_visible,
+        gui_visible: file.gui_visible.unwrap_or(true),
         variant: Lang(idx),
         strings: Box::leak(Box::new(file.tray.merge(base_ui))),
         config: Box::leak(Box::new(file.config.merge(base_cfg))),
@@ -645,6 +668,105 @@ mod tests {
         let e = make_entry(1, "de", "de", f, &EN, &EN_CONFIG);
         assert_eq!(e.display_name, "de");
         assert!(e.gui_visible, "gui_visible の既定は true");
+    }
+
+    /// テスト用に言語ファイルを書き出す。
+    fn write_lang(dir: &std::path::Path, id: &str, body: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.toml")), body).unwrap();
+    }
+
+    fn find<'a>(reg: &'a [LangEntry], id: &str) -> &'a LangEntry {
+        reg.iter().find(|e| e.id == id).expect("language not found")
+    }
+
+    /// ユーザーが自分のディレクトリに置いたファイルで言語を追加できる。
+    #[test]
+    fn user_directory_can_add_a_language() {
+        let user = tempfile::tempdir().unwrap();
+        write_lang(
+            user.path(),
+            "fr",
+            "display_name = \"Français\"\n[tray]\nquit = \"Quitter\"\n",
+        );
+
+        let reg = build_registry_from(&[user.path().to_path_buf()]);
+        let fr = find(&reg, "fr");
+        assert_eq!(fr.display_name, "Français");
+        assert_eq!(fr.strings.quit, "Quitter");
+        // 未記載のキーは英語のまま
+        assert_eq!(fr.strings.pause, EN.pause);
+    }
+
+    /// ユーザーのファイルは同梱の翻訳（ja）を上書きできる。
+    /// 訳語が気に入らない場合に再ビルドせず差し替えられる。
+    #[test]
+    fn user_directory_overrides_bundled_language() {
+        let user = tempfile::tempdir().unwrap();
+        write_lang(user.path(), "ja", "[tray]\nquit = \"おわり\"\n");
+
+        let reg = build_registry_from(&[user.path().to_path_buf()]);
+        let ja = find(&reg, "ja");
+        assert_eq!(ja.strings.quit, "おわり", "ユーザーのファイルが勝つべき");
+        // 上書きしなかったキーは同梱の日本語のまま（英語に戻らない）
+        assert_eq!(ja.strings.pause, "一時停止");
+    }
+
+    /// 探索パスは後にあるものほど優先される（システム < ユーザー < 環境変数）。
+    #[test]
+    fn later_search_dirs_win() {
+        let system = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        let env = tempfile::tempdir().unwrap();
+
+        write_lang(system.path(), "fr", "display_name = \"System\"\n");
+        write_lang(user.path(), "fr", "display_name = \"User\"\n");
+        let reg = build_registry_from(&[
+            system.path().to_path_buf(),
+            user.path().to_path_buf(),
+        ]);
+        assert_eq!(find(&reg, "fr").display_name, "User");
+
+        write_lang(env.path(), "fr", "display_name = \"Env\"\n");
+        let reg = build_registry_from(&[
+            system.path().to_path_buf(),
+            user.path().to_path_buf(),
+            env.path().to_path_buf(),
+        ]);
+        assert_eq!(find(&reg, "fr").display_name, "Env");
+    }
+
+    /// 英語もユーザーのファイルで上書きでき、かつ常に先頭に居続ける。
+    #[test]
+    fn english_can_be_overridden_but_stays_first() {
+        let user = tempfile::tempdir().unwrap();
+        write_lang(user.path(), "en", "[tray]\nquit = \"Exit\"\n");
+
+        let reg = build_registry_from(&[user.path().to_path_buf()]);
+        assert_eq!(reg[0].id, "en", "英語は常に先頭");
+        assert_eq!(reg[0].strings.quit, "Exit");
+        assert_eq!(reg[0].strings.pause, EN.pause);
+    }
+
+    /// 壊れたファイルは無視され、他の言語や英語の動作を巻き込まない。
+    #[test]
+    fn malformed_file_is_ignored() {
+        let user = tempfile::tempdir().unwrap();
+        write_lang(user.path(), "broken", "this is not = valid = toml\n");
+        write_lang(user.path(), "fr", "display_name = \"Français\"\n");
+
+        let reg = build_registry_from(&[user.path().to_path_buf()]);
+        assert!(reg.iter().all(|e| e.id != "broken"), "壊れた言語は登録しない");
+        assert_eq!(find(&reg, "fr").display_name, "Français");
+        assert_eq!(reg[0].strings.quit, "Quit");
+    }
+
+    /// 存在しないディレクトリを指定しても失敗しない（設置は任意）。
+    #[test]
+    fn missing_directory_is_not_an_error() {
+        let reg = build_registry_from(&[PathBuf::from("/nonexistent/kabekami/i18n")]);
+        assert_eq!(reg[0].id, "en");
+        assert!(reg.iter().any(|e| e.id == "ja"), "同梱の日本語は残る");
     }
 
     #[test]
