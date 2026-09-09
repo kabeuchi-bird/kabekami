@@ -1,8 +1,9 @@
 i18n_hint() {
     echo "  -> UI languages: /usr/share/kabekami/i18n/"
     echo "     Copy ja.toml to <code>.toml there (or ~/.config/kabekami/i18n/)"
-    echo "     to add a language -- no rebuild needed. Untranslated keys fall back"
-    echo "     to English, so a partial translation works."
+    echo "     to add a language -- no rebuild needed, but restart kabekami"
+    echo "     afterwards. Untranslated keys fall back to English, so a partial"
+    echo "     translation works."
 }
 
 post_install() {

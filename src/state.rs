@@ -27,18 +27,7 @@ impl DaemonState {
     /// 状態を読み込む。ファイル未作成・破損時はデフォルト（未停止・現在画像なし）。
     pub fn load(config_dir: &Path) -> Self {
         let path = Self::path(config_dir);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
-            Err(e) => {
-                tracing::warn!("failed to read {}: {}, using defaults", path.display(), e);
-                return Self::default();
-            }
-        };
-        toml::from_str(&text).unwrap_or_else(|e| {
-            tracing::warn!("malformed state file {}: {}, using defaults", path.display(), e);
-            Self::default()
-        })
+        kabekami_common::toml_file::load_lenient(&path, "state file").unwrap_or_default()
     }
 
     /// 状態を `atomic_write` で永続化する（電源断時に壊れた state が残らない）。

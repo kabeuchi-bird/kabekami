@@ -21,6 +21,10 @@
 //! `ja.toml` はバイナリに埋め込まれているため、ファイルを 1 つも設置しなくても
 //! 日本語は利用できます。
 //!
+//! 読み込みはプロセスごとに 1 回だけ（`registry()` の `OnceLock`）です。
+//! `config.toml` と違い言語ファイルはホットリロードされないため、追加・編集後は
+//! プロセスの再起動が必要です。
+//!
 //! ## 2 つの文字列テーブル
 //!
 //! - `UiStrings`: デーモン（トレイメニュー・通知）が使う文字列 → TOML の `[tray]`
@@ -48,6 +52,19 @@ use serde::Deserialize;
 /// UI 文字列を追加するときはここのフィールド一覧に 1 行足し、英語テーブルに
 /// 文言を書けばよい（後者を忘れるとコンパイルエラーになる）。
 macro_rules! string_table {
+    // リスト型のフィールドを持たないテーブル用。
+    (
+        $(#[$smeta:meta])*
+        $name:ident / $raw:ident {
+            $( $(#[$fmeta:meta])* $field:ident ),* $(,)?
+        }
+    ) => {
+        string_table! {
+            $(#[$smeta])*
+            $name / $raw { $( $(#[$fmeta])* $field ),* }
+            lists { }
+        }
+    };
     (
         $(#[$smeta:meta])*
         $name:ident / $raw:ident {
@@ -88,6 +105,18 @@ macro_rules! string_table {
             fn overlay(&mut self, other: Self) {
                 $( if other.$field.is_some() { self.$field = other.$field; } )*
                 $( if other.$lfield.is_some() { self.$lfield = other.$lfield; } )*
+            }
+
+            /// 未指定（= 英語にフォールバックする）キーの名前を全て返す。
+            ///
+            /// 同梱翻訳の網羅性テストで使う。フィールド一覧はこのマクロが
+            /// 持っているため、フィールドを増やしても検査対象が自動で増える。
+            #[cfg(test)]
+            fn missing_keys(&self) -> Vec<&'static str> {
+                let mut missing = Vec::new();
+                $( if self.$field.is_none() { missing.push(stringify!($field)); } )*
+                $( if self.$lfield.is_none() { missing.push(stringify!($lfield)); } )*
+                missing
             }
         }
     };
@@ -211,7 +240,6 @@ string_table! {
         notify_fetch,
         enable_blacklist,
     }
-    lists {}
 }
 
 /// 読み込んだ文字列を `'static` に昇格させる。
@@ -247,8 +275,16 @@ fn leak_list(v: Option<Vec<String>>, fallback: &'static [&'static str]) -> &'sta
 /// 言語がファイルから動的に増えるため enum ではなく不透明なインデックス型。
 /// 添字はプロセス内でのみ意味を持ち、設定ファイルには言語コード
 /// （`ui.language`）が保存されるので、実行ごとに順序が変わっても問題ない。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Lang(usize);
+
+/// ログに出るのが `Lang(0)` ではなく言語コードになるようにする。
+/// （`tracing::info!("ui language: {:?}", lang)` の可読性のため）
+impl std::fmt::Debug for Lang {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
 
 impl Default for Lang {
     /// 英語。`registry()` の先頭は常に英語であることが保証されている。
@@ -277,7 +313,8 @@ impl Lang {
     fn entry(self) -> &'static LangEntry {
         // インデックスは registry() から得たものしか存在しないが、
         // 念のため範囲外は英語に倒す。
-        registry().get(self.0).unwrap_or(&registry()[0])
+        let reg = registry();
+        reg.get(self.0).unwrap_or(&reg[0])
     }
 }
 
@@ -289,8 +326,6 @@ pub struct LangEntry {
     pub display_name: &'static str,
     /// `false` のエントリは GUI に表示されない
     pub gui_visible: bool,
-    /// このエントリを指す `Lang`
-    pub variant: Lang,
     /// デーモン（トレイ・通知）用の文字列テーブル
     pub strings: &'static UiStrings,
     /// 設定 GUI 用の文字列テーブル
@@ -391,12 +426,12 @@ fn build_registry_from(dirs: &[PathBuf]) -> Vec<LangEntry> {
     }
 
     // 英語は常に先頭。ディスク上に en.toml があればその内容を上書き適用する。
-    let en_file = files.remove("en").unwrap_or_default();
-    let mut entries = vec![make_entry(0, "en", "English", en_file, &EN, &EN_CONFIG)];
+    let mut en_file = files.remove("en").unwrap_or_default();
+    en_file.display_name.get_or_insert_with(|| "English".to_string());
+    let mut entries = vec![make_entry("en", en_file, &EN, &EN_CONFIG)];
 
     for (id, file) in files {
-        let idx = entries.len();
-        entries.push(make_entry(idx, &id, &id, file, &EN, &EN_CONFIG));
+        entries.push(make_entry(&id, file, &EN, &EN_CONFIG));
     }
     entries
 }
@@ -414,38 +449,28 @@ fn load_dir(dir: &std::path::Path, out: &mut BTreeMap<String, LangFile>) {
         let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("i18n: cannot read {}: {}", path.display(), e);
-                continue;
-            }
+        let Some(f) = crate::toml_file::load_lenient::<LangFile>(&path, "language file") else {
+            continue;
         };
-        match toml::from_str::<LangFile>(&text) {
-            Ok(f) => {
-                tracing::debug!("i18n: loaded {} from {}", id, path.display());
-                // 置き換えではなく重ね合わせ。優先度の低い層で訳されたキーは
-                // 上書きされない限りそのまま残る。
-                out.entry(id.to_ascii_lowercase()).or_default().overlay(f);
-            }
-            Err(e) => tracing::warn!("i18n: {} is malformed, ignored: {}", path.display(), e),
-        }
+        tracing::debug!("i18n: loaded {} from {}", id, path.display());
+        // 置き換えではなく重ね合わせ。優先度の低い層で訳されたキーは
+        // 上書きされない限りそのまま残る。
+        out.entry(id.to_ascii_lowercase()).or_default().overlay(f);
     }
 }
 
 fn make_entry(
-    idx: usize,
     id: &str,
-    fallback_name: &str,
     file: LangFile,
     base_ui: &'static UiStrings,
     base_cfg: &'static ConfigStrings,
 ) -> LangEntry {
+    let id: &'static str = Box::leak(id.to_string().into_boxed_str());
     LangEntry {
-        id: Box::leak(id.to_string().into_boxed_str()),
-        display_name: leak_str(file.display_name, Box::leak(fallback_name.to_string().into_boxed_str())),
+        id,
+        // display_name 未指定なら言語コードをそのまま表示名にする
+        display_name: leak_str(file.display_name, id),
         gui_visible: file.gui_visible.unwrap_or(true),
-        variant: Lang(idx),
         strings: Box::leak(Box::new(file.tray.merge(base_ui))),
         config: Box::leak(Box::new(file.config.merge(base_cfg))),
     }
@@ -553,37 +578,31 @@ pub static EN_CONFIG: ConfigStrings = ConfigStrings {
 mod tests {
     use super::*;
 
-    /// 埋め込み `ja.toml` が全キーを網羅しているかを検証する。
+    /// 埋め込み `ja.toml` が **全キー** を網羅しているかを検証する。
     ///
-    /// 同梱の翻訳が虫食いだと英語が混ざって出てしまうため、キーの綴り間違いを
-    /// ここで落とす（利用者が設置する翻訳ファイルは部分的でも構わない）。
+    /// 英語は Rust 側にあるためフィールド追加時にコンパイラが漏れを止めるが、
+    /// 同梱の日本語には同じ保護が無い。フィールド一覧はマクロが持っているので、
+    /// `missing_keys()` で機械的に全件検査する（フィールドを増やせば
+    /// 検査対象も自動で増える）。
     #[test]
     fn bundled_ja_covers_every_key() {
         let (_, text) = BUNDLED.iter().find(|(id, _)| *id == "ja").unwrap();
         let f: LangFile = toml::from_str(text).expect("ja.toml should parse");
 
         assert!(f.display_name.is_some(), "ja.toml: display_name is missing");
-
-        // 英語とは異なる値になっているはず = キー名が正しく届いている
-        let ui = f.tray.merge(&EN);
-        assert_ne!(ui.quit, EN.quit, "ja.toml: [tray] quit is missing");
-        assert_ne!(ui.images, EN.images, "ja.toml: [tray] images is missing");
-        assert_ne!(
-            ui.notify_fetch_body, EN.notify_fetch_body,
-            "ja.toml: [tray] notify_fetch_body is missing"
+        assert_eq!(
+            f.tray.missing_keys(),
+            Vec::<&str>::new(),
+            "ja.toml: [tray] にキーが不足している"
+        );
+        assert_eq!(
+            f.config.missing_keys(),
+            Vec::<&str>::new(),
+            "ja.toml: [config] にキーが不足している"
         );
 
-        let cfg = f.config.merge(&EN_CONFIG);
-        assert_ne!(cfg.saved, EN_CONFIG.saved, "ja.toml: [config] saved is missing");
-        assert_ne!(
-            cfg.enable_blacklist, EN_CONFIG.enable_blacklist,
-            "ja.toml: [config] enable_blacklist is missing"
-        );
-        assert_ne!(
-            cfg.kdialog_missing, EN_CONFIG.kdialog_missing,
-            "ja.toml: [config] kdialog_missing is missing"
-        );
         // 複数行リテラルが意図どおり 2 行になっているか
+        let cfg = f.config.merge(&EN_CONFIG);
         assert_eq!(cfg.kdialog_missing.lines().count(), 2);
     }
 
@@ -665,7 +684,7 @@ mod tests {
     #[test]
     fn display_name_defaults_to_id() {
         let f: LangFile = toml::from_str("[tray]\nquit = \"x\"").unwrap();
-        let e = make_entry(1, "de", "de", f, &EN, &EN_CONFIG);
+        let e = make_entry("de", f, &EN, &EN_CONFIG);
         assert_eq!(e.display_name, "de");
         assert!(e.gui_visible, "gui_visible の既定は true");
     }
@@ -769,12 +788,14 @@ mod tests {
         assert!(reg.iter().any(|e| e.id == "ja"), "同梱の日本語は残る");
     }
 
+    /// `from_code` で引いた `Lang` が、その言語のテーブルを指すこと。
     #[test]
-    fn every_entry_has_consistent_variant() {
-        for (i, entry) in registry().iter().enumerate() {
-            assert_eq!(entry.variant, Lang(i), "{}: variant mismatch", entry.id);
-            assert_eq!(strings(entry.variant) as *const _, entry.strings as *const _);
-            assert_eq!(config_strings(entry.variant) as *const _, entry.config as *const _);
+    fn lookup_by_code_returns_that_entry() {
+        for entry in registry() {
+            let lang = Lang::from_code(entry.id);
+            assert_eq!(lang.code(), entry.id);
+            assert_eq!(strings(lang) as *const _, entry.strings as *const _);
+            assert_eq!(config_strings(lang) as *const _, entry.config as *const _);
         }
     }
 }

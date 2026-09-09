@@ -140,6 +140,12 @@ async fn main() -> Result<()> {
             }
         };
 
+    // 言語テーブルの初回構築は言語ファイルの探索（read_dir + 読み込み + パース）を
+    // 伴う同期 I/O のため `spawn_blocking` へ逃がす。`worker_threads = 1` なので、
+    // ここで直接読むとホームディレクトリが低速な環境（ネットワーク FS 等）で
+    // トレイ・D-Bus の初期化が待たされる。以降は OnceLock のキャッシュを返すだけ。
+    let _ = tokio::task::spawn_blocking(kabekami_common::i18n::registry).await;
+
     // 言語設定を解決する（環境変数 → config → デフォルト ja）
     let mut lang = resolve_lang(&config);
     tracing::info!("ui language: {:?}", lang);

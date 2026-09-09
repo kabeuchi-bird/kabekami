@@ -187,6 +187,8 @@ code (e.g. `fr.toml`), and drop it in one of:
 | `$KABEKAMI_I18N_DIR` | Explicit override (handy for testing) | highest |
 
 The new language appears in the language dropdown in `kabekami-config` automatically.
+Language files are read once at startup, so **restart kabekami (and the settings GUI)**
+after adding or editing one.
 
 **Files layer instead of replacing each other.** If you only dislike one phrase, a two-line
 file is enough — everything you don't mention keeps coming from the lower-priority file, so

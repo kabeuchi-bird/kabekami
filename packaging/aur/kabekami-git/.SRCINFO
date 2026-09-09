@@ -26,6 +26,6 @@ pkgbase = kabekami-git
 	source = kabekami.install
 	sha256sums = SKIP
 	sha256sums = aadec7cb6e6bff5a008936578905beb8fbf18feb794b8decd3b3e8ad90023b27
-	sha256sums = aa0f84b9ffee8ba141c32b6e1b095a60b18f5848d85be597b8dce404061fe181
+	sha256sums = df521c8ef87ca6bac10548d4d9d1867964c03fd096bce6812c3bbaa7bb132c95
 
 pkgname = kabekami-git
