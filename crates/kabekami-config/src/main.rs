@@ -824,7 +824,7 @@ impl KabekamiApp {
         let selected_label = if self.config.ui.language.is_empty() {
             "(default)"
         } else {
-            kabekami_common::i18n::REGISTRY
+            kabekami_common::i18n::registry()
                 .iter()
                 .find(|e| e.id == self.config.ui.language.as_str())
                 .map(|e| e.display_name)
@@ -834,7 +834,7 @@ impl KabekamiApp {
             .selected_text(selected_label)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.config.ui.language, String::new(), "(default)");
-                for entry in kabekami_common::i18n::REGISTRY.iter().filter(|e| e.gui_visible) {
+                for entry in kabekami_common::i18n::registry().iter().filter(|e| e.gui_visible) {
                     ui.selectable_value(
                         &mut self.config.ui.language,
                         entry.id.to_string(),
