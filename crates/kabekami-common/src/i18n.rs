@@ -288,12 +288,7 @@ impl Lang {
     /// 言語コード文字列（`"en"`, `"ja"` 等）から `Lang` を解析する。
     /// 未知の値は英語にフォールバックする。
     pub fn from_code(s: &str) -> Self {
-        let trimmed = s.trim();
-        registry()
-            .iter()
-            .position(|e| e.id.eq_ignore_ascii_case(trimmed))
-            .map(Lang)
-            .unwrap_or_default()
+        Lang(resolve_code(registry(), s))
     }
 
     /// 対応する言語コードを返す。
@@ -321,6 +316,18 @@ pub struct LangEntry {
     pub strings: &'static UiStrings,
     /// 設定 GUI 用の文字列テーブル
     pub config: &'static ConfigStrings,
+}
+
+/// 言語コードからレジストリ内の位置を引く。未知の値は英語（先頭）に倒す。
+///
+/// `registry()` ではなくスライスを受け取るのは、テストがプロセス共有の
+/// グローバル（＝ホスト上の言語ファイルに左右される）を経由せずに
+/// 解決ロジックを検証できるようにするため。
+fn resolve_code(reg: &[LangEntry], code: &str) -> usize {
+    let trimmed = code.trim();
+    reg.iter()
+        .position(|e| e.id.eq_ignore_ascii_case(trimmed))
+        .unwrap_or(0)
 }
 
 /// 登録済み言語の一覧。先頭は必ず英語。
@@ -457,12 +464,29 @@ fn make_entry(
     base_cfg: &'static ConfigStrings,
 ) -> LangEntry {
     let id: &'static str = Box::leak(id.to_string().into_boxed_str());
+    let mut ui = file.tray.merge(base_ui);
+
+    // `interval_labels` はトレイの切り替え間隔メニューに 1:1 で対応し、
+    // 選択された添字がそのまま `tray::INTERVAL_PRESETS` の添字として使われる。
+    // 件数がずれた翻訳を受け入れると、余分な項目を選んだ瞬間に範囲外アクセスに
+    // なる（少なすぎる場合はプリセットが黙って消える）。件数違いは翻訳ミスと
+    // みなし、このキーだけ英語に戻す。
+    if ui.interval_labels.len() != base_ui.interval_labels.len() {
+        tracing::warn!(
+            "i18n: {}: interval_labels must have exactly {} entries (got {}), using English",
+            id,
+            base_ui.interval_labels.len(),
+            ui.interval_labels.len()
+        );
+        ui.interval_labels = base_ui.interval_labels;
+    }
+
     LangEntry {
         id,
         // display_name 未指定なら言語コードをそのまま表示名にする
         display_name: leak_str(file.display_name, id),
         gui_visible: file.gui_visible.unwrap_or(true),
-        strings: Box::leak(Box::new(file.tray.merge(base_ui))),
+        strings: Box::leak(Box::new(ui)),
         config: Box::leak(Box::new(file.config.merge(base_cfg))),
     }
 }
@@ -501,10 +525,10 @@ mod tests {
         assert_eq!(cfg.kdialog_missing.lines().count(), 2);
     }
 
+    /// 同梱言語の `interval_labels` は `tray::INTERVAL_PRESETS` と同じ 6 件。
     #[test]
     fn interval_labels_length_matches() {
-        // tray::INTERVAL_PRESETS は 6 件。全言語で一致していることを確認。
-        for entry in registry() {
+        for entry in bundled_only() {
             assert_eq!(
                 entry.strings.interval_labels.len(),
                 6,
@@ -514,11 +538,26 @@ mod tests {
         }
     }
 
+    /// 件数の違う `interval_labels` は翻訳ミスとして英語に戻す。
+    /// 受け入れるとトレイの選択時に範囲外アクセスになる。
+    #[test]
+    fn wrong_length_interval_labels_falls_back_to_english() {
+        let user = tempfile::tempdir().unwrap();
+        write_lang(
+            user.path(),
+            "fr",
+            "[tray]\ninterval_labels = [\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\"]\n",
+        );
+        let reg = build_registry_from(&[user.path().to_path_buf()]);
+        assert_eq!(find(&reg, "fr").strings.interval_labels, EN.interval_labels);
+    }
+
     #[test]
     fn english_is_always_first_and_default() {
-        assert_eq!(registry()[0].id, "en");
-        assert_eq!(Lang::default().code(), "en");
-        assert_eq!(strings(Lang::default()).quit, "Quit");
+        assert_eq!(bundled_only()[0].id, "en");
+        assert_eq!(bundled_only()[0].strings.quit, "Quit");
+        // Lang::default() はレジストリの中身に依らず先頭を指す
+        assert_eq!(Lang::default(), Lang(0));
     }
 
     /// 全ての登録言語が言語ドロップダウンに出ること。
@@ -528,7 +567,7 @@ mod tests {
     /// 選択肢から消えるという不具合が実際に起きたのでテストで固定する。
     #[test]
     fn all_languages_are_gui_visible_by_default() {
-        for entry in registry() {
+        for entry in bundled_only() {
             assert!(
                 entry.gui_visible,
                 "{}: gui_visible should default to true",
@@ -539,24 +578,24 @@ mod tests {
 
     #[test]
     fn from_code_resolves_and_falls_back() {
-        assert_eq!(Lang::from_code("en").code(), "en");
-        assert_eq!(Lang::from_code("EN").code(), "en");
-        assert_eq!(Lang::from_code(" ja ").code(), "ja");
-        assert_eq!(Lang::from_code("JA").code(), "ja");
-        // 未知・空文字は英語へ
-        assert_eq!(Lang::from_code("").code(), "en");
-        assert_eq!(Lang::from_code("xx").code(), "en");
+        let reg = bundled_only();
+        let code = |s: &str| reg[resolve_code(&reg, s)].id;
+        assert_eq!(code("en"), "en");
+        assert_eq!(code("EN"), "en");
+        assert_eq!(code(" ja "), "ja");
+        assert_eq!(code("JA"), "ja");
+        // 未知・空文字は英語（先頭）へ
+        assert_eq!(code(""), "en");
+        assert_eq!(code("xx"), "en");
     }
 
     #[test]
     fn bundled_ja_is_registered() {
-        let ja = Lang::from_code("ja");
-        assert_eq!(strings(ja).quit, "終了");
-        assert_eq!(config_strings(ja).saved, "設定を保存しました");
-        assert_eq!(
-            registry().iter().find(|e| e.id == "ja").unwrap().display_name,
-            "日本語"
-        );
+        let reg = bundled_only();
+        let ja = find(&reg, "ja");
+        assert_eq!(ja.strings.quit, "終了");
+        assert_eq!(ja.config.saved, "設定を保存しました");
+        assert_eq!(ja.display_name, "日本語");
     }
 
     /// 未記載のキーが英語で埋まることを確認する（部分翻訳の許容）。
@@ -582,6 +621,15 @@ mod tests {
         let e = make_entry("de", f, &EN, &EN_CONFIG);
         assert_eq!(e.display_name, "de");
         assert!(e.gui_visible, "gui_visible の既定は true");
+    }
+
+    /// 同梱分だけのレジストリ（ホスト上の言語ファイルを見ない）。
+    ///
+    /// `registry()` はグローバルかつ探索パス（`$HOME` や
+    /// `/usr/share/kabekami/i18n`）を読むため、そのままテストで内容を
+    /// 断定すると実行環境に左右される。内容の検証はこちらを使う。
+    fn bundled_only() -> Vec<LangEntry> {
+        build_registry_from(&[])
     }
 
     /// テスト用に言語ファイルを書き出す。
@@ -683,14 +731,24 @@ mod tests {
         assert!(reg.iter().any(|e| e.id == "ja"), "同梱の日本語は残る");
     }
 
-    /// `from_code` で引いた `Lang` が、その言語のテーブルを指すこと。
+    /// `resolve_code` が各エントリを自分自身の位置に解決すること。
     #[test]
     fn lookup_by_code_returns_that_entry() {
-        for entry in registry() {
-            let lang = Lang::from_code(entry.id);
-            assert_eq!(lang.code(), entry.id);
-            assert_eq!(strings(lang) as *const _, entry.strings as *const _);
-            assert_eq!(config_strings(lang) as *const _, entry.config as *const _);
+        let reg = bundled_only();
+        for (i, entry) in reg.iter().enumerate() {
+            assert_eq!(resolve_code(&reg, entry.id), i, "{}", entry.id);
         }
+    }
+
+    /// グローバルの `registry()` に対する最小限の健全性確認。
+    ///
+    /// ホスト上の言語ファイルを拾うため、内容に踏み込んだ断定はしない
+    /// （AUR の check() は利用者の環境で cargo test を走らせるので、
+    /// ここでホスト状態に依存すると他人のパッケージ更新を壊す）。
+    #[test]
+    fn global_registry_is_usable() {
+        assert_eq!(registry()[0].id, "en", "先頭は必ず英語");
+        assert_eq!(Lang::default().code(), "en");
+        assert!(registry().iter().any(|e| e.id == "ja"), "同梱の日本語が居る");
     }
 }

@@ -140,13 +140,11 @@ async fn main() -> Result<()> {
             }
         };
 
-    // 言語テーブルの初回構築は言語ファイルの探索（read_dir + 読み込み + パース）を
-    // 伴う同期 I/O のため `spawn_blocking` へ逃がす。`worker_threads = 1` なので、
-    // ここで直接読むとホームディレクトリが低速な環境（ネットワーク FS 等）で
-    // トレイ・D-Bus の初期化が待たされる。以降は OnceLock のキャッシュを返すだけ。
-    let _ = tokio::task::spawn_blocking(kabekami_common::i18n::registry).await;
-
     // 言語設定を解決する（環境変数 → config → デフォルト ja）
+    // 初回呼び出しで言語ファイルの探索（同期 I/O）が走るが、この時点では
+    // トレイも D-Bus もまだ起動しておらず待たせる相手が居ないため、
+    // spawn_blocking へ逃がす意味は無い（直前の画像スキャンや Config::load も
+    // 同様に同期のままである）。
     let mut lang = resolve_lang(&config);
     tracing::info!("ui language: {:?}", lang);
 
@@ -577,13 +575,20 @@ async fn main() -> Result<()> {
                                 // rebuild 後の current を使う。新しいソースから外れた画像や
                                 // ブラックリスト入りした画像は rebuild で current から落ちるため、
                                 // ここで拾わないことで「除外したはずの画像が再適用される」のを防ぐ。
-                                // current が落ちた場合は state に残る旧画像も消す必要がある。
-                                // persist は内容が変わらなければ書き込みを省くので、
-                                // 再適用する場合に重ねて呼んでも余計な I/O は発生しない。
-                                let cur = scheduler.current().cloned();
-                                state_writer.persist(scheduler.is_paused(), cur.as_deref()).await;
-                                if let Some(cur) = cur {
-                                    apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
+                                match scheduler.current().cloned() {
+                                    // 再適用が成功した場合だけ apply_and_notify 内で
+                                    // state に記録される。ここで先に persist すると、
+                                    // 適用に失敗した壁紙を「現在の壁紙」として
+                                    // 保存してしまい、再起動後にトレイやゴミ箱操作が
+                                    // 画面に出ていない画像を指す（分岐を畳まないこと）。
+                                    Some(cur) => {
+                                        apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
+                                    }
+                                    // current が落ちた場合は apply_and_notify を通らないので、
+                                    // state に残る旧画像を明示的に消す。
+                                    None => {
+                                        state_writer.persist(scheduler.is_paused(), None).await;
+                                    }
                                 }
 
                                 if let Some(ref h) = tray_handle {
