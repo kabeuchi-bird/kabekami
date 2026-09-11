@@ -1,42 +1,27 @@
 //! UI 文字列の国際化（i18n）サポート。
 //!
-//! ## 言語の追加方法
+//! 言語ファイルの置き場所・優先順位・書き方は README の「表示言語の追加」を
+//! 参照（利用者向けの説明はそちらが正）。ここでは実装側の要点だけ述べる。
 //!
-//! `crates/kabekami-common/i18n/ja.toml` をコピーし、言語コードのファイル名
-//! （例: `fr.toml`）で下記のいずれかに置くだけです。**再ビルドは不要**で、
-//! 設定 GUI の言語ドロップダウンにも自動で並びます。
+//! ## 構成
 //!
-//! | 置き場所 | 用途 | 優先度 |
-//! |---|---|---|
-//! | （バイナリ埋め込み） | 同梱の `ja.toml` | 最低 |
-//! | `/usr/share/kabekami/i18n/` | システム全体 | ↓ |
-//! | `~/.config/kabekami/i18n/` | ユーザー個別 | ↓ |
-//! | `$KABEKAMI_I18N_DIR` | 開発・テスト用の上書き | 最高 |
+//! - `UiStrings`: デーモン（トレイ・通知）用 → TOML の `[tray]`
+//! - `ConfigStrings`: 設定 GUI 用 → TOML の `[config]`
 //!
-//! 同じ言語コードが複数の層にある場合、**置き換えではなく重ね合わせ**になります。
-//! 優先度の高いファイルに書かれたキーだけが上書きされ、書かれていないキーは
-//! 下の層の値がそのまま残ります。そのためユーザーは気に入らない訳語だけを
-//! 数行のファイルで差し替えられ、残りは同梱の翻訳（とその更新）に追従します。
-//!
-//! `ja.toml` はバイナリに埋め込まれているため、ファイルを 1 つも設置しなくても
-//! 日本語は利用できます。
-//!
-//! 読み込みはプロセスごとに 1 回だけ（`registry()` の `OnceLock`）です。
-//! `config.toml` と違い言語ファイルはホットリロードされないため、追加・編集後は
-//! プロセスの再起動が必要です。
-//!
-//! ## 2 つの文字列テーブル
-//!
-//! - `UiStrings`: デーモン（トレイメニュー・通知）が使う文字列 → TOML の `[tray]`
-//! - `ConfigStrings`: 設定 GUI が使う文字列 → TOML の `[config]`
+//! どちらも `string_table!` が「フィールド名 = 英語の文言」の一覧から生成する。
+//! UI 文字列を足すときはその一覧に 1 行書けばよい。
 //!
 //! ## 英語だけが Rust 側にある理由
 //!
-//! 英語テーブルは「必ず完全な」フォールバック先である必要があるため、TOML では
-//! なく Rust の `static` として持っています。こうするとフィールドを追加した時点で
-//! 英語の文言を書かないとコンパイルが通らず、翻訳の基準が実行時に欠けることが
-//! 構造的に起こりません。他の言語は未記載のキーが英語で埋まるため、部分的な
-//! 翻訳ファイルでも問題なく動作します。
+//! 英語は「必ず完全な」フォールバック先である必要があるため、TOML ではなく
+//! `static` として持つ。フィールドを足した時点で英語の文言を書かないと
+//! コンパイルが通らないので、基準が実行時に欠けることが構造的に起こらない。
+//! 他の言語は未記載のキーが英語で埋まるため、部分的な翻訳でも動作する。
+//!
+//! ## 読み込みのタイミング
+//!
+//! `registry()` の `OnceLock` でプロセスごとに 1 回だけ。`config.toml` と違い
+//! ホットリロードしないため、言語ファイルの追加・編集には再起動が要る。
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -46,32 +31,32 @@ use serde::Deserialize;
 
 // ── 文字列テーブルの定義マクロ ────────────────────────────────────────────────
 
-/// 文字列テーブルの構造体・TOML 読み込み用の中間表現・英語へのマージ処理を
-/// 1 つのフィールド一覧からまとめて生成する。
+/// 文字列テーブルを「フィールド名 = 英語の文言」の一覧 1 つから生成する。
 ///
-/// UI 文字列を追加するときはここのフィールド一覧に 1 行足し、英語テーブルに
-/// 文言を書けばよい（後者を忘れるとコンパイルエラーになる）。
+/// 生成物は 4 つ: テーブル構造体、英語の `static`、TOML 読み込み用の中間表現、
+/// そして重ね合わせ／マージ処理。UI 文字列を追加するときはこの一覧に 1 行
+/// 足すだけでよく、英語の文言を書き忘れればコンパイルエラーになる。
 macro_rules! string_table {
     // リスト型のフィールドを持たないテーブル用。
     (
         $(#[$smeta:meta])*
-        $name:ident / $raw:ident {
-            $( $(#[$fmeta:meta])* $field:ident ),* $(,)?
+        $name:ident / $raw:ident / $en:ident {
+            $( $(#[$fmeta:meta])* $field:ident = $fdefault:expr ),* $(,)?
         }
     ) => {
         string_table! {
             $(#[$smeta])*
-            $name / $raw { $( $(#[$fmeta])* $field ),* }
+            $name / $raw / $en { $( $(#[$fmeta])* $field = $fdefault ),* }
             lists { }
         }
     };
     (
         $(#[$smeta:meta])*
-        $name:ident / $raw:ident {
-            $( $(#[$fmeta:meta])* $field:ident ),* $(,)?
+        $name:ident / $raw:ident / $en:ident {
+            $( $(#[$fmeta:meta])* $field:ident = $fdefault:expr ),* $(,)?
         }
         lists {
-            $( $(#[$lmeta:meta])* $lfield:ident ),* $(,)?
+            $( $(#[$lmeta:meta])* $lfield:ident = $ldefault:expr ),* $(,)?
         }
     ) => {
         $(#[$smeta])*
@@ -79,6 +64,12 @@ macro_rules! string_table {
             $( $(#[$fmeta])* pub $field: &'static str, )*
             $( $(#[$lmeta])* pub $lfield: &'static [&'static str], )*
         }
+
+        /// 英語テーブル。フォールバックの基準であり、必ず全フィールドが埋まる。
+        pub static $en: $name = $name {
+            $( $field: $fdefault, )*
+            $( $lfield: $ldefault, )*
+        };
 
         /// TOML から読み込むための中間表現。
         /// 省略されたキーは英語へフォールバックするため全て `Option`。
@@ -124,35 +115,35 @@ macro_rules! string_table {
 
 string_table! {
     /// トレイメニュー・通知で使用する UI 文字列の集合（TOML の `[tray]`）。
-    UiStrings / RawUiStrings {
-        next_wallpaper,
-        prev_wallpaper,
-        pause,
-        resume,
-        display_mode,
-        interval,
-        open_current,
-        delete_current,
-        blacklist_current,
-        copy_to_favorites,
-        quit,
-        open_settings,
+    UiStrings / RawUiStrings / EN {
+        next_wallpaper = "Next Wallpaper",
+        prev_wallpaper = "Previous Wallpaper",
+        pause = "Pause",
+        resume = "Resume",
+        display_mode = "Display Mode",
+        interval = "Rotation Interval",
+        open_current = "Open Current Wallpaper",
+        delete_current = "Move to Trash",
+        blacklist_current = "Never Show Again",
+        copy_to_favorites = "Copy to Favorites",
+        quit = "Quit",
+        open_settings = "Open Settings",
         /// 画像枚数の単位（`"images"` / `"枚"`）
-        images,
+        images = "images",
         /// `{}` = ファイル名
-        tooltip_current,
+        tooltip_current = "Current: {}",
         /// `{}` = エラー本文
-        tooltip_error,
-        notify_failed,
-        notify_warning,
+        tooltip_error = "Error: {}",
+        notify_failed = "Wallpaper apply failed",
+        notify_warning = "kabekami Warning",
         /// オンライン取得サマリー通知のヘッダー
-        notify_fetch_title,
+        notify_fetch_title = "Online sources",
         /// 置換トークン: `{provider}` = プロバイダー名, `{count}` = 取得枚数
-        notify_fetch_body,
+        notify_fetch_body = "Downloaded {count} image(s) from {provider}",
     }
     lists {
         /// `tray::INTERVAL_PRESETS` と同じ順序・件数（6 件）であること
-        interval_labels,
+        interval_labels = &["10s", "30s", "5m", "30m", "1h", "3h"],
     }
 }
 
@@ -160,85 +151,85 @@ string_table! {
     /// 設定 GUI（kabekami-config）で使用する UI 文字列の集合（TOML の `[config]`）。
     ///
     /// フィールドはタブ構成に沿って並べてあり、TOML 側のコメント区切りと対応する。
-    ConfigStrings / RawConfigStrings {
+    ConfigStrings / RawConfigStrings / EN_CONFIG {
         // ダイアログ・共通ボタン
-        dialog_select_folder,
-        dialog_select_image,
-        browse,
+        dialog_select_folder = "Select folder",
+        dialog_select_image = "Select image",
+        browse = "📁 Browse…",
         /// kdialog 不在時のツールチップ（`\n` を含む複数行）
-        kdialog_missing,
-        save_button,
-        add,
+        kdialog_missing = "kdialog is not installed.\nType the path manually.",
+        save_button = "💾  Save",
+        add = "Add",
 
         // ステータス表示
-        saved,
-        save_failed,
-        preview_error,
+        saved = "Config saved.",
+        save_failed = "Save failed",
+        preview_error = "Preview error",
 
         // タブ見出し
-        tab_sources,
-        tab_online,
-        tab_rotation,
-        tab_display,
-        tab_cache,
-        tab_ui,
+        tab_sources = "Sources",
+        tab_online = "Online",
+        tab_rotation = "Rotation",
+        tab_display = "Display",
+        tab_cache = "Cache",
+        tab_ui = "UI",
 
         // ソースタブ
-        sources_heading,
-        recursive,
-        favorites_dir,
-        favorites_hint,
-        directories,
+        sources_heading = "Sources",
+        recursive = "Recursive",
+        favorites_dir = "Favorites directory:",
+        favorites_hint = "~/Pictures/Favorites (empty=disabled)",
+        directories = "Directories:",
 
         // ローテーションタブ
-        rotation_heading,
-        interval_secs,
-        order,
-        order_random,
-        order_sequential,
-        change_on_start,
-        prefetch,
+        rotation_heading = "Rotation",
+        interval_secs = "Interval (sec):",
+        order = "Order:",
+        order_random = "Random",
+        order_sequential = "Sequential",
+        change_on_start = "Change on start",
+        prefetch = "Prefetch next wallpaper",
 
         // 表示タブ
-        display_heading,
-        mode_blurpad,
-        mode_smart,
-        mode_fill,
-        mode_fit,
-        mode_stretch,
-        blur_sigma,
-        bg_darken,
-        preview_image,
-        preview_button,
+        display_heading = "Display",
+        mode_blurpad = "BlurPad (blur background + foreground)",
+        mode_smart = "Smart (auto by aspect ratio)",
+        mode_fill = "Fill (crop)",
+        mode_fit = "Fit (letterbox)",
+        mode_stretch = "Stretch",
+        blur_sigma = "Blur sigma:",
+        bg_darken = "BG darken:",
+        preview_image = "Preview image:",
+        preview_button = "▶ Preview",
 
         // キャッシュタブ
-        cache_heading,
-        cache_directory,
-        max_size_mb,
-        unlimited_hint,
-        refresh,
-        clear_cache,
-        current_size_unknown,
-        current_size,
-        unlimited,
+        cache_heading = "Cache",
+        cache_directory = "Directory:",
+        max_size_mb = "Max size (MB):",
+        unlimited_hint = "0 = unlimited",
+        refresh = "Refresh",
+        clear_cache = "Clear Cache",
+        current_size_unknown = "Current size: (click Refresh)",
+        current_size = "Current size",
+        unlimited = "unlimited",
 
         // オンラインタブ
-        online_heading,
-        online_desc,
-        remove,
-        count,
-        interval_hours,
-        download_dir,
-        add_provider,
-        add_provider_button,
-        download_dir_hint,
+        online_heading = "Online Sources",
+        online_desc = "Automatically fetch wallpapers from the internet.",
+        remove = "✖  Remove",
+        count = "Count:",
+        interval_hours = "Interval (h, 0=default):",
+        download_dir = "Download dir:",
+        add_provider = "Add provider:",
+        add_provider_button = "Add",
+        download_dir_hint = "💡 Download dir: ~/.local/share/kabekami/<provider>/",
 
         // UI タブ
-        ui_heading,
-        language,
-        warn_notify,
-        notify_fetch,
-        enable_blacklist,
+        ui_heading = "UI Settings",
+        language = "Language:",
+        warn_notify = "Show warnings as desktop notifications",
+        notify_fetch = "Notify when online sources finish fetching",
+        enable_blacklist = "Enable \"Never Show Again\" blacklist",
     }
 }
 
@@ -475,102 +466,6 @@ fn make_entry(
         config: Box::leak(Box::new(file.config.merge(base_cfg))),
     }
 }
-
-// ── 英語（フォールバックの基準となる完全なテーブル） ──────────────────────────
-
-pub static EN: UiStrings = UiStrings {
-    next_wallpaper:     "Next Wallpaper",
-    prev_wallpaper:     "Previous Wallpaper",
-    pause:              "Pause",
-    resume:             "Resume",
-    display_mode:       "Display Mode",
-    interval:           "Rotation Interval",
-    open_current:       "Open Current Wallpaper",
-    delete_current:     "Move to Trash",
-    blacklist_current:  "Never Show Again",
-    copy_to_favorites:  "Copy to Favorites",
-    quit:               "Quit",
-    open_settings:      "Open Settings",
-    images:             "images",
-    tooltip_current:    "Current: {}",
-    tooltip_error:      "Error: {}",
-    notify_failed:      "Wallpaper apply failed",
-    notify_warning:     "kabekami Warning",
-    notify_fetch_title: "Online sources",
-    notify_fetch_body:  "Downloaded {count} image(s) from {provider}",
-    interval_labels:    &["10s", "30s", "5m", "30m", "1h", "3h"],
-};
-
-pub static EN_CONFIG: ConfigStrings = ConfigStrings {
-    dialog_select_folder: "Select folder",
-    dialog_select_image:  "Select image",
-    browse:               "📁 Browse…",
-    kdialog_missing:      "kdialog is not installed.\nType the path manually.",
-    save_button:          "💾  Save",
-    add:                  "Add",
-
-    saved:                "Config saved.",
-    save_failed:          "Save failed",
-    preview_error:        "Preview error",
-
-    tab_sources:          "Sources",
-    tab_online:           "Online",
-    tab_rotation:         "Rotation",
-    tab_display:          "Display",
-    tab_cache:            "Cache",
-    tab_ui:               "UI",
-
-    sources_heading:      "Sources",
-    recursive:            "Recursive",
-    favorites_dir:        "Favorites directory:",
-    favorites_hint:       "~/Pictures/Favorites (empty=disabled)",
-    directories:          "Directories:",
-
-    rotation_heading:     "Rotation",
-    interval_secs:        "Interval (sec):",
-    order:                "Order:",
-    order_random:         "Random",
-    order_sequential:     "Sequential",
-    change_on_start:      "Change on start",
-    prefetch:             "Prefetch next wallpaper",
-
-    display_heading:      "Display",
-    mode_blurpad:         "BlurPad (blur background + foreground)",
-    mode_smart:           "Smart (auto by aspect ratio)",
-    mode_fill:            "Fill (crop)",
-    mode_fit:             "Fit (letterbox)",
-    mode_stretch:         "Stretch",
-    blur_sigma:           "Blur sigma:",
-    bg_darken:            "BG darken:",
-    preview_image:        "Preview image:",
-    preview_button:       "▶ Preview",
-
-    cache_heading:        "Cache",
-    cache_directory:      "Directory:",
-    max_size_mb:          "Max size (MB):",
-    unlimited_hint:       "0 = unlimited",
-    refresh:              "Refresh",
-    clear_cache:          "Clear Cache",
-    current_size_unknown: "Current size: (click Refresh)",
-    current_size:         "Current size",
-    unlimited:            "unlimited",
-
-    online_heading:       "Online Sources",
-    online_desc:          "Automatically fetch wallpapers from the internet.",
-    remove:               "✖  Remove",
-    count:                "Count:",
-    interval_hours:       "Interval (h, 0=default):",
-    download_dir:         "Download dir:",
-    add_provider:         "Add provider:",
-    add_provider_button:  "Add",
-    download_dir_hint:    "💡 Download dir: ~/.local/share/kabekami/<provider>/",
-
-    ui_heading:           "UI Settings",
-    language:             "Language:",
-    warn_notify:          "Show warnings as desktop notifications",
-    notify_fetch:         "Notify when online sources finish fetching",
-    enable_blacklist:     "Enable \"Never Show Again\" blacklist",
-};
 
 // ── テスト ────────────────────────────────────────────────────────────────────
 
