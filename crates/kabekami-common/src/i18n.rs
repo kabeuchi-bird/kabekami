@@ -223,6 +223,19 @@ string_table! {
         add_provider = "Add provider:",
         add_provider_button = "Add",
         download_dir_hint = "💡 Download dir: ~/.local/share/kabekami/<provider>/",
+        api_key = "API Key:",
+        query = "Query:",
+        subreddit = "Subreddit:",
+        locale = "Locale:",
+        quality = "Quality:",
+        /// `{}` = プロバイダー既定の再取得間隔（時間）
+        interval_default_hint = "(default: {}h)",
+        /// 設定値が未指定のときに選択欄へ出す表示。既定値を示す注記にも流用する
+        default_option = "(default)",
+        /// `ui.language` が登録済みのどの言語にも一致しないときの表示
+        unknown_language = "(unknown)",
+        /// 画像ファイル選択ダイアログのフィルター名。拡張子リストはコード側が付ける
+        image_filter_label = "Images",
 
         // UI タブ
         ui_heading = "UI Settings",
@@ -246,6 +259,8 @@ fn leak_str(v: Option<String>, fallback: &'static str) -> &'static str {
     }
 }
 
+/// 文字列リストを `'static` に昇格させる。未指定なら `fallback` をそのまま返す。
+/// `leak_str` と同じ理由でリークさせている（言語テーブルはプロセスと同寿命）。
 fn leak_list(v: Option<Vec<String>>, fallback: &'static [&'static str]) -> &'static [&'static str] {
     match v {
         Some(list) => {
@@ -296,6 +311,7 @@ impl Lang {
         self.entry().id
     }
 
+    /// 対応する登録エントリ。範囲外なら英語（`registry()` の先頭）に倒す。
     fn entry(self) -> &'static LangEntry {
         // インデックスは registry() から得たものしか存在しないが、
         // 念のため範囲外は英語に倒す。
@@ -324,10 +340,22 @@ pub struct LangEntry {
 /// グローバル（＝ホスト上の言語ファイルに左右される）を経由せずに
 /// 解決ロジックを検証できるようにするため。
 fn resolve_code(reg: &[LangEntry], code: &str) -> usize {
-    let trimmed = code.trim();
-    reg.iter()
-        .position(|e| e.id.eq_ignore_ascii_case(trimmed))
-        .unwrap_or(0)
+    reg.iter().position(|e| code_matches(e, code)).unwrap_or(0)
+}
+
+/// 言語コードの照合規則。前後の空白を無視し、大文字小文字を区別しない。
+/// `Lang::from_code` と `lookup_code` で同じ規則を使うため 1 箇所に置く。
+fn code_matches(entry: &LangEntry, code: &str) -> bool {
+    entry.id.eq_ignore_ascii_case(code.trim())
+}
+
+/// 言語コードから登録エントリを引く。`Lang::from_code` と同じ照合規則だが、
+/// 一致するものが無ければ英語に倒さず `None` を返す。
+///
+/// `Lang::from_code` は未知のコードを英語として扱うため、設定画面で
+/// 「設定値が認識されているか」を区別するにはこちらを使う。
+pub fn lookup_code(code: &str) -> Option<&'static LangEntry> {
+    registry().iter().find(|e| code_matches(e, code))
 }
 
 /// 登録済み言語の一覧。先頭は必ず英語。
@@ -397,6 +425,7 @@ fn search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// 既定の探索パスでレジストリを構築する。`registry()` から一度だけ呼ばれる。
 fn build_registry() -> Vec<LangEntry> {
     build_registry_from(&search_dirs())
 }
@@ -457,6 +486,11 @@ fn load_dir(dir: &std::path::Path, out: &mut BTreeMap<String, LangFile>) {
     }
 }
 
+/// 読み込んだ言語ファイルを 1 つの登録エントリに変換する。
+///
+/// 書かれていないキーは `base_ui` / `base_cfg` から埋める（部分翻訳を許すため）。
+/// `interval_labels` は件数が `tray::INTERVAL_PRESETS` と一致しないと
+/// メニュー描画で添字が溢れるため、ここで検証して英語に倒す。
 fn make_entry(
     id: &str,
     file: LangFile,
@@ -587,6 +621,31 @@ mod tests {
         // 未知・空文字は英語（先頭）へ
         assert_eq!(code(""), "en");
         assert_eq!(code("xx"), "en");
+    }
+
+    /// 設定画面は選択中の言語名を `lookup_code` で引く。`Lang::from_code` が
+    /// 正規化して受け付けるコードはこちらでも同じ言語に解決されないといけない。
+    /// ずれると `ui.language = "JA"` のとき GUI は日本語なのに言語欄だけ
+    /// 「不明」になる（実際にそうなっていた）。
+    #[test]
+    fn lookup_code_agrees_with_from_code_normalization() {
+        // GUI が実際に呼ぶ公開 API を通す。日本語は埋め込み済みなので、
+        // 利用者が言語ファイルを追加していてもこの判定は変わらない。
+        for code in ["ja", "JA", "Ja", " ja ", "\tja\n"] {
+            let hit = lookup_code(code)
+                .unwrap_or_else(|| panic!("lookup_code({code:?}) が解決できていない"));
+            assert_eq!(hit.id, "ja", "code {code:?}");
+            assert_eq!(hit.id, Lang::from_code(code).code(), "code {code:?}");
+        }
+    }
+
+    /// 未登録のコードは英語に倒さず該当なしを返す。`from_code` は英語へ倒すので、
+    /// 設定画面が「認識できない設定値」を区別できるのはこの差による。
+    #[test]
+    fn lookup_code_has_no_match_for_unregistered_code() {
+        let reg = bundled_only();
+        assert!(reg.iter().all(|e| !code_matches(e, "xx")));
+        assert_eq!(reg[resolve_code(&reg, "xx")].id, "en");
     }
 
     #[test]

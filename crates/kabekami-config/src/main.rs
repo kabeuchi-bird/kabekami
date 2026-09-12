@@ -109,12 +109,14 @@ fn pick_folder(s: &'static ConfigStrings, start: Option<&std::path::Path>) -> Op
 /// kdialog `--getopenfilename` で画像ファイル選択ダイアログを開く。
 fn pick_image_file(s: &'static ConfigStrings, start: Option<&std::path::Path>) -> Option<PathBuf> {
     let start_dir = pick_start_dir(start);
+    let image_filter = format!("{} (*.jpg *.jpeg *.png *.webp *.avif)", s.image_filter_label);
     kdialog_run(&[
         "--title".as_ref(),
         s.dialog_select_image.as_ref(),
         "--getopenfilename".as_ref(),
         start_dir.as_os_str(),
-        "Images (*.jpg *.jpeg *.png *.webp *.avif)".as_ref(),
+        // 拡張子リストは kdialog の構文なので訳さず、名前だけ差し替える
+        image_filter.as_ref(),
     ])
 }
 
@@ -712,22 +714,25 @@ impl KabekamiApp {
 
                 ui.indent(format!("online_{}", i), |ui| {
                     if matches!(oc.provider, ProviderKind::Unsplash | ProviderKind::Wallhaven) {
-                        opt_text_field(ui, "API Key:", "", 300.0, true, &mut oc.api_key);
-                        opt_text_field(ui, "Query:", "nature", 200.0, false, &mut oc.query);
+                        opt_text_field(ui, s.api_key, "", 300.0, true, &mut oc.api_key);
+                        opt_text_field(ui, s.query, "nature", 200.0, false, &mut oc.query);
                     }
                     if oc.provider == ProviderKind::Reddit {
-                        opt_text_field(ui, "Subreddit:", "wallpapers", 200.0, false, &mut oc.subreddit);
+                        opt_text_field(ui, s.subreddit, "wallpapers", 200.0, false, &mut oc.subreddit);
                     }
                     // Bing: ロケール
                     if oc.provider == ProviderKind::Bing {
-                        opt_text_field(ui, "Locale:", "en-US (default)", 150.0, false, &mut oc.locale);
+                        let locale_hint = format!("en-US {}", s.default_option);
+                        opt_text_field(ui, s.locale, &locale_hint, 150.0, false, &mut oc.locale);
                     }
                     // Unsplash: 画質
                     if oc.provider == ProviderKind::Unsplash {
                         ui.horizontal(|ui| {
-                            ui.label("Quality:");
+                            ui.label(s.quality);
                             let mut q = oc.quality.clone().unwrap_or_else(|| "regular".to_string());
-                            ui.radio_value(&mut q, "regular".to_string(), "regular (default)");
+                            // "regular" / "full" は Unsplash API の値そのものなので訳さない
+                            let regular_label = format!("regular {}", s.default_option);
+                            ui.radio_value(&mut q, "regular".to_string(), regular_label);
                             ui.radio_value(&mut q, "full".to_string(), "full");
                             oc.quality = if q == "regular" { None } else { Some(q) };
                         });
@@ -742,7 +747,10 @@ impl KabekamiApp {
                         ui.label(s.interval_hours);
                         let mut hours = oc.interval_hours.unwrap_or(0);
                         let resp = ui.add(egui::DragValue::new(&mut hours).range(0..=8760));
-                        ui.label(format!("(default: {}h)", oc.provider.default_interval_hours()));
+                        ui.label(
+                            s.interval_default_hint
+                                .replace("{}", &oc.provider.default_interval_hours().to_string()),
+                        );
                         if resp.changed() {
                             oc.interval_hours = if hours == 0 { None } else { Some(hours) };
                         }
@@ -821,19 +829,20 @@ impl KabekamiApp {
         ui.separator();
 
         ui.label(s.language);
+        // `Lang::from_code` と同じ照合規則で引く。完全一致で引くと
+        // `ui.language = "JA"` のとき GUI は日本語なのに表示だけ
+        // 「不明」になってしまう。
         let selected_label = if self.config.ui.language.is_empty() {
-            "(default)"
+            s.default_option
         } else {
-            kabekami_common::i18n::registry()
-                .iter()
-                .find(|e| e.id == self.config.ui.language.as_str())
+            kabekami_common::i18n::lookup_code(&self.config.ui.language)
                 .map(|e| e.display_name)
-                .unwrap_or("(unknown)")
+                .unwrap_or(s.unknown_language)
         };
         egui::ComboBox::from_id_salt("language")
             .selected_text(selected_label)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.config.ui.language, String::new(), "(default)");
+                ui.selectable_value(&mut self.config.ui.language, String::new(), s.default_option);
                 for entry in kabekami_common::i18n::registry().iter().filter(|e| e.gui_visible) {
                     ui.selectable_value(
                         &mut self.config.ui.language,

@@ -113,6 +113,17 @@ download_dir        = "ダウンロード先"
 add_provider        = "プロバイダーを追加"
 add_provider_button = "＋ 追加"
 download_dir_hint   = "💡 ダウンロード先: ~/.local/share/kabekami/<provider>/"
+api_key             = "API キー"
+query               = "検索クエリ"
+subreddit           = "サブレディット"
+locale              = "ロケール"
+quality             = "画質"
+# {} にはプロバイダー既定の再取得間隔（時間）が入る
+interval_default_hint = "(既定: {} 時間)"
+default_option      = "(既定)"
+unknown_language    = "(不明)"
+# 画像ファイル選択ダイアログのフィルター名。拡張子リストはコード側が付ける
+image_filter_label  = "画像"
 
 # UI タブ
 ui_heading       = "UI 設定"
