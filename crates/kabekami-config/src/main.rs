@@ -761,7 +761,10 @@ impl KabekamiApp {
                         let mut dir_str = oc.download_dir.as_deref()
                             .map(|p| p.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        let hint = format!("~/.local/share/kabekami/{} (default)", oc.provider);
+                        let hint = format!(
+                            "~/.local/share/kabekami/{} {}",
+                            oc.provider, s.default_option
+                        );
                         if ui.add(
                             egui::TextEdit::singleline(&mut dir_str)
                                 .hint_text(hint)
