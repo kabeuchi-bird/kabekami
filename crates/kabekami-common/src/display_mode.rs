@@ -117,9 +117,15 @@ mod tests {
         assert!(out != fill(&src, 384, 216), "fill と一致してしまうと判定を検証できていない");
     }
 
+    /// どのモードでも画面ぴったりの寸法を返すこと。
+    ///
+    /// 4:3 (1.333) を 16:9 (1.778) に出すので、Smart は差 0.444 で
+    /// BlurPad 側に入る。寸法の正しさは解像度に依存しないため、
+    /// BlurPad のぼかしが軽く済む小さい画面で検証する。
     #[test]
     fn all_modes_produce_correct_dimensions() {
-        let src = solid(800, 600);
+        const SCREEN: (u32, u32) = (384, 216);
+        let src = solid(160, 120);
         for mode in [
             DisplayMode::Fill,
             DisplayMode::Fit,
@@ -127,10 +133,10 @@ mod tests {
             DisplayMode::BlurPad,
             DisplayMode::Smart,
         ] {
-            let out = process(&src, 1920, 1080, mode, 10.0, 0.1);
+            let out = process(&src, SCREEN.0, SCREEN.1, mode, 10.0, 0.1);
             assert_eq!(
                 out.dimensions(),
-                (1920, 1080),
+                SCREEN,
                 "mode {:?} produced wrong dimensions",
                 mode
             );
