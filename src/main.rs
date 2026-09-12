@@ -104,8 +104,6 @@ struct Daemon {
     online_rx: tokio::sync::mpsc::UnboundedReceiver<provider::FetchResult>,
     /// HTTP クライアントの初期化に失敗した環境では `None`（オンライン取得を諦める）。
     online_client: Option<reqwest::Client>,
-    /// フェッチタスクと共有するため `Mutex`。`ReloadConfig` で差し替える。
-    online_configs: Arc<std::sync::Mutex<Vec<crate::config::OnlineSourceConfig>>>,
     fetch_in_progress: Arc<AtomicBool>,
     fetch_ticker: tokio::time::Interval,
 
@@ -137,12 +135,10 @@ impl Daemon {
         let blacklist = blacklist::Blacklist::load(&config_dir)
             .context("failed to load blacklist")?;
 
-        let images = build_filtered_images_list(
-            &collect_source_dirs(&config),
-            config.sources.recursive,
-            &blacklist,
-        )
-        .context("failed to scan source directories")?;
+        // スキャン対象と監視対象は同一。1 つの一覧を両方で使う。
+        let source_dirs = collect_source_dirs(&config);
+        let images = build_filtered_images_list(&source_dirs, config.sources.recursive, &blacklist)
+            .context("failed to scan source directories")?;
         let has_online = config.online_sources.iter().any(|s| s.enabled);
         if images.is_empty() {
             if has_online {
@@ -184,7 +180,7 @@ impl Daemon {
         let state_writer = state::StateWriter::new(config_dir, daemon_state);
 
         // ディレクトリ監視を起動（環境によっては unavailable のため Option）
-        let (watch_rx, watcher_handle) = spawn_dir_watcher(&config);
+        let (watch_rx, watcher_handle) = spawn_dir_watcher(&source_dirs, config.sources.recursive);
 
         // 言語設定を解決する（環境変数 → config → デフォルト ja）
         // 初回呼び出しで言語ファイルの探索（同期 I/O）が走るが、この時点では
@@ -222,19 +218,7 @@ impl Daemon {
         // KDE グローバルショートカットを登録・監視する
         shortcuts::spawn_shortcut_watcher(cmd_tx.clone()).await;
 
-        // 設定ファイル監視を起動。失敗時は閉じたチャンネルにフォールバック
-        // （`Some(()) = ...` パターンが一致せず select! で無害にスキップされる）。
-        let (config_change_rx, config_watcher_handle) = match Config::config_path()
-            .ok()
-            .and_then(|p| watcher::spawn_config(&p))
-        {
-            Some((w, rx)) => (rx, Some(w)),
-            None => {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-                drop(tx);
-                (rx, None)
-            }
-        };
+        let (config_change_rx, config_watcher_handle) = spawn_config_watcher();
 
         // Plasma への壁紙適用ハンドル（D-Bus 接続を保持して再利用）
         let plasma = plasma::PlasmaShell::new().await;
@@ -275,8 +259,6 @@ impl Daemon {
             interval_at(Instant::now() + FIRST_FETCH_DELAY, Duration::from_secs(1800));
         fetch_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-        let online_configs = Arc::new(std::sync::Mutex::new(config.online_sources.clone()));
-
         Ok(Self {
             ticker: make_ticker(config.rotation.interval_secs),
             config,
@@ -300,7 +282,6 @@ impl Daemon {
             online_tx,
             online_rx,
             online_client,
-            online_configs,
             fetch_in_progress: Arc::new(AtomicBool::new(false)),
             fetch_ticker,
             _watcher_handle: watcher_handle,
@@ -312,15 +293,13 @@ impl Daemon {
     /// メインループ。トレイ・D-Bus・タイマー・ファイル監視のイベントを捌く。
     async fn run(mut self) -> Result<()> {
         // トレイに初期画像枚数と復元した現在画像名を反映
-        if let Some(ref h) = self.tray_handle {
-            let count = self.scheduler.image_count();
-            let name = tray_display_name(self.scheduler.current().map(|p| p.as_path()));
-            h.update(|t| {
-                t.image_count = count;
-                t.current_name = name;
-            })
-            .await;
-        }
+        let count = self.scheduler.image_count();
+        let name = tray_display_name(self.scheduler.current().map(|p| p.as_path()));
+        self.with_tray(|t| {
+            t.image_count = count;
+            t.current_name = name;
+        })
+        .await;
 
         // 起動時の即時切り替え。
         // 一時停止状態は再起動をまたいで復元されるため、停止中なら切り替えない
@@ -328,10 +307,10 @@ impl Daemon {
         if self.config.rotation.change_on_start {
             if let Some(path) = self.scheduler.auto_next() {
                 self.apply_and_notify(&path, "initial apply failed").await;
+                // 適用に時間がかかっても最初の自動切り替えまでの間隔が縮まないようにする。
+                self.reset_ticker();
             }
         }
-        // 起動時適用に時間がかかっても、最初の自動切り替えまでの間隔が縮まないようにする。
-        self.reset_ticker();
 
         tracing::info!("entering main loop (interval={}s)", self.config.rotation.interval_secs);
 
@@ -357,11 +336,7 @@ impl Daemon {
 
                 Some(()) = self.config_change_rx.recv() => self.on_config_file_changed().await,
 
-                msg = self.warn_rx.recv() => {
-                    if let Some(msg) = msg {
-                        self.notifier.warn(&msg).await;
-                    }
-                }
+                Some(msg) = self.warn_rx.recv() => self.notifier.warn(&msg).await,
 
                 _ = signal::ctrl_c() => {
                     tracing::info!("received Ctrl-C, shutting down");
@@ -401,7 +376,10 @@ impl Daemon {
             TrayCmd::CopyToFavorites => self.cmd_copy_to_favorites().await,
             TrayCmd::ReloadConfig => self.cmd_reload_config().await,
             TrayCmd::OpenSettings => open_settings(),
-            TrayCmd::PlasmaRestarted => self.cmd_plasma_restarted().await,
+            TrayCmd::PlasmaRestarted => {
+                tracing::info!("Plasma restarted, re-applying wallpaper");
+                self.reapply_current("reapply after Plasma restart failed").await;
+            }
             TrayCmd::ScreensChanged(screens) => self.cmd_screens_changed(screens).await,
             TrayCmd::Quit => {
                 tracing::info!("quit requested from tray");
@@ -437,9 +415,7 @@ impl Daemon {
         let paused = self.scheduler.is_paused();
         let current = self.scheduler.current().map(|p| p.as_path());
         self.state_writer.persist(paused, current).await;
-        if let Some(ref h) = self.tray_handle {
-            h.update(|t| t.paused = paused).await;
-        }
+        self.with_tray(|t| t.paused = paused).await;
     }
 
     async fn cmd_set_mode(&mut self, mode: crate::config::DisplayMode) {
@@ -448,22 +424,9 @@ impl Daemon {
         // トレイでの変更を再起動後も保つ。保存で発生する監視イベントは
         // ReloadConfig 側の同値スキップで吸収される。
         persist_config(&self.config, "display mode").await;
-        let Some(cur) = self.scheduler.current().cloned() else { return };
-        // 壁紙自体は変わらないので、現在名の更新と state への記録は不要
-        // （`apply_and_notify` を通さず、エラー表示だけ面倒を見る）。
-        match apply(&cur, &self.screens, &self.config, &self.cache, &self.plasma).await {
-            Err(e) => {
-                tracing::error!(error = %e, "reapply after mode change failed");
-                let msg = e.to_string();
-                self.notifier.error(&msg, Some(&cur)).await;
-                self.tray_error(msg).await;
-            }
-            Ok(()) => {
-                self.notifier.clear();
-                self.tray_clear_error().await;
-            }
-        }
-        self.start_prefetch();
+        // 壁紙のファイル名は変わらないので state への記録は空振りするが、
+        // `StateWriter::persist` が同値なら書かないため通しても無害。
+        self.reapply_current("reapply after mode change failed").await;
     }
 
     async fn cmd_set_interval(&mut self, secs: u64) {
@@ -472,9 +435,7 @@ impl Daemon {
         self.config.rotation.interval_secs = secs;
         persist_config(&self.config, "interval").await;
         self.reset_ticker();
-        if let Some(ref h) = self.tray_handle {
-            h.update(|t| t.interval_secs = secs).await;
-        }
+        self.with_tray(|t| t.interval_secs = secs).await;
     }
 
     /// 現在の壁紙ファイルを既定のアプリで開く。
@@ -497,13 +458,7 @@ impl Daemon {
             Err(e) => tracing::error!("trash task panicked: {}", e),
             Ok(Ok(())) => {
                 tracing::info!("moved to trash: {}", path.display());
-                self.scheduler.remove_image(&path);
-                self.prefetcher.abort();
-                if let Some(next) = self.scheduler.next() {
-                    self.apply_and_notify(&next, "apply after trash failed").await;
-                }
-                self.update_tray_count().await;
-                self.reset_ticker();
+                self.drop_current_and_advance(&path, "apply after trash failed").await;
             }
         }
     }
@@ -519,27 +474,7 @@ impl Daemon {
             return;
         }
         tracing::info!("blacklisted: {}", path.display());
-        self.scheduler.remove_image(&path);
-        self.prefetcher.abort();
-        match self.scheduler.next() {
-            Some(next) => {
-                self.apply_and_notify(&next, "apply after blacklist failed").await;
-                self.update_tray_count().await;
-            }
-            // 候補が尽きた場合は apply_and_notify を通らないので、
-            // トレイに残る壁紙名をここで消す。
-            None => {
-                if let Some(ref h) = self.tray_handle {
-                    let count = self.scheduler.image_count();
-                    h.update(|t| {
-                        t.current_name = String::new();
-                        t.image_count = count;
-                    })
-                    .await;
-                }
-            }
-        }
-        self.reset_ticker();
+        self.drop_current_and_advance(&path, "apply after blacklist failed").await;
     }
 
     async fn cmd_copy_to_favorites(&self) {
@@ -566,7 +501,7 @@ impl Daemon {
                 tracing::error!(error = %e, "config reload failed");
                 let msg = e.to_string();
                 self.notifier.error(&msg, None).await;
-                self.tray_error(msg).await;
+                self.with_tray(|t| t.last_error = Some(msg)).await;
                 return;
             }
             // 内容が同一なら何もしない。トレイからのモード／間隔変更で
@@ -581,11 +516,8 @@ impl Daemon {
 
         tracing::info!("reloading config");
 
-        match build_filtered_images_list(
-            &collect_source_dirs(&new_cfg),
-            new_cfg.sources.recursive,
-            &self.blacklist,
-        ) {
+        let source_dirs = collect_source_dirs(&new_cfg);
+        match build_filtered_images_list(&source_dirs, new_cfg.sources.recursive, &self.blacklist) {
             Ok(images) if !images.is_empty() => {
                 tracing::info!("reload: {} image(s) found", images.len());
                 // 一時停止状態と現在画像は rebuild が引き継ぐ
@@ -595,15 +527,14 @@ impl Daemon {
             Err(e) => tracing::warn!("reload: scan error: {}", e),
         }
 
-        (self.watch_rx, self._watcher_handle) = spawn_dir_watcher(&new_cfg);
+        (self.watch_rx, self._watcher_handle) =
+            spawn_dir_watcher(&source_dirs, new_cfg.sources.recursive);
 
         self.prefetcher.abort();
         self.cache = Arc::new(Cache::new(
             new_cfg.cache.directory.clone(),
             new_cfg.cache.max_size_mb,
         ));
-
-        self.ticker = make_ticker(new_cfg.rotation.interval_secs);
 
         let new_lang = resolve_lang(&new_cfg);
         if new_lang != self.lang {
@@ -620,9 +551,8 @@ impl Daemon {
             );
         }
 
-        *self.online_configs.lock().unwrap_or_else(|e| e.into_inner()) =
-            new_cfg.online_sources.clone();
         self.config = new_cfg;
+        self.reset_ticker();
 
         // rebuild 後の current を使う。新しいソースから外れた画像や
         // ブラックリスト入りした画像は rebuild で current から落ちるため、
@@ -643,34 +573,25 @@ impl Daemon {
             }
         }
 
-        if let Some(ref h) = self.tray_handle {
-            let mode = self.config.display.mode;
-            let secs = self.config.rotation.interval_secs;
-            let strings = i18n::strings(self.lang);
-            let count = self.scheduler.image_count();
-            let has_fav = self.config.sources.favorites_dir.is_some();
-            let bl_enabled = self.config.ui.enable_blacklist;
-            let name = tray_display_name(self.scheduler.current().map(|p| p.as_path()));
-            h.update(|t| {
-                t.mode = mode;
-                t.interval_secs = secs;
-                t.strings = strings;
-                t.image_count = count;
-                t.has_favorites_dir = has_fav;
-                t.blacklist_enabled = bl_enabled;
-                t.current_name = name;
-            })
-            .await;
-        }
+        let mode = self.config.display.mode;
+        let secs = self.config.rotation.interval_secs;
+        let strings = i18n::strings(self.lang);
+        let count = self.scheduler.image_count();
+        let has_fav = self.config.sources.favorites_dir.is_some();
+        let bl_enabled = self.config.ui.enable_blacklist;
+        let name = tray_display_name(self.scheduler.current().map(|p| p.as_path()));
+        self.with_tray(|t| {
+            t.mode = mode;
+            t.interval_secs = secs;
+            t.strings = strings;
+            t.image_count = count;
+            t.has_favorites_dir = has_fav;
+            t.blacklist_enabled = bl_enabled;
+            t.current_name = name;
+        })
+        .await;
 
         tracing::info!("config reload complete");
-    }
-
-    async fn cmd_plasma_restarted(&mut self) {
-        tracing::info!("Plasma restarted, re-applying wallpaper");
-        if let Some(path) = self.scheduler.current().cloned() {
-            self.apply_and_notify(&path, "reapply after Plasma restart failed").await;
-        }
     }
 
     async fn cmd_screens_changed(&mut self, new_screens: Vec<screen::Monitor>) {
@@ -682,9 +603,7 @@ impl Daemon {
         self.screens = new_screens;
         // 解像度が変わるとキャッシュキーも変わるため、現在の壁紙を
         // 新しい解像度で再加工して適用する。
-        if let Some(path) = self.scheduler.current().cloned() {
-            self.apply_and_notify(&path, "reapply after screen change failed").await;
-        }
+        self.reapply_current("reapply after screen change failed").await;
     }
 
     // ── その他のイベント ─────────────────────────────────────────────────────
@@ -760,18 +679,16 @@ impl Daemon {
             tracing::error!(error = %e, "{}", log_ctx);
             let msg = e.to_string();
             self.notifier.error(&msg, Some(path)).await;
-            self.tray_error(msg).await;
+            self.with_tray(|t| t.last_error = Some(msg)).await;
             return;
         }
         self.notifier.clear();
-        if let Some(ref h) = self.tray_handle {
-            let name = tray_display_name(Some(path));
-            h.update(|t| {
-                t.last_error = None;
-                t.current_name = name;
-            })
-            .await;
-        }
+        let name = tray_display_name(Some(path));
+        self.with_tray(|t| {
+            t.last_error = None;
+            t.current_name = name;
+        })
+        .await;
         // 現在の壁紙を記録しておき、再起動後も同じ画像を「現在」として扱えるようにする
         self.state_writer.persist(self.scheduler.is_paused(), Some(path)).await;
         self.start_prefetch();
@@ -779,6 +696,29 @@ impl Daemon {
         if let Some(ref tx) = self.screen_check_tx {
             let _ = tx.send(());
         }
+    }
+
+    /// 現在の壁紙をもう一度適用する。表示設定・画面構成・Plasma 再起動など、
+    /// 画像は同じまま出力だけ作り直したいときに使う。
+    async fn reapply_current(&mut self, log_ctx: &str) {
+        if let Some(path) = self.scheduler.current().cloned() {
+            self.apply_and_notify(&path, log_ctx).await;
+        }
+    }
+
+    /// 現在の画像をローテーションから外して次の画像へ進む。
+    /// ゴミ箱移動とブラックリスト追加で共通の後処理。
+    async fn drop_current_and_advance(&mut self, path: &Path, log_ctx: &str) {
+        self.scheduler.remove_image(path);
+        self.prefetcher.abort();
+        match self.scheduler.next() {
+            Some(next) => self.apply_and_notify(&next, log_ctx).await,
+            // 候補が尽きると apply_and_notify を通らないので、
+            // トレイに残る壁紙名をここで消す。
+            None => self.with_tray(|t| t.current_name = String::new()).await,
+        }
+        self.update_tray_count().await;
+        self.reset_ticker();
     }
 
     /// 次の壁紙をバックグラウンドで加工してキャッシュに載せる。
@@ -803,18 +743,15 @@ impl Daemon {
     /// 走行中のフェッチがあれば何もしない。
     fn spawn_fetch(&self) {
         let Some(client) = self.online_client.as_ref() else { return };
-        let configs = self
-            .online_configs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if configs.is_empty() {
+        if self.config.online_sources.is_empty() {
             return;
         }
         // 確認＋セットを単一の atomic 操作で行う。`true` が返れば既に走行中。
         if self.fetch_in_progress.swap(true, Ordering::AcqRel) {
             return;
         }
+        // ここから先は必ず spawn するので、この時点で初めて複製する。
+        let configs = self.config.online_sources.clone();
         let client = client.clone();
         let in_progress = self.fetch_in_progress.clone();
         let tx = self.online_tx.clone();
@@ -839,21 +776,15 @@ impl Daemon {
 
     /// トレイの画像枚数表示を現在値に合わせる。
     async fn update_tray_count(&self) {
-        if let Some(ref h) = self.tray_handle {
-            let count = self.scheduler.image_count();
-            h.update(|t| t.image_count = count).await;
-        }
+        let count = self.scheduler.image_count();
+        self.with_tray(|t| t.image_count = count).await;
     }
 
-    async fn tray_error(&self, msg: String) {
+    /// トレイが生きていればその表示状態を書き換える。
+    /// トレイを持たない環境（D-Bus 無し）では何もしない。
+    async fn with_tray<F: FnOnce(&mut tray::KabekamiTray)>(&self, f: F) {
         if let Some(ref h) = self.tray_handle {
-            h.update(|t| t.last_error = Some(msg)).await;
-        }
-    }
-
-    async fn tray_clear_error(&self) {
-        if let Some(ref h) = self.tray_handle {
-            h.update(|t| t.last_error = None).await;
+            h.update(f).await;
         }
     }
 }
@@ -1109,15 +1040,32 @@ fn collect_source_dirs(config: &Config) -> Vec<std::path::PathBuf> {
 /// ディレクトリ監視を起動する。監視が使えない環境では閉じたチャンネルを返し、
 /// `Some(ev) = watch_rx.recv()` が一致しなくなることで select! が無害にスキップする。
 fn spawn_dir_watcher(
-    config: &Config,
+    source_dirs: &[std::path::PathBuf],
+    recursive: bool,
 ) -> (
     tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
     Option<watcher::DirWatcher>,
 ) {
-    match watcher::spawn(&collect_source_dirs(config), config.sources.recursive) {
+    match watcher::spawn(source_dirs, recursive) {
         Some((w, rx)) => (rx, Some(w)),
         None => {
             let (tx, rx) = tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
+            drop(tx);
+            (rx, None)
+        }
+    }
+}
+
+/// `config.toml` の監視を起動する。`spawn_dir_watcher` と同じく、使えない
+/// 環境では閉じたチャンネルを返して select! の arm を無効化する。
+fn spawn_config_watcher() -> (
+    tokio::sync::mpsc::UnboundedReceiver<()>,
+    Option<watcher::DirWatcher>,
+) {
+    match Config::config_path().ok().and_then(|p| watcher::spawn_config(&p)) {
+        Some((w, rx)) => (rx, Some(w)),
+        None => {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
             drop(tx);
             (rx, None)
         }
