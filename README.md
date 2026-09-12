@@ -172,6 +172,37 @@ daemon, delete the file, and start it again — deleting it while the daemon is 
 no effect and the file will simply be rewritten. Blacklisted images are stored separately in
 `~/.config/kabekami/blacklist.txt`.
 
+### Adding a UI Language
+
+UI strings live in per-language TOML files, so adding a language needs **no rebuild**.
+Take a copy of `ja.toml` as your starting point — from
+[the source tree](crates/kabekami-common/i18n/ja.toml), or from
+`/usr/share/kabekami/i18n/ja.toml` if you installed a package — name it after the language
+code (e.g. `fr.toml`), and drop it in one of:
+
+| Location | Scope | Priority |
+|---|---|---|
+| `/usr/share/kabekami/i18n/` | All users | lowest |
+| `~/.config/kabekami/i18n/` | Your user account | ↓ |
+| `$KABEKAMI_I18N_DIR` | Explicit override (handy for testing) | highest |
+
+The new language appears in the language dropdown in `kabekami-config` automatically.
+Language files are read once at startup, so **restart kabekami (and the settings GUI)**
+after adding or editing one.
+
+**Files layer instead of replacing each other.** If you only dislike one phrase, a two-line
+file is enough — everything you don't mention keeps coming from the lower-priority file, so
+your override still tracks upstream changes to the rest of the translation:
+
+```toml
+# ~/.config/kabekami/i18n/ja.toml — override just one string
+[tray]
+quit = "おわり"
+```
+
+Keys nobody translates fall back to English, so a **partial translation works fine**.
+English and Japanese are built into the binary, so they work even with no files installed.
+
 ### Supported Image Formats
 
 kabekami supports the following image formats: **jpg, jpeg, png, webp, avif**

@@ -207,7 +207,13 @@ impl ksni::Tray for KabekamiTray {
                 submenu: vec![RadioGroup {
                     selected: interval_selected,
                     select: Box::new(|this: &mut Self, idx| {
-                        let secs = INTERVAL_PRESETS[idx];
+                        // ラベルは言語ファイル由来なので、件数が合わない翻訳が
+                        // 万一通っても範囲外アクセスにならないよう get() で引く
+                        // （i18n 側でも件数を検証している。二重の防御）。
+                        let Some(&secs) = INTERVAL_PRESETS.get(idx) else {
+                            tracing::warn!("tray: interval index {} out of range, ignored", idx);
+                            return;
+                        };
                         this.interval_secs = secs;
                         let _ = this.notifier.send(TrayCmd::SetInterval(secs));
                     }),

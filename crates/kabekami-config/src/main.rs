@@ -11,7 +11,7 @@ use std::sync::mpsc;
 
 use eframe::egui;
 use kabekami_common::config::{Config, DisplayMode, OnlineSourceConfig, Order, ProviderKind};
-use kabekami_common::i18n::{self, Lang};
+use kabekami_common::i18n::{self, ConfigStrings, Lang};
 
 fn main() -> eframe::Result<()> {
     // タイトルバーは英語固定。ViewportBuilder の仕様で実行中に変更できないこと、
@@ -96,25 +96,27 @@ fn kdialog_run(args: &[&std::ffi::OsStr]) -> Option<PathBuf> {
 }
 
 /// kdialog `--getexistingdirectory` でフォルダ選択ダイアログを開く。
-fn pick_folder(lang: Lang, start: Option<&std::path::Path>) -> Option<PathBuf> {
+fn pick_folder(s: &'static ConfigStrings, start: Option<&std::path::Path>) -> Option<PathBuf> {
     let start_dir = pick_start_dir(start);
     kdialog_run(&[
         "--title".as_ref(),
-        i18n::pick(lang, "フォルダを選択", "Select folder").as_ref(),
+        s.dialog_select_folder.as_ref(),
         "--getexistingdirectory".as_ref(),
         start_dir.as_os_str(),
     ])
 }
 
 /// kdialog `--getopenfilename` で画像ファイル選択ダイアログを開く。
-fn pick_image_file(lang: Lang, start: Option<&std::path::Path>) -> Option<PathBuf> {
+fn pick_image_file(s: &'static ConfigStrings, start: Option<&std::path::Path>) -> Option<PathBuf> {
     let start_dir = pick_start_dir(start);
+    let image_filter = format!("{} (*.jpg *.jpeg *.png *.webp *.avif)", s.image_filter_label);
     kdialog_run(&[
         "--title".as_ref(),
-        i18n::pick(lang, "画像を選択", "Select image").as_ref(),
+        s.dialog_select_image.as_ref(),
         "--getopenfilename".as_ref(),
         start_dir.as_os_str(),
-        "Images (*.jpg *.jpeg *.png *.webp *.avif)".as_ref(),
+        // 拡張子リストは kdialog の構文なので訳さず、名前だけ差し替える
+        image_filter.as_ref(),
     ])
 }
 
@@ -303,19 +305,24 @@ impl KabekamiApp {
         self.lang = Lang::from_code(&self.config.ui.language);
     }
 
+    /// 現在の言語の文字列テーブル。
+    ///
+    /// 返り値は `&'static` なので `self` の借用を持ち越さない。
+    /// 各 `ui_*` の先頭で `let s = self.s();` と束縛しておけば、
+    /// 以降 `&mut self.config` と同時に使っても借用が衝突しない。
+    fn s(&self) -> &'static ConfigStrings {
+        i18n::config_strings(self.lang)
+    }
+
     /// 「📁 参照」ボタンを描画する（kdialog 不在時は無効化＆ツールチップ）。
     /// クリックされたら `true` を返す。ラベルはここで一元管理し、呼び出し側での
     /// 翻訳漏れを構造的に防ぐ。
     fn browse_button(&self, ui: &mut egui::Ui) -> bool {
-        let label = i18n::pick(self.lang, "📁 参照", "📁 Browse…");
-        let resp = ui.add_enabled(self.has_kdialog, egui::Button::new(label));
+        let s = self.s();
+        let resp = ui.add_enabled(self.has_kdialog, egui::Button::new(s.browse));
         let clicked = resp.clicked();
         if !self.has_kdialog {
-            resp.on_hover_text(i18n::pick(
-                self.lang,
-                "kdialog がインストールされていません。\nパスを直接入力してください。",
-                "kdialog is not installed.\nType the path manually.",
-            ));
+            resp.on_hover_text(s.kdialog_missing);
         }
         clicked
     }
@@ -327,11 +334,8 @@ impl KabekamiApp {
 
     fn save_config(&mut self) {
         match self.config.save() {
-            Ok(()) => self.set_status(i18n::pick(self.lang, "設定を保存しました", "Config saved."), false),
-            Err(e) => self.set_status(
-                format!("{}: {e}", i18n::pick(self.lang, "保存失敗", "Save failed")),
-                true,
-            ),
+            Ok(()) => self.set_status(self.s().saved, false),
+            Err(e) => self.set_status(format!("{}: {e}", self.s().save_failed), true),
         }
     }
 
@@ -371,10 +375,7 @@ impl KabekamiApp {
                     ));
                 }
                 PreviewResult::Error(e) => {
-                    self.set_status(
-                        format!("{}: {e}", i18n::pick(self.lang, "プレビューエラー", "Preview error")),
-                        true,
-                    );
+                    self.set_status(format!("{}: {e}", self.s().preview_error), true);
                     self.preview_texture = None;
                 }
             }
@@ -387,16 +388,17 @@ impl eframe::App for KabekamiApp {
         // UI タブで language を変えた瞬間に反映されるよう毎フレーム同期
         self.sync_lang();
         self.poll_preview(ctx);
+        let s = self.s();
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 for (label, tab) in [
-                    (i18n::pick(self.lang, "ソース", "Sources"), Tab::Sources),
-                    (i18n::pick(self.lang, "オンライン", "Online"), Tab::Online),
-                    (i18n::pick(self.lang, "ローテーション", "Rotation"), Tab::Rotation),
-                    (i18n::pick(self.lang, "表示", "Display"), Tab::Display),
-                    (i18n::pick(self.lang, "キャッシュ", "Cache"), Tab::Cache),
-                    ("UI", Tab::Ui),
+                    (s.tab_sources, Tab::Sources),
+                    (s.tab_online, Tab::Online),
+                    (s.tab_rotation, Tab::Rotation),
+                    (s.tab_display, Tab::Display),
+                    (s.tab_cache, Tab::Cache),
+                    (s.tab_ui, Tab::Ui),
                 ] {
                     ui.selectable_value(&mut self.tab, tab, label);
                 }
@@ -405,7 +407,7 @@ impl eframe::App for KabekamiApp {
 
         egui::TopBottomPanel::bottom("actions").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button(i18n::pick(self.lang, "💾  保存", "💾  Save")).clicked() {
+                if ui.button(s.save_button).clicked() {
                     self.save_config();
                 }
                 ui.separator();
@@ -438,14 +440,15 @@ impl eframe::App for KabekamiApp {
 
 impl KabekamiApp {
     fn ui_sources(&mut self, ui: &mut egui::Ui) {
-        ui.heading(i18n::pick(self.lang, "壁紙ソース", "Sources"));
+        let s = self.s();
+        ui.heading(s.sources_heading);
         ui.separator();
 
-        ui.checkbox(&mut self.config.sources.recursive, i18n::pick(self.lang, "サブフォルダも含める", "Recursive"));
+        ui.checkbox(&mut self.config.sources.recursive, s.recursive);
         ui.add_space(8.0);
 
         // お気に入りフォルダ
-        ui.label(i18n::pick(self.lang, "お気に入りフォルダ", "Favorites directory:"));
+        ui.label(s.favorites_dir);
         ui.horizontal(|ui| {
             let mut fav_str = self.config.sources.favorites_dir
                 .as_deref()
@@ -453,7 +456,7 @@ impl KabekamiApp {
                 .unwrap_or_default();
             if ui.add(
                 egui::TextEdit::singleline(&mut fav_str)
-                    .hint_text(i18n::pick(self.lang, "~/Pictures/Favorites (空欄=無効)", "~/Pictures/Favorites (empty=disabled)"))
+                    .hint_text(s.favorites_hint)
                     .desired_width(400.0),
             ).changed() {
                 self.config.sources.favorites_dir = if fav_str.trim().is_empty() {
@@ -465,7 +468,7 @@ impl KabekamiApp {
         });
         ui.add_space(8.0);
 
-        ui.label(i18n::pick(self.lang, "ディレクトリ", "Directories:"));
+        ui.label(s.directories);
         let mut remove_idx = None;
         for (i, dir) in self.config.sources.directories.iter().enumerate() {
             ui.horizontal(|ui| {
@@ -486,7 +489,7 @@ impl KabekamiApp {
                     .hint_text("/path/to/wallpapers")
                     .desired_width(400.0),
             );
-            let add = ui.button(i18n::pick(self.lang, "追加", "Add")).clicked()
+            let add = ui.button(s.add).clicked()
                 || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
             if add {
                 let p = self.new_dir_input.trim().to_string();
@@ -496,7 +499,7 @@ impl KabekamiApp {
                 }
             }
             if self.browse_button(ui) {
-                if let Some(path) = pick_folder(self.lang, None) {
+                if let Some(path) = pick_folder(s, None) {
                     self.config.sources.directories.push(path);
                     self.new_dir_input.clear();
                 }
@@ -505,47 +508,48 @@ impl KabekamiApp {
     }
 
     fn ui_rotation(&mut self, ui: &mut egui::Ui) {
-        ui.heading(i18n::pick(self.lang, "ローテーション", "Rotation"));
+        let s = self.s();
+        ui.heading(s.rotation_heading);
         ui.separator();
 
         ui.horizontal(|ui| {
-            ui.label(i18n::pick(self.lang, "切り替え間隔 (秒):", "Interval (sec):"));
+            ui.label(s.interval_secs);
             ui.add(egui::DragValue::new(&mut self.config.rotation.interval_secs).range(5..=86400));
         });
         ui.add_space(4.0);
 
-        ui.label(i18n::pick(self.lang, "順序", "Order:"));
-        ui.radio_value(&mut self.config.rotation.order, Order::Random, i18n::pick(self.lang, "ランダム", "Random"));
+        ui.label(s.order);
+        ui.radio_value(&mut self.config.rotation.order, Order::Random, s.order_random);
         ui.radio_value(
             &mut self.config.rotation.order,
             Order::Sequential,
-            i18n::pick(self.lang, "順番", "Sequential"),
+            s.order_sequential,
         );
         ui.add_space(4.0);
 
         ui.checkbox(
             &mut self.config.rotation.change_on_start,
-            i18n::pick(self.lang, "起動時に即切り替え", "Change on start"),
+            s.change_on_start,
         );
         ui.checkbox(
             &mut self.config.rotation.prefetch,
-            i18n::pick(self.lang, "次の壁紙を先読み", "Prefetch next wallpaper"),
+            s.prefetch,
         );
     }
 
     fn ui_display(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading(i18n::pick(self.lang, "表示モード", "Display"));
+        let s = self.s();
+        ui.heading(s.display_heading);
         ui.separator();
 
         let mut mode_changed = false;
-        for (mode, ja, en) in [
-            (DisplayMode::BlurPad, "BlurPad (ぼかし背景＋前景)", "BlurPad (blur background + foreground)"),
-            (DisplayMode::Smart, "Smart (アスペクト比で自動選択)", "Smart (auto by aspect ratio)"),
-            (DisplayMode::Fill, "Fill (クロップ)", "Fill (crop)"),
-            (DisplayMode::Fit, "Fit (レターボックス)", "Fit (letterbox)"),
-            (DisplayMode::Stretch, "Stretch (引き伸ばし)", "Stretch"),
+        for (mode, label) in [
+            (DisplayMode::BlurPad, s.mode_blurpad),
+            (DisplayMode::Smart, s.mode_smart),
+            (DisplayMode::Fill, s.mode_fill),
+            (DisplayMode::Fit, s.mode_fit),
+            (DisplayMode::Stretch, s.mode_stretch),
         ] {
-            let label = i18n::pick(self.lang, ja, en);
             if ui
                 .radio_value(&mut self.config.display.mode, mode, label)
                 .clicked()
@@ -560,7 +564,7 @@ impl KabekamiApp {
         ui.add_space(8.0);
         ui.add_enabled_ui(blur_applies, |ui| {
             ui.horizontal(|ui| {
-                ui.label(i18n::pick(self.lang, "ぼかし強度", "Blur sigma:"));
+                ui.label(s.blur_sigma);
                 let resp = ui.add(
                     egui::Slider::new(&mut self.config.display.blur_sigma, 1.0..=50.0)
                         .step_by(0.5),
@@ -570,7 +574,7 @@ impl KabekamiApp {
                 }
             });
             ui.horizontal(|ui| {
-                ui.label(i18n::pick(self.lang, "背景暗さ", "BG darken:"));
+                ui.label(s.bg_darken);
                 let resp = ui.add(
                     egui::Slider::new(&mut self.config.display.bg_darken, 0.0..=1.0)
                         .step_by(0.05),
@@ -583,7 +587,7 @@ impl KabekamiApp {
 
         ui.add_space(12.0);
         ui.separator();
-        ui.label(i18n::pick(self.lang, "プレビュー画像", "Preview image:"));
+        ui.label(s.preview_image);
         ui.horizontal(|ui| {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.preview_image_path)
@@ -591,7 +595,7 @@ impl KabekamiApp {
                     .desired_width(440.0),
             );
             let mut should_preview =
-                ui.button(i18n::pick(self.lang, "▶ プレビュー", "▶ Preview")).clicked()
+                ui.button(s.preview_button).clicked()
                 || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 || mode_changed;
             if self.browse_button(ui) {
@@ -606,7 +610,7 @@ impl KabekamiApp {
                             .first()
                             .map(|p| p.as_path())
                     });
-                if let Some(path) = pick_image_file(self.lang, start) {
+                if let Some(path) = pick_image_file(s, start) {
                     self.preview_image_path = path.to_string_lossy().into_owned();
                     should_preview = true;
                 }
@@ -631,18 +635,19 @@ impl KabekamiApp {
     }
 
     fn ui_cache(&mut self, ui: &mut egui::Ui) {
-        ui.heading(i18n::pick(self.lang, "キャッシュ", "Cache"));
+        let s = self.s();
+        ui.heading(s.cache_heading);
         ui.separator();
 
         ui.horizontal(|ui| {
-            ui.label(i18n::pick(self.lang, "ディレクトリ", "Directory:"));
+            ui.label(s.cache_directory);
             let mut dir_str = self.config.cache.directory.to_string_lossy().into_owned();
             if ui.text_edit_singleline(&mut dir_str).changed() {
                 self.config.cache.directory = PathBuf::from(dir_str);
                 self.cache_size_bytes = None; // ディレクトリ変更時はリセット
             }
             if self.browse_button(ui) {
-                if let Some(path) = pick_folder(self.lang, Some(&self.config.cache.directory)) {
+                if let Some(path) = pick_folder(s, Some(&self.config.cache.directory)) {
                     self.config.cache.directory = path;
                     self.cache_size_bytes = None;
                 }
@@ -650,17 +655,17 @@ impl KabekamiApp {
         });
 
         ui.horizontal(|ui| {
-            ui.label(i18n::pick(self.lang, "最大サイズ", "Max size (MB):"));
+            ui.label(s.max_size_mb);
             ui.add(egui::DragValue::new(&mut self.config.cache.max_size_mb).range(0..=100_000));
         });
-        ui.label(i18n::pick(self.lang, "0 = 無制限", "0 = unlimited"));
+        ui.label(s.unlimited_hint);
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button(i18n::pick(self.lang, "更新", "Refresh")).clicked() {
+            if ui.button(s.refresh).clicked() {
                 self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
             }
-            if ui.button(i18n::pick(self.lang, "クリア", "Clear Cache")).clicked() {
+            if ui.button(s.clear_cache).clicked() {
                 if let Ok(entries) = std::fs::read_dir(&self.config.cache.directory) {
                     for entry in entries.flatten() {
                         let _ = std::fs::remove_file(entry.path());
@@ -670,20 +675,16 @@ impl KabekamiApp {
             }
             match self.cache_size_bytes {
                 None => {
-                    ui.label(i18n::pick(
-                        self.lang,
-                        "現在のサイズ: (更新 をクリック)",
-                        "Current size: (click Refresh)",
-                    ));
+                    ui.label(s.current_size_unknown);
                 }
                 Some(bytes) => {
                     let mb = bytes as f64 / (1024.0 * 1024.0);
                     let max = self.config.cache.max_size_mb;
-                    let label = i18n::pick(self.lang, "現在のサイズ", "Current size");
+                    let label = s.current_size;
                     if max > 0 {
                         ui.label(format!("{label}: {:.1} MB / {} MB", mb, max));
                     } else {
-                        let unlimited = i18n::pick(self.lang, "無制限", "unlimited");
+                        let unlimited = s.unlimited;
                         ui.label(format!("{label}: {:.1} MB ({unlimited})", mb));
                     }
                 }
@@ -692,13 +693,10 @@ impl KabekamiApp {
     }
 
     fn ui_online(&mut self, ui: &mut egui::Ui) {
-        ui.heading(i18n::pick(self.lang, "オンラインソース", "Online Sources"));
+        let s = self.s();
+        ui.heading(s.online_heading);
         ui.separator();
-        ui.label(i18n::pick(
-            self.lang,
-            "インターネットから壁紙を自動取得します。",
-            "Automatically fetch wallpapers from the internet.",
-        ));
+        ui.label(s.online_desc);
         ui.add_space(8.0);
 
         let mut remove_idx: Option<usize> = None;
@@ -709,55 +707,64 @@ impl KabekamiApp {
             ui.group(|ui| {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut oc.enabled, format!("**{}**", oc.provider));
-                    if ui.small_button(i18n::pick(self.lang, "✖  削除", "✖  Remove")).clicked() {
+                    if ui.small_button(s.remove).clicked() {
                         remove_idx = Some(i);
                     }
                 });
 
                 ui.indent(format!("online_{}", i), |ui| {
                     if matches!(oc.provider, ProviderKind::Unsplash | ProviderKind::Wallhaven) {
-                        opt_text_field(ui, "API Key:", "", 300.0, true, &mut oc.api_key);
-                        opt_text_field(ui, "Query:", "nature", 200.0, false, &mut oc.query);
+                        opt_text_field(ui, s.api_key, "", 300.0, true, &mut oc.api_key);
+                        opt_text_field(ui, s.query, "nature", 200.0, false, &mut oc.query);
                     }
                     if oc.provider == ProviderKind::Reddit {
-                        opt_text_field(ui, "Subreddit:", "wallpapers", 200.0, false, &mut oc.subreddit);
+                        opt_text_field(ui, s.subreddit, "wallpapers", 200.0, false, &mut oc.subreddit);
                     }
                     // Bing: ロケール
                     if oc.provider == ProviderKind::Bing {
-                        opt_text_field(ui, "Locale:", "en-US (default)", 150.0, false, &mut oc.locale);
+                        let locale_hint = format!("en-US {}", s.default_option);
+                        opt_text_field(ui, s.locale, &locale_hint, 150.0, false, &mut oc.locale);
                     }
                     // Unsplash: 画質
                     if oc.provider == ProviderKind::Unsplash {
                         ui.horizontal(|ui| {
-                            ui.label("Quality:");
+                            ui.label(s.quality);
                             let mut q = oc.quality.clone().unwrap_or_else(|| "regular".to_string());
-                            ui.radio_value(&mut q, "regular".to_string(), "regular (default)");
+                            // "regular" / "full" は Unsplash API の値そのものなので訳さない
+                            let regular_label = format!("regular {}", s.default_option);
+                            ui.radio_value(&mut q, "regular".to_string(), regular_label);
                             ui.radio_value(&mut q, "full".to_string(), "full");
                             oc.quality = if q == "regular" { None } else { Some(q) };
                         });
                     }
                     // 保持枚数
                     ui.horizontal(|ui| {
-                        ui.label(i18n::pick(self.lang, "保持枚数", "Count:"));
+                        ui.label(s.count);
                         ui.add(egui::DragValue::new(&mut oc.count).range(1..=100));
                     });
                     // 再取得間隔
                     ui.horizontal(|ui| {
-                        ui.label(i18n::pick(self.lang, "再取得間隔", "Interval (h, 0=default):"));
+                        ui.label(s.interval_hours);
                         let mut hours = oc.interval_hours.unwrap_or(0);
                         let resp = ui.add(egui::DragValue::new(&mut hours).range(0..=8760));
-                        ui.label(format!("(default: {}h)", oc.provider.default_interval_hours()));
+                        ui.label(
+                            s.interval_default_hint
+                                .replace("{}", &oc.provider.default_interval_hours().to_string()),
+                        );
                         if resp.changed() {
                             oc.interval_hours = if hours == 0 { None } else { Some(hours) };
                         }
                     });
                     // ダウンロード先ディレクトリ
                     ui.horizontal(|ui| {
-                        ui.label(i18n::pick(self.lang, "ダウンロード先", "Download dir:"));
+                        ui.label(s.download_dir);
                         let mut dir_str = oc.download_dir.as_deref()
                             .map(|p| p.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        let hint = format!("~/.local/share/kabekami/{} (default)", oc.provider);
+                        let hint = format!(
+                            "~/.local/share/kabekami/{} {}",
+                            oc.provider, s.default_option
+                        );
                         if ui.add(
                             egui::TextEdit::singleline(&mut dir_str)
                                 .hint_text(hint)
@@ -770,7 +777,7 @@ impl KabekamiApp {
                             };
                         }
                         if self.browse_button(ui) {
-                            if let Some(path) = pick_folder(self.lang, oc.download_dir.as_deref()) {
+                            if let Some(path) = pick_folder(s, oc.download_dir.as_deref()) {
                                 oc.download_dir = Some(path);
                             }
                         }
@@ -787,7 +794,7 @@ impl KabekamiApp {
         // 新規追加
         ui.separator();
         ui.horizontal(|ui| {
-            ui.label(i18n::pick(self.lang, "プロバイダーを追加", "Add provider:"));
+            ui.label(s.add_provider);
             egui::ComboBox::from_id_salt("new_provider")
                 .selected_text(self.new_online_provider.to_string())
                 .show_ui(ui, |ui| {
@@ -800,7 +807,7 @@ impl KabekamiApp {
                         ui.selectable_value(&mut self.new_online_provider, p, p.to_string());
                     }
                 });
-            if ui.button(i18n::pick(self.lang, "＋ 追加", "Add")).clicked() {
+            if ui.button(s.add_provider_button).clicked() {
                 self.config.online_sources.push(OnlineSourceConfig {
                     provider: self.new_online_provider,
                     enabled: true,
@@ -816,32 +823,30 @@ impl KabekamiApp {
             }
         });
         ui.add_space(4.0);
-        ui.label(i18n::pick(
-            self.lang,
-            "💡 ダウンロード先: ~/.local/share/kabekami/<provider>/",
-            "💡 Download dir: ~/.local/share/kabekami/<provider>/",
-        ));
+        ui.label(s.download_dir_hint);
     }
 
     fn ui_ui_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading(i18n::pick(self.lang, "UI 設定", "UI Settings"));
+        let s = self.s();
+        ui.heading(s.ui_heading);
         ui.separator();
 
-        ui.label(i18n::pick(self.lang, "表示言語", "Language:"));
+        ui.label(s.language);
+        // `Lang::from_code` と同じ照合規則で引く。完全一致で引くと
+        // `ui.language = "JA"` のとき GUI は日本語なのに表示だけ
+        // 「不明」になってしまう。
         let selected_label = if self.config.ui.language.is_empty() {
-            "(default)"
+            s.default_option
         } else {
-            kabekami_common::i18n::REGISTRY
-                .iter()
-                .find(|e| e.id == self.config.ui.language.as_str())
+            kabekami_common::i18n::lookup_code(&self.config.ui.language)
                 .map(|e| e.display_name)
-                .unwrap_or("(unknown)")
+                .unwrap_or(s.unknown_language)
         };
         egui::ComboBox::from_id_salt("language")
             .selected_text(selected_label)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.config.ui.language, String::new(), "(default)");
-                for entry in kabekami_common::i18n::REGISTRY.iter().filter(|e| e.gui_visible) {
+                ui.selectable_value(&mut self.config.ui.language, String::new(), s.default_option);
+                for entry in kabekami_common::i18n::registry().iter().filter(|e| e.gui_visible) {
                     ui.selectable_value(
                         &mut self.config.ui.language,
                         entry.id.to_string(),
@@ -853,21 +858,17 @@ impl KabekamiApp {
 
         ui.checkbox(
             &mut self.config.ui.warn_notify,
-            i18n::pick(self.lang, "警告をデスクトップ通知で表示", "Show warnings as desktop notifications"),
+            s.warn_notify,
         );
         ui.add_space(4.0);
         ui.checkbox(
             &mut self.config.ui.notify_fetch,
-            i18n::pick(self.lang, "オンライン取得完了時に通知を表示", "Notify when online sources finish fetching"),
+            s.notify_fetch,
         );
         ui.add_space(4.0);
         ui.checkbox(
             &mut self.config.ui.enable_blacklist,
-            i18n::pick(
-                self.lang,
-                "「二度と表示しない」機能を有効にする",
-                "Enable \"Never Show Again\" blacklist",
-            ),
+            s.enable_blacklist,
         );
     }
 }

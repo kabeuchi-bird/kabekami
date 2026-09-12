@@ -27,18 +27,7 @@ impl DaemonState {
     /// 状態を読み込む。ファイル未作成・破損時はデフォルト（未停止・現在画像なし）。
     pub fn load(config_dir: &Path) -> Self {
         let path = Self::path(config_dir);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
-            Err(e) => {
-                tracing::warn!("failed to read {}: {}, using defaults", path.display(), e);
-                return Self::default();
-            }
-        };
-        toml::from_str(&text).unwrap_or_else(|e| {
-            tracing::warn!("malformed state file {}: {}, using defaults", path.display(), e);
-            Self::default()
-        })
+        kabekami_common::toml_file::load_lenient(&path, "state file").unwrap_or_default()
     }
 
     /// 状態を `atomic_write` で永続化する（電源断時に壊れた state が残らない）。
@@ -51,6 +40,31 @@ impl DaemonState {
 
     fn path(config_dir: &Path) -> PathBuf {
         config_dir.join("state.toml")
+    }
+}
+
+/// ブロッキングな保存処理を `spawn_blocking` に逃がして実行し、成功したかを返す。
+///
+/// デーモンは `worker_threads = 1` で動くため、`atomic_write`（fsync 2 回）を
+/// 非同期タスク内で直接呼ぶと、その間 D-Bus 応答・トレイ更新・タイマーが
+/// すべて止まる。保存失敗は警告に留めて呼び出し側の処理は続行させる
+/// （state や設定の書き込み失敗で壁紙切り替え自体を止めたくない）。
+///
+/// `what` は失敗ログに出す対象名（例: `"daemon state"`）。
+pub async fn save_offloaded<F>(save: F, what: &str) -> bool
+where
+    F: FnOnce() -> Result<()> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(save).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            tracing::warn!("failed to persist {}: {:#}", what, e);
+            false
+        }
+        Err(e) => {
+            tracing::warn!("{} persist task panicked: {}", what, e);
+            false
+        }
     }
 }
 
@@ -70,14 +84,11 @@ impl StateWriter {
         Self { dir, last: initial }
     }
 
-    /// 状態が前回と変わっていれば保存する。
+    /// 状態が前回と変わっていれば保存する（壁紙適用のたびに呼ばれる）。
     ///
-    /// 書き込み（fsync 2 回）は `spawn_blocking` に逃がす。デーモンは
-    /// `worker_threads = 1` で動くため、ここで同期 I/O を行うと fsync の間
-    /// D-Bus 応答・トレイ更新・タイマーがすべて止まる。
-    ///
-    /// 壁紙適用のたびに呼ばれるため、保存失敗は警告に留めて処理を続行する
-    /// （state の書き込み失敗で壁紙切り替え自体を止めたくない）。
+    /// 書き込みは `save_offloaded` 経由で `spawn_blocking` に逃がす。
+    /// 保存に成功したときだけ「書き込み済みの内容」を更新するため、
+    /// 失敗した場合は次回の呼び出しで再試行される。
     pub async fn persist(&mut self, paused: bool, current: Option<&Path>) {
         let next = DaemonState {
             paused,
@@ -88,10 +99,8 @@ impl StateWriter {
         }
         let dir = self.dir.clone();
         let to_save = next.clone();
-        match tokio::task::spawn_blocking(move || to_save.save(&dir)).await {
-            Ok(Ok(())) => self.last = next,
-            Ok(Err(e)) => tracing::warn!("failed to persist daemon state: {:#}", e),
-            Err(e) => tracing::warn!("state persist task panicked: {}", e),
+        if save_offloaded(move || to_save.save(&dir), "daemon state").await {
+            self.last = next;
         }
     }
 }

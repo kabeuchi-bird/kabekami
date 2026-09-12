@@ -70,16 +70,18 @@ mod tests {
         DynamicImage::ImageRgba8(RgbaImage::from_pixel(w, h, Rgba([100, 150, 200, 255])))
     }
 
-    #[test]
-    fn fill_produces_screen_dimensions() {
-        let out = fill(&solid(800, 600), 1920, 1080);
-        assert_eq!(out.dimensions(), (1920, 1080));
-    }
-
-    #[test]
-    fn fit_produces_screen_dimensions() {
-        let out = fit(&solid(800, 600), 1920, 1080);
-        assert_eq!(out.dimensions(), (1920, 1080));
+    /// 左右で色が違う画像。単色だと fill と BlurPad の出力差が
+    /// レターボックス部分だけになり、経路の判別が弱くなる。
+    fn two_tone(w: u32, h: u32) -> DynamicImage {
+        let mut img = RgbaImage::new(w, h);
+        for (x, _y, px) in img.enumerate_pixels_mut() {
+            *px = if x < w / 2 {
+                Rgba([200, 40, 40, 255])
+            } else {
+                Rgba([40, 40, 200, 255])
+            };
+        }
+        DynamicImage::ImageRgba8(img)
     }
 
     #[test]
@@ -89,22 +91,41 @@ mod tests {
         assert_eq!(top_pixel[0], 0, "letterbox should be black");
     }
 
+    /// 画面 384x216 は 16:9 (1.778)。ここに比 1.700 の画像を渡すと
+    /// 差 0.078 <= SMART_THRESHOLD なので fill 経路に入るべき。
     #[test]
-    fn stretch_produces_screen_dimensions() {
-        let out = stretch(&solid(800, 600), 1920, 1080);
-        assert_eq!(out.dimensions(), (1920, 1080));
+    fn smart_uses_fill_when_ratio_is_close() {
+        let src = two_tone(340, 200);
+        let out = process(&src, 384, 216, DisplayMode::Smart, 25.0, 0.1);
+        // 寸法はどのモードでも同じになるため、出力そのものを突き合わせる
+        assert!(out == fill(&src, 384, 216), "比が近いときは fill と一致すべき");
+        assert!(
+            out != crate::blur_pad::generate_blur_pad(&src, 384, 216, 25.0, 0.1),
+            "BlurPad と一致してしまうと、この判定を検証できていない"
+        );
     }
 
+    /// 比 1.000 の画像は差 0.778 > SMART_THRESHOLD なので BlurPad 経路に入るべき。
     #[test]
-    fn smart_close_ratio_uses_fill() {
-        let src = solid(1920, 1080);
-        let out = process(&src, 1920, 1080, DisplayMode::Smart, 25.0, 0.1);
-        assert_eq!(out.dimensions(), (1920, 1080));
+    fn smart_uses_blur_pad_when_ratio_is_far() {
+        let src = two_tone(200, 200);
+        let out = process(&src, 384, 216, DisplayMode::Smart, 25.0, 0.1);
+        assert!(
+            out == crate::blur_pad::generate_blur_pad(&src, 384, 216, 25.0, 0.1),
+            "比が離れているときは BlurPad と一致すべき"
+        );
+        assert!(out != fill(&src, 384, 216), "fill と一致してしまうと判定を検証できていない");
     }
 
+    /// どのモードでも画面ぴったりの寸法を返すこと。
+    ///
+    /// 4:3 (1.333) を 16:9 (1.778) に出すので、Smart は差 0.444 で
+    /// BlurPad 側に入る。寸法の正しさは解像度に依存しないため、
+    /// BlurPad のぼかしが軽く済む小さい画面で検証する。
     #[test]
     fn all_modes_produce_correct_dimensions() {
-        let src = solid(800, 600);
+        const SCREEN: (u32, u32) = (384, 216);
+        let src = solid(160, 120);
         for mode in [
             DisplayMode::Fill,
             DisplayMode::Fit,
@@ -112,10 +133,10 @@ mod tests {
             DisplayMode::BlurPad,
             DisplayMode::Smart,
         ] {
-            let out = process(&src, 1920, 1080, mode, 10.0, 0.1);
+            let out = process(&src, SCREEN.0, SCREEN.1, mode, 10.0, 0.1);
             assert_eq!(
                 out.dimensions(),
-                (1920, 1080),
+                SCREEN,
                 "mode {:?} produced wrong dimensions",
                 mode
             );

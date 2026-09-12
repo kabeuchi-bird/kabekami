@@ -141,6 +141,10 @@ async fn main() -> Result<()> {
         };
 
     // 言語設定を解決する（環境変数 → config → デフォルト ja）
+    // 初回呼び出しで言語ファイルの探索（同期 I/O）が走るが、この時点では
+    // トレイも D-Bus もまだ起動しておらず待たせる相手が居ないため、
+    // spawn_blocking へ逃がす意味は無い（直前の画像スキャンや Config::load も
+    // 同様に同期のままである）。
     let mut lang = resolve_lang(&config);
     tracing::info!("ui language: {:?}", lang);
 
@@ -217,6 +221,14 @@ async fn main() -> Result<()> {
     // これが Plasma パネル全体の一時的なフリーズとして観測される。
     // `interval_at` で第 1 tick を数秒後にずらし、D-Bus 周りの初期化が
     // 落ち着いてからフェッチが始まるようにする。
+    //
+    // これは競合ウィンドウを狭めるだけで、競合そのものは無くならない
+    // （初期化が 5 秒を超えれば再発しうる）。競合を構造的に無くすなら
+    // `worker_threads = 2` にして D-Bus / トレイのポーリングを別スレッドへ
+    // 逃がすのが本筋だが、常駐デーモンとしてアイドル時のスレッド・メモリ
+    // コストを増やしたくないため、起動直後の数秒だけの問題に対しては
+    // この遅延で足りると判断している。再発するようなら worker_threads を
+    // 見直すこと。
     const FIRST_FETCH_DELAY: Duration = Duration::from_secs(5);
     let mut fetch_ticker = interval_at(Instant::now() + FIRST_FETCH_DELAY, Duration::from_secs(1800));
     fetch_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -262,8 +274,8 @@ async fn main() -> Result<()> {
     // 起動時の即時切り替え。
     // 一時停止状態は再起動をまたいで復元されるため、停止中なら切り替えない
     // （停止したまま再起動したのに壁紙が変わる、という挙動を避ける）。
-    if config.rotation.change_on_start && !scheduler.is_paused() {
-        if let Some(path) = scheduler.next() {
+    if config.rotation.change_on_start {
+        if let Some(path) = scheduler.auto_next() {
             apply_and_notify(apply_ctx!(), &path, "initial apply failed").await;
         }
     }
@@ -309,9 +321,8 @@ async fn main() -> Result<()> {
                             .replace("{count}", &added.to_string());
                         notifier.info(strings.notify_fetch_title, &body).await;
                     }
-                    // 初回取得時の即時適用も一時停止中は行わない
-                    if was_empty && !scheduler.is_paused() {
-                        if let Some(path) = scheduler.next() {
+                    if was_empty {
+                        if let Some(path) = scheduler.auto_next() {
                             apply_and_notify(apply_ctx!(), &path, "online: initial apply failed").await;
                         }
                     }
@@ -319,29 +330,14 @@ async fn main() -> Result<()> {
             }
 
             _ = ticker.tick() => {
-                if scheduler.is_paused() {
-                    continue;
-                }
-                if let Some(path) = scheduler.next() {
+                if let Some(path) = scheduler.auto_next() {
                     apply_and_notify(apply_ctx!(), &path, "auto apply failed").await;
                 }
             }
 
             Some(cmd) = cmd_rx.recv() => {
                 let now = std::time::Instant::now();
-                // システムイベント系（Quit / PlasmaRestarted / ReloadConfig / ScreensChanged）は
-                // スロットリングをバイパスする。
-                //
-                // 500ms スロットルの理由: KRunner で `kabekami --next` を実行すると
-                // CLI バイナリの起動 + D-Bus 接続 (50-200ms) を 2 回経由して daemon に
-                // 届くケースがあり、短いスロットル (100ms 等) だと二重実行を吸収しきれない。
-                let throttle_exempt = matches!(
-                    cmd,
-                    TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ReloadConfig | TrayCmd::ScreensChanged(_)
-                );
-                if !throttle_exempt
-                    && last_cmd_at.is_some_and(|t| now.duration_since(t) < Duration::from_millis(500))
-                {
+                if should_throttle(&cmd, last_cmd_at, now) {
                     tracing::debug!("command throttled (< 500ms): {:?}", cmd);
                     continue;
                 }
@@ -568,12 +564,17 @@ async fn main() -> Result<()> {
                                 // ブラックリスト入りした画像は rebuild で current から落ちるため、
                                 // ここで拾わないことで「除外したはずの画像が再適用される」のを防ぐ。
                                 match scheduler.current().cloned() {
+                                    // 再適用が成功した場合だけ apply_and_notify 内で
+                                    // state に記録される。ここで先に persist すると、
+                                    // 適用に失敗した壁紙を「現在の壁紙」として
+                                    // 保存してしまい、再起動後にトレイやゴミ箱操作が
+                                    // 画面に出ていない画像を指す（分岐を畳まないこと）。
                                     Some(cur) => {
                                         apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
                                     }
+                                    // current が落ちた場合は apply_and_notify を通らないので、
+                                    // state に残る旧画像を明示的に消す。
                                     None => {
-                                        // current が落ちた場合、state とトレイに残る旧画像を消す
-                                        // （apply_and_notify を通らないので明示的に更新する）。
                                         state_writer.persist(scheduler.is_paused(), None).await;
                                     }
                                 }
@@ -935,6 +936,27 @@ fn collect_watch_dirs(config: &Config) -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// 連続して届いたコマンドの 2 発目以降を捨てるか判定する。
+///
+/// 500ms という長さの理由: KRunner で `kabekami --next` を実行すると
+/// CLI バイナリの起動 + D-Bus 接続 (50-200ms) を 2 回経由して daemon に
+/// 届くケースがあり、短いスロットル (100ms 等) だと二重実行を吸収しきれない。
+///
+/// システムイベント系（Quit / PlasmaRestarted / ReloadConfig / ScreensChanged）は
+/// ユーザー操作ではなく、取りこぼすと内部状態が画面と食い違うため除外する。
+fn should_throttle(
+    cmd: &TrayCmd,
+    last_cmd_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    const THROTTLE: Duration = Duration::from_millis(500);
+    let exempt = matches!(
+        cmd,
+        TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ReloadConfig | TrayCmd::ScreensChanged(_)
+    );
+    !exempt && last_cmd_at.is_some_and(|t| now.duration_since(t) < THROTTLE)
+}
+
 fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
     let period = Duration::from_secs(interval_secs);
     let mut t = interval_at(Instant::now() + period, period);
@@ -1103,16 +1125,9 @@ async fn update_tray_ok(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>, 
 
 /// 設定を保存し、失敗しても警告に留めて処理を続行する。
 /// `what` は失敗ログに出す変更内容（例: `"display mode"`）。
-///
-/// `Config::save` も `atomic_write`（fsync 2 回）を行うため、`state` の保存と
-/// 同様に `spawn_blocking` へ逃がしてワーカースレッドを止めない。
 async fn persist_config(config: &Config, what: &str) {
     let owned = config.clone();
-    match tokio::task::spawn_blocking(move || owned.save()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!("failed to persist {}: {:#}", what, e),
-        Err(e) => tracing::warn!("config persist task panicked: {}", e),
-    }
+    state::save_offloaded(move || owned.save(), what).await;
 }
 
 fn try_spawn_fetch(
@@ -1173,5 +1188,107 @@ fn start_prefetch(
             bg_darken: config.display.bg_darken,
         };
         prefetcher.start(key, cache.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DisplayMode;
+
+    /// スキャン・監視の対象ディレクトリは「ローカル指定 + 有効なオンライン
+    /// ソースのダウンロード先」。ここを間違うと壁紙が黙って現れない／消える。
+    #[test]
+    fn watch_dirs_include_only_enabled_online_sources() {
+        let config: Config = toml::from_str(
+            r#"
+            [sources]
+            directories = ["/pics/a", "/pics/b"]
+
+            [[online_sources]]
+            provider = "bing"
+            enabled = true
+            download_dir = "/dl/bing"
+
+            [[online_sources]]
+            provider = "wallhaven"
+            enabled = false
+            download_dir = "/dl/wallhaven"
+            "#,
+        )
+        .expect("test config should parse");
+
+        assert_eq!(
+            collect_watch_dirs(&config),
+            vec![
+                std::path::PathBuf::from("/pics/a"),
+                std::path::PathBuf::from("/pics/b"),
+                std::path::PathBuf::from("/dl/bing"),
+            ],
+            "無効なオンラインソースのダウンロード先は対象に入れない"
+        );
+    }
+
+    #[test]
+    fn watch_dirs_without_online_sources() {
+        let mut config = Config::default();
+        config.sources.directories = vec![std::path::PathBuf::from("/pics")];
+        assert_eq!(collect_watch_dirs(&config), vec![std::path::PathBuf::from("/pics")]);
+    }
+
+    #[test]
+    fn first_command_is_never_throttled() {
+        assert!(!should_throttle(&TrayCmd::Next, None, std::time::Instant::now()));
+    }
+
+    #[test]
+    fn user_command_after_500ms_passes() {
+        let first = std::time::Instant::now();
+        assert!(!should_throttle(&TrayCmd::Next, Some(first), first + Duration::from_millis(500)));
+    }
+
+    /// KRunner 経由だと同じコマンドが 2 回届くことがあるため、
+    /// ユーザー操作系はすべて連打を吸収する。
+    #[test]
+    fn user_commands_within_500ms_are_throttled() {
+        let first = std::time::Instant::now();
+        let again = first + Duration::from_millis(120);
+        for cmd in [
+            TrayCmd::Next,
+            TrayCmd::Prev,
+            TrayCmd::TogglePause,
+            TrayCmd::SetMode(DisplayMode::Fill),
+            TrayCmd::SetInterval(30),
+            TrayCmd::OpenCurrent,
+            TrayCmd::DeleteCurrent,
+            TrayCmd::BlacklistCurrent,
+            TrayCmd::CopyToFavorites,
+            TrayCmd::OpenSettings,
+        ] {
+            assert!(should_throttle(&cmd, Some(first), again), "{cmd:?} は連打を吸収すべき");
+        }
+    }
+
+    /// 取りこぼすと内部状態が実際のデスクトップとずれるコマンドは、
+    /// 直前に別のコマンドを処理していても必ず通す。
+    #[test]
+    fn system_commands_bypass_the_throttle() {
+        let first = std::time::Instant::now();
+        let immediately_after = first + Duration::from_millis(1);
+        for cmd in [
+            TrayCmd::Quit,
+            TrayCmd::PlasmaRestarted,
+            TrayCmd::ReloadConfig,
+            TrayCmd::ScreensChanged(vec![screen::Monitor {
+                name: "DP-1".into(),
+                width: 1920,
+                height: 1080,
+            }]),
+        ] {
+            assert!(
+                !should_throttle(&cmd, Some(first), immediately_after),
+                "{cmd:?} はスロットリングの対象外であるべき"
+            );
+        }
     }
 }

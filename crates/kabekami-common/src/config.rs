@@ -412,7 +412,7 @@ fn home_dir() -> Option<PathBuf> {
     Some(PathBuf::from(v))
 }
 
-fn xdg_config_dir() -> Option<PathBuf> {
+pub(crate) fn xdg_config_dir() -> Option<PathBuf> {
     if let Ok(v) = std::env::var("XDG_CONFIG_HOME") {
         if !v.is_empty() { return Some(PathBuf::from(v)); }
     }

@@ -1,0 +1,134 @@
+# kabekami 日本語 UI 文字列
+#
+# このファイルをコピーして <言語コード>.toml の名前で
+# ~/.config/kabekami/i18n/ に置くと、再ビルドなしで言語が増えます。
+# 書かなかったキーは英語になるため、部分的な翻訳でも動作します。
+# 詳しい仕様（優先順位・重ね合わせ・要再起動）は README を参照。
+
+display_name = "日本語"
+
+# ── デーモン（トレイメニュー・通知） ──────────────────────────────────────────
+[tray]
+next_wallpaper    = "次の壁紙"
+prev_wallpaper    = "前の壁紙"
+pause             = "一時停止"
+resume            = "再開"
+display_mode      = "表示モード"
+interval          = "切り替え間隔"
+open_current      = "現在の壁紙を開く"
+delete_current    = "ゴミ箱に移動"
+blacklist_current = "二度と表示しない"
+copy_to_favorites = "お気に入りに追加"
+quit              = "終了"
+open_settings     = "設定を開く"
+# 画像枚数の単位
+images            = "枚"
+
+# {} にはファイル名が入る
+tooltip_current   = "現在: {}"
+# {} にはエラー本文が入る
+tooltip_error     = "エラー: {}"
+
+notify_failed     = "壁紙の設定に失敗しました"
+notify_warning    = "kabekami 警告"
+notify_fetch_title = "オンラインソース"
+# {provider} = プロバイダー名, {count} = 取得枚数
+notify_fetch_body = "{provider} から {count} 枚の画像をダウンロードしました"
+
+# 切り替え間隔メニューのラベル。tray::INTERVAL_PRESETS と同じ順序・件数（6 件）にすること
+interval_labels   = ["10秒", "30秒", "5分", "30分", "1時間", "3時間"]
+
+# ── 設定 GUI（kabekami-config） ───────────────────────────────────────────────
+[config]
+# ダイアログ・共通ボタン
+dialog_select_folder = "フォルダを選択"
+dialog_select_image  = "画像を選択"
+browse               = "📁 参照"
+save_button          = "💾  保存"
+add                  = "追加"
+# kdialog 不在時のツールチップ。''' は改行をそのまま書ける（エスケープ不要）
+kdialog_missing = '''
+kdialog がインストールされていません。
+パスを直接入力してください。'''
+
+# ステータス表示
+saved         = "設定を保存しました"
+save_failed   = "保存失敗"
+preview_error = "プレビューエラー"
+
+# タブ見出し
+tab_sources  = "ソース"
+tab_online   = "オンライン"
+tab_rotation = "ローテーション"
+tab_display  = "表示"
+tab_cache    = "キャッシュ"
+tab_ui       = "UI"
+
+# ソースタブ
+sources_heading = "壁紙ソース"
+recursive       = "サブフォルダも含める"
+favorites_dir   = "お気に入りフォルダ"
+favorites_hint  = "~/Pictures/Favorites (空欄=無効)"
+directories     = "ディレクトリ"
+
+# ローテーションタブ
+rotation_heading = "ローテーション"
+interval_secs    = "切り替え間隔 (秒):"
+order            = "順序"
+order_random     = "ランダム"
+order_sequential = "順番"
+change_on_start  = "起動時に即切り替え"
+prefetch         = "次の壁紙を先読み"
+
+# 表示タブ
+display_heading = "表示モード"
+mode_blurpad    = "BlurPad (ぼかし背景＋前景)"
+mode_smart      = "Smart (アスペクト比で自動選択)"
+mode_fill       = "Fill (クロップ)"
+mode_fit        = "Fit (レターボックス)"
+mode_stretch    = "Stretch (引き伸ばし)"
+blur_sigma      = "ぼかし強度"
+bg_darken       = "背景暗さ"
+preview_image   = "プレビュー画像"
+preview_button  = "▶ プレビュー"
+
+# キャッシュタブ
+cache_heading        = "キャッシュ"
+cache_directory      = "ディレクトリ"
+max_size_mb          = "最大サイズ"
+unlimited_hint       = "0 = 無制限"
+refresh              = "更新"
+clear_cache          = "クリア"
+current_size_unknown = "現在のサイズ: (更新 をクリック)"
+current_size         = "現在のサイズ"
+unlimited            = "無制限"
+
+# オンラインタブ
+online_heading      = "オンラインソース"
+online_desc         = "インターネットから壁紙を自動取得します。"
+remove              = "✖  削除"
+count               = "保持枚数"
+interval_hours      = "再取得間隔"
+download_dir        = "ダウンロード先"
+add_provider        = "プロバイダーを追加"
+add_provider_button = "＋ 追加"
+download_dir_hint   = "💡 ダウンロード先: ~/.local/share/kabekami/<provider>/"
+api_key             = "API キー"
+query               = "検索クエリ"
+subreddit           = "サブレディット"
+locale              = "ロケール"
+quality             = "画質"
+# {} にはプロバイダー既定の再取得間隔（時間）が入る
+interval_default_hint = "(既定: {} 時間)"
+default_option      = "(既定)"
+unknown_language    = "(不明)"
+# 画像ファイル選択ダイアログのフィルター名。拡張子リストはコード側が付ける
+image_filter_label  = "画像"
+
+# UI タブ
+ui_heading       = "UI 設定"
+language         = "表示言語"
+warn_notify      = "警告をデスクトップ通知で表示"
+notify_fetch     = "オンライン取得完了時に通知を表示"
+# ' で囲むとダブルクォートをエスケープせずに書ける
+enable_blacklist = '「二度と表示しない」機能を有効にする'
