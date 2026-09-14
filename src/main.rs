@@ -73,15 +73,12 @@ async fn main() -> Result<()> {
     let mut blacklist = blacklist::Blacklist::load(&kabekami_config_dir)
         .context("failed to load blacklist")?;
 
-    // ローカルディレクトリ + オンラインソースのダウンロードディレクトリを統合してスキャン
-    let mut scan_dirs = config.sources.directories.clone();
-    for oc in &config.online_sources {
-        if oc.enabled {
-            scan_dirs.push(oc.resolved_download_dir());
-        }
-    }
-    let images = build_filtered_images_list(&scan_dirs, config.sources.recursive, &blacklist)
-        .context("failed to scan source directories")?;
+    let images = build_filtered_images_list(
+        &collect_source_dirs(&config),
+        config.sources.recursive,
+        &blacklist,
+    )
+    .context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
     if images.is_empty() {
         if has_online {
@@ -97,12 +94,9 @@ async fn main() -> Result<()> {
     }
 
     // モニター検出（マルチモニター対応）
+    // プライマリ解像度は `primary_size()` で都度導出する（`screens` と二重に
+    // 持つと ScreensChanged で同期を取り違える余地が残るため）。
     let mut screens = resolve_screens().await;
-    // プライマリ解像度: フェッチコンテキスト・プリフェッチに使用
-    let (mut screen_w, mut screen_h) = screens
-        .first()
-        .map(|m| (m.width, m.height))
-        .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
 
     // キャッシュ・スケジューラ・先読みを初期化
     let mut cache = Arc::new(Cache::new(
@@ -130,15 +124,7 @@ async fn main() -> Result<()> {
     let mut prefetcher = Prefetcher::new();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
-    let (mut watch_rx, mut _watcher_handle) =
-        match watcher::spawn(&collect_watch_dirs(&config), config.sources.recursive) {
-            Some((w, rx)) => (rx, Some(w)),
-            None => {
-                let (tx, rx) = tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
-                drop(tx);
-                (rx, None)
-            }
-        };
+    let (mut watch_rx, mut _watcher_handle) = spawn_dir_watcher(&config);
 
     // 言語設定を解決する（環境変数 → config → デフォルト ja）
     // 初回呼び出しで言語ファイルの探索（同期 I/O）が走るが、この時点では
@@ -207,8 +193,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    let mut fetch_ctx = provider::FetchContext { screen_w, screen_h };
-
     // 30 分ごとにプロバイダーを確認する。
     //
     // `tokio::time::interval` は既定で第 1 tick が即座に完了する。この直後の
@@ -232,10 +216,6 @@ async fn main() -> Result<()> {
     const FIRST_FETCH_DELAY: Duration = Duration::from_secs(5);
     let mut fetch_ticker = interval_at(Instant::now() + FIRST_FETCH_DELAY, Duration::from_secs(1800));
     fetch_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    let online_configs = std::sync::Arc::new(std::sync::Mutex::new(
-        config.online_sources.clone(),
-    ));
 
     let fetch_in_progress = Arc::new(AtomicBool::new(false));
 
@@ -289,8 +269,10 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = fetch_ticker.tick() => {
                 if let Some(ref client) = online_client {
-                    let configs = online_configs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    try_spawn_fetch(client, configs, online_tx.clone(), fetch_in_progress.clone(), fetch_ctx, false);
+                    let (screen_w, screen_h) = primary_size(&screens);
+                    let ctx = provider::FetchContext { screen_w, screen_h };
+                    let configs = config.online_sources.clone();
+                    try_spawn_fetch(client, configs, online_tx.clone(), fetch_in_progress.clone(), ctx, false);
                 }
             }
 
@@ -389,7 +371,8 @@ async fn main() -> Result<()> {
                                 notifier.clear();
                                 update_tray_clear_error(&tray_handle).await;
                             }
-                            start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
+                            let (w, h) = primary_size(&screens);
+                            start_prefetch(&mut prefetcher, &scheduler, w, h, &config, &cache);
                         }
                     }
 
@@ -523,16 +506,7 @@ async fn main() -> Result<()> {
                                     Err(e) => tracing::warn!("reload: scan error: {}", e),
                                 }
 
-                                (watch_rx, _watcher_handle) =
-                                    match watcher::spawn(&collect_watch_dirs(&new_cfg), new_cfg.sources.recursive) {
-                                        Some((w, rx)) => (rx, Some(w)),
-                                        None => {
-                                            let (tx, rx) =
-                                                tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
-                                            drop(tx);
-                                            (rx, None)
-                                        }
-                                    };
+                                (watch_rx, _watcher_handle) = spawn_dir_watcher(&new_cfg);
 
                                 prefetcher.abort();
                                 cache = Arc::new(Cache::new(
@@ -557,7 +531,6 @@ async fn main() -> Result<()> {
                                     );
                                 }
 
-                                *online_configs.lock().unwrap_or_else(|e| e.into_inner()) = new_cfg.online_sources.clone();
                                 config = new_cfg;
 
                                 // rebuild 後の current を使う。新しいソースから外れた画像や
@@ -618,17 +591,12 @@ async fn main() -> Result<()> {
                     }
 
                     TrayCmd::ScreensChanged(new_screens) => {
-                        let (new_w, new_h) = new_screens.first()
-                            .map(|m| (m.width, m.height))
-                            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
+                        let (new_w, new_h) = primary_size(&new_screens);
                         tracing::info!(
                             "screens updated: {} monitor(s), primary {}x{}",
                             new_screens.len(), new_w, new_h
                         );
                         screens = new_screens;
-                        screen_w = new_w;
-                        screen_h = new_h;
-                        fetch_ctx = provider::FetchContext { screen_w, screen_h };
                         // 解像度が変わるとキャッシュキーも変わるため、現在の壁紙を
                         // 新しい解像度で再加工して適用する。
                         if let Some(path) = scheduler.current().cloned() {
@@ -926,7 +894,9 @@ async fn resolve_screens() -> Vec<screen::Monitor> {
     vec![screen::Monitor { name: "fallback".into(), width: FALLBACK_SCREEN_W, height: FALLBACK_SCREEN_H }]
 }
 
-fn collect_watch_dirs(config: &Config) -> Vec<std::path::PathBuf> {
+/// スキャンと監視の対象ディレクトリ。ローカル指定分に、有効なオンライン
+/// ソースのダウンロード先を足したもの。両者は常に同一集合。
+fn collect_source_dirs(config: &Config) -> Vec<std::path::PathBuf> {
     let mut dirs = config.sources.directories.clone();
     for oc in &config.online_sources {
         if oc.enabled {
@@ -934,6 +904,32 @@ fn collect_watch_dirs(config: &Config) -> Vec<std::path::PathBuf> {
         }
     }
     dirs
+}
+
+/// ディレクトリ監視を起動する。監視が使えない環境では閉じたチャンネルを返し、
+/// `Some(ev) = watch_rx.recv()` が一致しなくなることで select! が無害にスキップする。
+fn spawn_dir_watcher(
+    config: &Config,
+) -> (
+    tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
+    Option<watcher::DirWatcher>,
+) {
+    match watcher::spawn(&collect_source_dirs(config), config.sources.recursive) {
+        Some((w, rx)) => (rx, Some(w)),
+        None => {
+            let (tx, rx) = tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
+            drop(tx);
+            (rx, None)
+        }
+    }
+}
+
+/// プライマリモニターの解像度。検出できていなければフォールバック値を返す。
+fn primary_size(screens: &[screen::Monitor]) -> (u32, u32) {
+    screens
+        .first()
+        .map(|m| (m.width, m.height))
+        .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H))
 }
 
 /// 連続して届いたコマンドの 2 発目以降を捨てるか判定する。
@@ -1002,10 +998,7 @@ async fn apply(
     plasma: &plasma::PlasmaShell,
 ) -> Result<()> {
     if screens.len() <= 1 {
-        let (w, h) = screens
-            .first()
-            .map(|m| (m.width, m.height))
-            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
+        let (w, h) = primary_size(screens);
         let output = process_image(src, w, h, config, cache).await?;
         plasma.set_wallpaper(&output).await
     } else {
@@ -1080,10 +1073,7 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
         update_tray_ok(ctx.tray_handle, path).await;
         // 現在の壁紙を記録しておき、再起動後も同じ画像を「現在」として扱えるようにする
         ctx.state_writer.persist(ctx.scheduler.is_paused(), Some(path)).await;
-        let (w, h) = ctx.screens
-            .first()
-            .map(|m| (m.width, m.height))
-            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
+        let (w, h) = primary_size(ctx.screens);
         start_prefetch(ctx.prefetcher, ctx.scheduler, w, h, ctx.config, ctx.cache);
         // 画面構成の再検出を要求（ウォッチャー側で 60s スロットル）
         if let Some(tx) = ctx.screen_check_tx {
@@ -1198,8 +1188,9 @@ mod tests {
 
     /// スキャン・監視の対象ディレクトリは「ローカル指定 + 有効なオンライン
     /// ソースのダウンロード先」。ここを間違うと壁紙が黙って現れない／消える。
+    /// スキャンと監視で同じ関数を使うので、ズレる余地も無くなっている。
     #[test]
-    fn watch_dirs_include_only_enabled_online_sources() {
+    fn source_dirs_include_only_enabled_online_sources() {
         let config: Config = toml::from_str(
             r#"
             [sources]
@@ -1219,7 +1210,7 @@ mod tests {
         .expect("test config should parse");
 
         assert_eq!(
-            collect_watch_dirs(&config),
+            collect_source_dirs(&config),
             vec![
                 std::path::PathBuf::from("/pics/a"),
                 std::path::PathBuf::from("/pics/b"),
@@ -1230,10 +1221,10 @@ mod tests {
     }
 
     #[test]
-    fn watch_dirs_without_online_sources() {
+    fn source_dirs_without_online_sources() {
         let mut config = Config::default();
         config.sources.directories = vec![std::path::PathBuf::from("/pics")];
-        assert_eq!(collect_watch_dirs(&config), vec![std::path::PathBuf::from("/pics")]);
+        assert_eq!(collect_source_dirs(&config), vec![std::path::PathBuf::from("/pics")]);
     }
 
     #[test]
