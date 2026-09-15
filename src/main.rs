@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     let mut prefetcher = Prefetcher::new();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
-    let (mut watch_rx, mut _watcher_handle) =
+    let (mut watch_rx, mut watcher_handle) =
         spawn_dir_watcher(&source_dirs, config.sources.recursive);
 
     // 言語設定を解決する（環境変数 → config → デフォルト ja）
@@ -166,7 +166,7 @@ async fn main() -> Result<()> {
 
     // 設定ファイル監視を起動。失敗時は閉じたチャンネルにフォールバック
     // （`Some(()) = ...` パターンが一致せず select! で無害にスキップされる）。
-    let (mut config_change_rx, _config_watcher_handle) = match Config::config_path()
+    let (mut config_change_rx, _configwatcher_handle) = match Config::config_path()
         .ok()
         .and_then(|p| watcher::spawn_config(&p))
     {
@@ -485,19 +485,38 @@ async fn main() -> Result<()> {
                             Ok(new_cfg) => {
                                 tracing::info!("reloading config");
 
+                                // 再スキャン（同期的なディレクトリ走査）と inotify の
+                                // 張り替えは、対象ディレクトリが変わっていなければ不要。
+                                // worker thread が 1 本なので、大きなソースを持つ環境では
+                                // `interval_secs` を変えただけの保存でも数百 ms 止まりうる。
+                                //
+                                // 監視が使えない環境（watcher_handle が None）では設定保存が
+                                // 唯一の再スキャン契機になるため、その場合は省かない。
                                 let source_dirs = collect_source_dirs(&new_cfg);
-                                match build_filtered_images_list(&source_dirs, new_cfg.sources.recursive, &blacklist) {
-                                    Ok(images) if !images.is_empty() => {
-                                        tracing::info!("reload: {} image(s) found", images.len());
-                                        // 一時停止状態と現在画像は rebuild が引き継ぐ
-                                        scheduler.rebuild(images, new_cfg.rotation.order);
+                                let sources_changed = source_dirs != collect_source_dirs(&config)
+                                    || new_cfg.sources.recursive != config.sources.recursive
+                                    || watcher_handle.is_none();
+
+                                if sources_changed {
+                                    match build_filtered_images_list(&source_dirs, new_cfg.sources.recursive, &blacklist) {
+                                        Ok(images) if !images.is_empty() => {
+                                            tracing::info!("reload: {} image(s) found", images.len());
+                                            // 一時停止状態と現在画像は rebuild が引き継ぐ
+                                            scheduler.rebuild(images, new_cfg.rotation.order);
+                                        }
+                                        Ok(_) => tracing::warn!("reload: no images found, keeping current list"),
+                                        Err(e) => tracing::warn!("reload: scan error: {}", e),
                                     }
-                                    Ok(_) => tracing::warn!("reload: no images found, keeping current list"),
-                                    Err(e) => tracing::warn!("reload: scan error: {}", e),
+                                    (watch_rx, watcher_handle) =
+                                        spawn_dir_watcher(&source_dirs, new_cfg.sources.recursive);
+                                } else {
+                                    tracing::debug!("reload: source dirs unchanged, skipping rescan");
                                 }
 
-                                (watch_rx, _watcher_handle) =
-                                    spawn_dir_watcher(&source_dirs, new_cfg.sources.recursive);
+                                // rebuild を通らなかった場合（再スキャンを省いた・画像が
+                                // 見つからなかった・スキャンが失敗した）も並び順は反映する。
+                                // rebuild 済みなら同値なので何もしない。
+                                scheduler.set_order(new_cfg.rotation.order);
 
                                 prefetcher.abort();
                                 cache = Arc::new(Cache::new(

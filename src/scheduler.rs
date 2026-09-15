@@ -161,6 +161,20 @@ impl Scheduler {
         }
     }
 
+    /// 並び順だけを変更する。画像一覧はそのまま保ち、現在の画像と一時停止状態は
+    /// `rebuild` が引き継ぐ。
+    ///
+    /// 設定リロードで再スキャンを省いた場合でも並び順の変更を反映するために使う。
+    /// 同じ並び順なら何もしない。`rebuild` は履歴を捨て、`Random` ならキューを
+    /// 再シャッフルするため、変更が無いリロードで呼ばれても副作用を出さないようにする。
+    pub fn set_order(&mut self, order: Order) {
+        if self.order == order {
+            return;
+        }
+        let images = self.images.clone();
+        self.rebuild(images, order);
+    }
+
     /// パスから画像インデックスを引く。
     fn find_index(&self, path: &Path) -> Option<usize> {
         self.images.iter().position(|p| p == path)
@@ -410,6 +424,40 @@ mod tests {
 
         assert!(s.is_paused(), "paused state should survive rebuild");
         assert_eq!(s.current(), Some(&keep), "current should survive rebuild");
+    }
+
+    /// 設定リロードで再スキャンを省いたときも並び順の変更が効くこと。
+    /// 画像一覧・現在の画像・一時停止状態は維持される。
+    #[test]
+    fn set_order_changes_order_and_keeps_images_current_and_paused() {
+        let all = paths(5);
+        let keep = all[2].clone();
+        let mut s = Scheduler::new(all.clone(), Order::Sequential);
+        s.restore_current(&keep);
+        s.pause();
+
+        s.set_order(Order::Random);
+
+        assert_eq!(s.order, Order::Random, "order should be updated");
+        assert_eq!(s.image_count(), all.len(), "image list should be untouched");
+        assert_eq!(s.current(), Some(&keep), "current should survive set_order");
+        assert!(s.is_paused(), "paused state should survive set_order");
+    }
+
+    /// 同じ並び順で呼ばれたら何もしない。`rebuild` を通してしまうと履歴が消えて
+    /// `prev()` が壊れるため、変更が無いリロードで副作用を出さないことを固定する。
+    #[test]
+    fn set_order_is_a_noop_for_the_same_order() {
+        let mut s = Scheduler::new(paths(5), Order::Sequential);
+        s.next();
+        let second = s.next().unwrap();
+        let history_before = s.history.clone();
+        assert!(!history_before.is_empty(), "前提: 履歴が積まれている");
+
+        s.set_order(Order::Sequential);
+
+        assert_eq!(s.history, history_before, "履歴を捨ててはいけない");
+        assert_eq!(s.current(), Some(&second), "current should not move");
     }
 
     #[test]
