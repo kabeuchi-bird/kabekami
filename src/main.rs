@@ -73,12 +73,10 @@ async fn main() -> Result<()> {
     let mut blacklist = blacklist::Blacklist::load(&kabekami_config_dir)
         .context("failed to load blacklist")?;
 
-    let images = build_filtered_images_list(
-        &collect_source_dirs(&config),
-        config.sources.recursive,
-        &blacklist,
-    )
-    .context("failed to scan source directories")?;
+    // スキャン対象と監視対象は同一。1 つの一覧を両方で使う。
+    let source_dirs = collect_source_dirs(&config);
+    let images = build_filtered_images_list(&source_dirs, config.sources.recursive, &blacklist)
+        .context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
     if images.is_empty() {
         if has_online {
@@ -124,7 +122,8 @@ async fn main() -> Result<()> {
     let mut prefetcher = Prefetcher::new();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
-    let (mut watch_rx, mut _watcher_handle) = spawn_dir_watcher(&config);
+    let (mut watch_rx, mut _watcher_handle) =
+        spawn_dir_watcher(&source_dirs, config.sources.recursive);
 
     // 言語設定を解決する（環境変数 → config → デフォルト ja）
     // 初回呼び出しで言語ファイルの探索（同期 I/O）が走るが、この時点では
@@ -269,10 +268,13 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = fetch_ticker.tick() => {
                 if let Some(ref client) = online_client {
-                    let (screen_w, screen_h) = primary_size(&screens);
-                    let ctx = provider::FetchContext { screen_w, screen_h };
-                    let configs = config.online_sources.clone();
-                    try_spawn_fetch(client, configs, online_tx.clone(), fetch_in_progress.clone(), ctx, false);
+                    try_spawn_fetch(
+                        client,
+                        &config.online_sources,
+                        &online_tx,
+                        &fetch_in_progress,
+                        &screens,
+                    );
                 }
             }
 
@@ -361,18 +363,11 @@ async fn main() -> Result<()> {
                         // トレイでの変更を再起動後も保つ。保存で発生する監視イベントは
                         // ReloadConfig 側の同値スキップで吸収される。
                         persist_config(&config, "display mode").await;
+                        // 画像は同じだがモードが変わるとキャッシュキーも変わるので作り直す。
+                        // 適用後の通知・トレイ・先読みは apply_and_notify に任せる
+                        // （ここで手書きすると再適用経路が 2 系統に分かれる）。
                         if let Some(cur) = scheduler.current().cloned() {
-                            if let Err(e) = apply(&cur, &screens, &config, &cache, &plasma_shell).await {
-                                tracing::error!(error = %e, "reapply after mode change failed");
-                                let msg = e.to_string();
-                                notifier.error(&msg, Some(&cur)).await;
-                                update_tray_error(&tray_handle, msg).await;
-                            } else {
-                                notifier.clear();
-                                update_tray_clear_error(&tray_handle).await;
-                            }
-                            let (w, h) = primary_size(&screens);
-                            start_prefetch(&mut prefetcher, &scheduler, w, h, &config, &cache);
+                            apply_and_notify(apply_ctx!(), &cur, "reapply after mode change failed").await;
                         }
                     }
 
@@ -490,13 +485,8 @@ async fn main() -> Result<()> {
                             Ok(new_cfg) => {
                                 tracing::info!("reloading config");
 
-                                let mut reload_scan_dirs = new_cfg.sources.directories.clone();
-                                for oc in &new_cfg.online_sources {
-                                    if oc.enabled {
-                                        reload_scan_dirs.push(oc.resolved_download_dir());
-                                    }
-                                }
-                                match build_filtered_images_list(&reload_scan_dirs, new_cfg.sources.recursive, &blacklist) {
+                                let source_dirs = collect_source_dirs(&new_cfg);
+                                match build_filtered_images_list(&source_dirs, new_cfg.sources.recursive, &blacklist) {
                                     Ok(images) if !images.is_empty() => {
                                         tracing::info!("reload: {} image(s) found", images.len());
                                         // 一時停止状態と現在画像は rebuild が引き継ぐ
@@ -506,7 +496,8 @@ async fn main() -> Result<()> {
                                     Err(e) => tracing::warn!("reload: scan error: {}", e),
                                 }
 
-                                (watch_rx, _watcher_handle) = spawn_dir_watcher(&new_cfg);
+                                (watch_rx, _watcher_handle) =
+                                    spawn_dir_watcher(&source_dirs, new_cfg.sources.recursive);
 
                                 prefetcher.abort();
                                 cache = Arc::new(Cache::new(
@@ -909,12 +900,13 @@ fn collect_source_dirs(config: &Config) -> Vec<std::path::PathBuf> {
 /// ディレクトリ監視を起動する。監視が使えない環境では閉じたチャンネルを返し、
 /// `Some(ev) = watch_rx.recv()` が一致しなくなることで select! が無害にスキップする。
 fn spawn_dir_watcher(
-    config: &Config,
+    source_dirs: &[std::path::PathBuf],
+    recursive: bool,
 ) -> (
     tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
     Option<watcher::DirWatcher>,
 ) {
-    match watcher::spawn(&collect_source_dirs(config), config.sources.recursive) {
+    match watcher::spawn(source_dirs, recursive) {
         Some((w, rx)) => (rx, Some(w)),
         None => {
             let (tx, rx) = tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
@@ -924,7 +916,11 @@ fn spawn_dir_watcher(
     }
 }
 
-/// プライマリモニターの解像度。検出できていなければフォールバック値を返す。
+/// 先頭（プライマリ扱い）モニターの解像度。
+///
+/// `resolve_screens()` は検出に失敗してもフォールバックの `Monitor` を 1 つ返し、
+/// `screen_watcher` も空の検出結果は捨てるため、空スライスは実際には来ない。
+/// `unwrap_or` は panic を避けるための保険。
 fn primary_size(screens: &[screen::Monitor]) -> (u32, u32) {
     screens
         .first()
@@ -1044,8 +1040,7 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
         update_tray_ok(ctx.tray_handle, path).await;
         // 現在の壁紙を記録しておき、再起動後も同じ画像を「現在」として扱えるようにする
         ctx.state_writer.persist(ctx.scheduler.is_paused(), Some(path)).await;
-        let (w, h) = primary_size(ctx.screens);
-        start_prefetch(ctx.prefetcher, ctx.scheduler, w, h, ctx.config, ctx.cache);
+        start_prefetch(ctx.prefetcher, ctx.scheduler, ctx.screens, ctx.config, ctx.cache);
         // 画面構成の再検出を要求（ウォッチャー側で 60s スロットル）
         if let Some(tx) = ctx.screen_check_tx {
             let _ = tx.send(());
@@ -1059,12 +1054,6 @@ async fn update_tray_error(
 ) {
     if let Some(ref h) = tray_handle {
         h.update(|t| t.last_error = Some(msg)).await;
-    }
-}
-
-async fn update_tray_clear_error(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>) {
-    if let Some(ref h) = tray_handle {
-        h.update(|t| t.last_error = None).await;
     }
 }
 
@@ -1091,32 +1080,37 @@ async fn persist_config(config: &Config, what: &str) {
     state::save_offloaded(move || owned.save(), what).await;
 }
 
+/// 期限の来たオンラインプロバイダーの取得をバックグラウンドで起動する。
+/// 走行中のフェッチがあれば何もしない。
 fn try_spawn_fetch(
     client: &reqwest::Client,
-    configs: Vec<crate::config::OnlineSourceConfig>,
-    tx: tokio::sync::mpsc::UnboundedSender<provider::FetchResult>,
-    in_progress: Arc<AtomicBool>,
-    ctx: provider::FetchContext,
-    force: bool,
-) -> bool {
+    configs: &[crate::config::OnlineSourceConfig],
+    tx: &tokio::sync::mpsc::UnboundedSender<provider::FetchResult>,
+    in_progress: &Arc<AtomicBool>,
+    screens: &[screen::Monitor],
+) {
     if configs.is_empty() {
-        return false;
+        return;
     }
-    // 取得＋セットを単一の atomic 操作で行う。`true` を返したなら既に走行中。
+    // 確認＋セットを単一の atomic 操作で行う。`true` が返れば既に走行中。
     if in_progress.swap(true, Ordering::AcqRel) {
-        return false;
+        return;
     }
+    // ここから先は必ず spawn するので、この時点で初めて複製する。
+    let configs = configs.to_vec();
     let client = client.clone();
+    let tx = tx.clone();
+    let in_progress = Arc::clone(in_progress);
+    let (screen_w, screen_h) = primary_size(screens);
+    let ctx = provider::FetchContext { screen_w, screen_h };
     tokio::spawn(async move {
         // パニックしてもスタック巻き戻し中に Drop が走り、フラグが false に戻る。
         // これによりタスクが死んでも以降のフェッチが永久にブロックされなくなる。
         let _guard = FlagGuard(in_progress);
-        let results = provider::fetch_all_due(&configs, &client, ctx, force).await;
-        for r in results {
+        for r in provider::fetch_all_due(&configs, &client, ctx).await {
             let _ = tx.send(r);
         }
     });
-    true
 }
 
 /// `Arc<AtomicBool>` を `Drop` で `false` に戻す RAII ガード。
@@ -1131,8 +1125,7 @@ impl Drop for FlagGuard {
 fn start_prefetch(
     prefetcher: &mut Prefetcher,
     scheduler: &Scheduler,
-    screen_w: u32,
-    screen_h: u32,
+    screens: &[screen::Monitor],
     config: &Config,
     cache: &Arc<Cache>,
 ) {
@@ -1140,6 +1133,7 @@ fn start_prefetch(
         return;
     }
     if let Some(next) = scheduler.peek_next() {
+        let (screen_w, screen_h) = primary_size(screens);
         let key = CacheKey {
             src: next.clone(),
             screen_w,

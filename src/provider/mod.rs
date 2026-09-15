@@ -39,20 +39,18 @@ pub struct FetchResult {
 
 /// 各プロバイダーを並列確認し、再取得が必要なものだけフェッチして結果を返す。
 ///
-/// `force = true` のときは `.last_fetch` タイムスタンプを無視して全プロバイダーを取得する。
 /// ネットワークエラーは warning としてログに記録するだけで、他のプロバイダーの処理は継続する。
 pub async fn fetch_all_due(
     configs: &[OnlineSourceConfig],
     client: &reqwest::Client,
     ctx: FetchContext,
-    force: bool,
 ) -> Vec<FetchResult> {
     let mut set = tokio::task::JoinSet::new();
 
     for cfg in configs.iter().filter(|c| c.enabled) {
         let cfg = cfg.clone();
         let client = client.clone();
-        set.spawn(async move { fetch_if_due(&cfg, &client, ctx, force).await });
+        set.spawn(async move { fetch_if_due(&cfg, &client, ctx).await });
     }
 
     let mut results = Vec::new();
@@ -71,9 +69,8 @@ async fn fetch_if_due(
     cfg: &OnlineSourceConfig,
     client: &reqwest::Client,
     ctx: FetchContext,
-    force: bool,
 ) -> Option<FetchResult> {
-    if !force && !is_fetch_due(cfg).await {
+    if !is_fetch_due(cfg).await {
         tracing::debug!(
             "provider {}: not due yet (interval={}h)",
             cfg.provider,
