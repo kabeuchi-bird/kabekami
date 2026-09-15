@@ -231,23 +231,23 @@ async fn main() -> Result<()> {
     }
 
     // `apply_and_notify` に渡す `ApplyCtx` を組み立てる。参照するローカル変数が多く
-    // 呼び出しが 10 箇所あるため、引数リストの重複をここ 1 箇所に閉じ込める。
+    // 呼び出しが 10 箇所あるため、借用リストの重複をここ 1 箇所に閉じ込める。
     // マクロにすることで、借用がステートメント単位で完結する（関数に切り出すと
     // `&mut notifier` 等を保持するクロージャが main 全体を借用してしまう）。
     macro_rules! apply_ctx {
         () => {
-            &mut build_apply_ctx(
-                &screens,
-                &config,
-                &cache,
-                &plasma_shell,
-                &tray_handle,
-                &scheduler,
-                screen_check_tx.as_ref(),
-                &mut notifier,
-                &mut prefetcher,
-                &mut state_writer,
-            )
+            &mut ApplyCtx {
+                screens: &screens,
+                config: &config,
+                cache: &cache,
+                plasma: &plasma_shell,
+                tray_handle: &tray_handle,
+                scheduler: &scheduler,
+                screen_check_tx: screen_check_tx.as_ref(),
+                notifier: &mut notifier,
+                prefetcher: &mut prefetcher,
+                state_writer: &mut state_writer,
+            }
         };
     }
 
@@ -1030,35 +1030,6 @@ struct ApplyCtx<'a> {
     prefetcher: &'a mut Prefetcher,
     /// 適用のたびに現在の壁紙を記録する（内容に変化がなければ書き込みは省かれる）。
     state_writer: &'a mut state::StateWriter,
-}
-
-/// `ApplyCtx` を構築するコンストラクタ。`apply_and_notify` 呼び出しの直前で
-/// メインループ局所変数を渡して使う。引数が多いがすべて struct のフィールドに 1:1 対応。
-#[allow(clippy::too_many_arguments)]
-fn build_apply_ctx<'a>(
-    screens: &'a [screen::Monitor],
-    config: &'a Config,
-    cache: &'a Arc<Cache>,
-    plasma: &'a plasma::PlasmaShell,
-    tray_handle: &'a Option<ksni::Handle<tray::KabekamiTray>>,
-    scheduler: &'a Scheduler,
-    screen_check_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<()>>,
-    notifier: &'a mut notify::Notifier,
-    prefetcher: &'a mut Prefetcher,
-    state_writer: &'a mut state::StateWriter,
-) -> ApplyCtx<'a> {
-    ApplyCtx {
-        screens,
-        config,
-        cache,
-        plasma,
-        tray_handle,
-        scheduler,
-        screen_check_tx,
-        notifier,
-        prefetcher,
-        state_writer,
-    }
 }
 
 /// apply + 通知 + tray 更新 + prefetch 開始 + 画面構成再検出トリガーをまとめて行う。
