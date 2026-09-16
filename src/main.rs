@@ -423,9 +423,7 @@ async fn main() -> Result<()> {
                         if !config.ui.enable_blacklist {
                             tracing::debug!("blacklist disabled in config, ignoring");
                         } else if let Some(path) = scheduler.current().cloned() {
-                            if !blacklist.add(&path).await {
-                                tracing::error!("blacklist: failed to save {}", path.display());
-                            } else {
+                            if blacklist.add(&path).await {
                                 tracing::info!("blacklisted: {}", path.display());
                                 scheduler.remove_image(&path);
                                 prefetcher.abort();
@@ -444,6 +442,9 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 ticker = make_ticker(config.rotation.interval_secs);
+                            } else {
+                                // 失敗の詳細は `save_offloaded` が warn に出す
+                                tracing::error!("blacklist: failed to save {}", path.display());
                             }
                         }
                     }
@@ -487,7 +488,6 @@ async fn main() -> Result<()> {
                                 // 張り替えは、対象ディレクトリが変わっていなければ不要。
                                 // worker thread が 1 本なので、大きなソースを持つ環境では
                                 // `interval_secs` を変えただけの保存でも数百 ms 止まりうる。
-                                //
                                 let source_dirs = collect_source_dirs(&new_cfg);
                                 let sources_changed = source_dirs != scanned_dirs
                                     || new_cfg.sources.recursive != scanned_recursive;
@@ -500,6 +500,9 @@ async fn main() -> Result<()> {
                                     watcher_handle.as_ref().is_some_and(|w| w.is_complete());
                                 let needs_rescan = sources_changed || !watching_everything;
 
+                                // 実際に一覧を差し替えたか。`needs_rescan` は「走査を試みたか」
+                                // でしかなく、空・失敗で据え置いた場合も真になる。
+                                let mut list_changed = false;
                                 if needs_rescan {
                                     match scan_images(&source_dirs, new_cfg.sources.recursive, &blacklist).await {
                                         Ok(images) if !images.is_empty() => {
@@ -517,6 +520,7 @@ async fn main() -> Result<()> {
                                             .await;
                                             scanned_dirs = source_dirs;
                                             scanned_recursive = new_cfg.sources.recursive;
+                                            list_changed = true;
                                         }
                                         // 空・失敗のときは画像一覧も監視対象も据え置く
                                         // （ネットワークマウントの一時的な不在などで
@@ -536,6 +540,7 @@ async fn main() -> Result<()> {
                                 // rebuild を通らなかった場合（再スキャンを省いた・画像が
                                 // 見つからなかった・スキャンが失敗した）も並び順は反映する。
                                 // rebuild 済みなら同値なので何もしない。
+                                let order_changed = new_cfg.rotation.order != config.rotation.order;
                                 scheduler.set_order(new_cfg.rotation.order);
 
                                 // キャッシュキーに効く設定が変わったかどうか。変わって
@@ -546,7 +551,10 @@ async fn main() -> Result<()> {
                                 let cache_changed = new_cfg.cache != config.cache;
                                 let display_changed = new_cfg.display != config.display;
 
-                                if needs_rescan || cache_changed || display_changed {
+                                // 走行中の先読みが指す先が変わったときだけ捨てる。
+                                // 走査が空・失敗で一覧を据え置いたなら `peek_next()` は
+                                // 同じままなので、ほぼ終わっているデコードを捨てる理由がない。
+                                if list_changed || order_changed || cache_changed || display_changed {
                                     prefetcher.abort();
                                 }
                                 if cache_changed {
