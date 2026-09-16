@@ -24,44 +24,58 @@ use crate::cache::{Cache, CacheKey};
 /// - `start()` で新しい先読みを開始する。前の先読みが走っていれば abort する。
 /// - `abort()` で明示的にキャンセルできる（「次へ」連打時など）。
 pub struct Prefetcher {
-    pending: Option<JoinHandle<()>>,
+    /// 走行中の先読みタスク。解像度ごとに 1 本走るため複数持つ。
+    pending: Vec<JoinHandle<()>>,
 }
 
 impl Prefetcher {
     pub fn new() -> Self {
-        Self { pending: None }
+        Self { pending: Vec::new() }
     }
 
-    /// 指定したキャッシュキーに対応する画像の先読み加工をバックグラウンドで開始する。
+    /// 指定したキャッシュキー群に対応する画像の先読み加工をバックグラウンドで開始する。
     ///
     /// すでに先読み中のタスクがある場合は abort してから新しいタスクを起動する。
-    /// キャッシュにすでにある場合はタスクを起動せずに即座に返る。
-    pub fn start(&mut self, key: CacheKey, cache: Arc<Cache>) {
+    /// キャッシュにすでにあるキーはタスクを起動しない。
+    ///
+    /// キーを複数受け取るのは `CacheKey` が解像度を含むため。解像度の違う
+    /// モニターが混在する環境で 1 つだけ温めても、残りのモニターは切り替えの
+    /// 瞬間にキャッシュミスしてデコードと縮小を待つことになる。
+    pub fn start(&mut self, keys: impl IntoIterator<Item = CacheKey>, cache: Arc<Cache>) {
         self.abort();
 
-        // キャッシュにすでにある場合はタスク不要
-        if cache.get(&key).is_some() {
-            tracing::debug!("prefetch: cache hit, skipping {}", key.src.display());
-            return;
-        }
-
-        tracing::debug!("prefetch: starting for {}", key.src.display());
-        self.pending = Some(tokio::spawn(async move {
-            let result =
-                tokio::task::spawn_blocking(move || process_for_cache(&key, &cache)).await;
-
-            match result {
-                Ok(Ok(path)) => tracing::debug!("prefetch: done → {}", path.display()),
-                Ok(Err(e)) => tracing::warn!("prefetch: processing error: {}", e),
-                Err(e) if e.is_cancelled() => tracing::debug!("prefetch: cancelled"),
-                Err(e) => tracing::warn!("prefetch: task panicked: {}", e),
+        for key in keys {
+            // キャッシュにすでにある場合はタスク不要
+            if cache.get(&key).is_some() {
+                tracing::debug!(
+                    "prefetch: cache hit, skipping {} ({}x{})",
+                    key.src.display(), key.screen_w, key.screen_h,
+                );
+                continue;
             }
-        }));
+
+            tracing::debug!(
+                "prefetch: starting for {} ({}x{})",
+                key.src.display(), key.screen_w, key.screen_h,
+            );
+            let cache = cache.clone();
+            self.pending.push(tokio::spawn(async move {
+                let result =
+                    tokio::task::spawn_blocking(move || process_for_cache(&key, &cache)).await;
+
+                match result {
+                    Ok(Ok(path)) => tracing::debug!("prefetch: done → {}", path.display()),
+                    Ok(Err(e)) => tracing::warn!("prefetch: processing error: {}", e),
+                    Err(e) if e.is_cancelled() => tracing::debug!("prefetch: cancelled"),
+                    Err(e) => tracing::warn!("prefetch: task panicked: {}", e),
+                }
+            }));
+        }
     }
 
-    /// 先読み中のタスクをキャンセルする。
+    /// 先読み中のタスクをすべてキャンセルする。
     pub fn abort(&mut self) {
-        if let Some(handle) = self.pending.take() {
+        for handle in self.pending.drain(..) {
             handle.abort();
         }
     }

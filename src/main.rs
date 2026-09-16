@@ -423,8 +423,8 @@ async fn main() -> Result<()> {
                         if !config.ui.enable_blacklist {
                             tracing::debug!("blacklist disabled in config, ignoring");
                         } else if let Some(path) = scheduler.current().cloned() {
-                            if let Err(e) = blacklist.add(&path) {
-                                tracing::error!("blacklist: failed to save {}: {}", path.display(), e);
+                            if !blacklist.add(&path).await {
+                                tracing::error!("blacklist: failed to save {}", path.display());
                             } else {
                                 tracing::info!("blacklisted: {}", path.display());
                                 scheduler.remove_image(&path);
@@ -652,19 +652,13 @@ async fn main() -> Result<()> {
             }
 
             Some(ev) = watch_rx.recv() => {
-                match ev {
-                    watcher::WatchEvent::Added(path) => {
-                        if blacklist.contains(&path) {
-                            tracing::debug!("ignoring blacklisted image: {}", path.display());
-                        } else {
-                            tracing::info!("new image detected: {}", path.display());
-                            scheduler.add_image(path);
-                        }
-                    }
-                    watcher::WatchEvent::Removed(path) => {
-                        tracing::info!("image removed: {}", path.display());
-                        scheduler.remove_image(&path);
-                    }
+                apply_watch_event(ev, &mut scheduler, &blacklist);
+                // 監視ディレクトリへの大量コピーではイベントが連続して届く。1 件ごとに
+                // トレイを更新すると ksni への往復がイベント数だけ積み上がるが、
+                // 途中の枚数は誰も読めない。イベント自体はパスを運ぶので捨てられない
+                // ため、保留分を取り込んでから枚数表示を 1 回だけ更新する。
+                while let Ok(ev) = watch_rx.try_recv() {
+                    apply_watch_event(ev, &mut scheduler, &blacklist);
                 }
                 update_tray_count(&tray_handle, scheduler.image_count()).await;
             }
@@ -985,6 +979,24 @@ fn primary_size(screens: &[screen::Monitor]) -> (u32, u32) {
         .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H))
 }
 
+/// `screens` に現れる解像度を重複なしで列挙する（元の並び順を保つ）。
+///
+/// `CacheKey` は解像度を含むため、同じ解像度のモニターは同じキーになる。
+/// 加工も先読みも解像度の数だけで足り、モニターの数だけ回す必要はない。
+fn distinct_sizes(screens: &[screen::Monitor]) -> Vec<(u32, u32)> {
+    let mut sizes: Vec<(u32, u32)> = Vec::with_capacity(screens.len());
+    for m in screens {
+        if !sizes.contains(&(m.width, m.height)) {
+            sizes.push((m.width, m.height));
+        }
+    }
+    if sizes.is_empty() {
+        // `primary_size` と同じフォールバック（実際には空スライスは来ない）
+        sizes.push(primary_size(screens));
+    }
+    sizes
+}
+
 /// 連続して届いたコマンドの 2 発目以降を捨てるか判定する。
 ///
 /// 500ms という長さの理由: KRunner で `kabekami --next` を実行すると
@@ -1042,7 +1054,10 @@ async fn process_image(
 
 /// 壁紙を加工してキャッシュし、Plasma に反映する。
 ///
-/// マルチモニター時は各モニターの解像度で個別に処理して `set_wallpaper_multi` を呼ぶ。
+/// マルチモニター時は解像度ごとに 1 回だけ加工し、同じ解像度のモニターには
+/// その結果を使い回して `set_wallpaper_multi` を呼ぶ。同解像度を並列に投げると
+/// `process_for_cache` の二重チェックをどちらもすり抜けて同じ画像を 2 回
+/// デコードしてしまうため、加工を投げる前に解像度で畳む。
 async fn apply(
     src: &Path,
     screens: &[screen::Monitor],
@@ -1055,17 +1070,24 @@ async fn apply(
         let output = process_image(src, w, h, config, cache).await?;
         plasma.set_wallpaper(&output).await
     } else {
-        let entries: Vec<(usize, std::path::PathBuf)> =
-            futures_util::future::try_join_all(screens.iter().enumerate().map(
-                |(idx, monitor)| async move {
-                    process_image(src, monitor.width, monitor.height, config, cache)
-                        .await
-                        .map(|p| (idx, p))
+        let processed: std::collections::HashMap<(u32, u32), std::path::PathBuf> =
+            futures_util::future::try_join_all(distinct_sizes(screens).into_iter().map(
+                |(w, h)| async move {
+                    process_image(src, w, h, config, cache).await.map(|p| ((w, h), p))
                 },
             ))
-            .await?;
-        let entry_refs: Vec<(usize, &Path)> = entries.iter().map(|(i, p)| (*i, p.as_path())).collect();
-        plasma.set_wallpaper_multi(&entry_refs).await
+            .await?
+            .into_iter()
+            .collect();
+        // `processed` のキーは `screens` の解像度そのものなので、取りこぼしは起きない
+        let entries: Vec<(usize, &Path)> = screens
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, m)| {
+                processed.get(&(m.width, m.height)).map(|p| (idx, p.as_path()))
+            })
+            .collect();
+        plasma.set_wallpaper_multi(&entries).await
     }
 }
 
@@ -1111,6 +1133,28 @@ async fn update_tray_error(
 ) {
     if let Some(ref h) = tray_handle {
         h.update(|t| t.last_error = Some(msg)).await;
+    }
+}
+
+/// 監視イベント 1 件を画像一覧に反映する。トレイ更新は呼び出し側でまとめる。
+fn apply_watch_event(
+    ev: watcher::WatchEvent,
+    scheduler: &mut Scheduler,
+    blacklist: &blacklist::Blacklist,
+) {
+    match ev {
+        watcher::WatchEvent::Added(path) => {
+            if blacklist.contains(&path) {
+                tracing::debug!("ignoring blacklisted image: {}", path.display());
+            } else {
+                tracing::info!("new image detected: {}", path.display());
+                scheduler.add_image(path);
+            }
+        }
+        watcher::WatchEvent::Removed(path) => {
+            tracing::info!("image removed: {}", path.display());
+            scheduler.remove_image(&path);
+        }
     }
 }
 
@@ -1189,6 +1233,11 @@ impl Drop for FlagGuard {
     }
 }
 
+/// 次に表示する画像の先読みを開始する。
+///
+/// `screens` に現れる解像度すべてを温める。プライマリだけ温めると、解像度の
+/// 違うモニターは切り替えのたびに確実にキャッシュミスし、`apply` が
+/// クリティカルパスでデコードと縮小を待つことになる。
 fn start_prefetch(
     prefetcher: &mut Prefetcher,
     scheduler: &Scheduler,
@@ -1200,16 +1249,17 @@ fn start_prefetch(
         return;
     }
     if let Some(next) = scheduler.peek_next() {
-        let (screen_w, screen_h) = primary_size(screens);
-        let key = CacheKey {
-            src: next.clone(),
-            screen_w,
-            screen_h,
-            mode: config.display.mode,
-            blur_sigma: config.display.blur_sigma,
-            bg_darken: config.display.bg_darken,
-        };
-        prefetcher.start(key, cache.clone());
+        let keys = distinct_sizes(screens)
+            .into_iter()
+            .map(|(screen_w, screen_h)| CacheKey {
+                src: next.clone(),
+                screen_w,
+                screen_h,
+                mode: config.display.mode,
+                blur_sigma: config.display.blur_sigma,
+                bg_darken: config.display.bg_darken,
+            });
+        prefetcher.start(keys, cache.clone());
     }
 }
 
@@ -1257,6 +1307,37 @@ mod tests {
         let mut config = Config::default();
         config.sources.directories = vec![std::path::PathBuf::from("/pics")];
         assert_eq!(collect_source_dirs(&config), vec![std::path::PathBuf::from("/pics")]);
+    }
+
+    /// 解像度が同じモニターは同じ `CacheKey` になるため、加工も先読みも
+    /// 1 回で足りる。ここが重複すると同じ画像を並列に 2 回デコードする。
+    #[test]
+    fn distinct_sizes_dedupes_identical_resolutions() {
+        let mon = |name: &str, width, height| screen::Monitor {
+            name: name.to_string(),
+            width,
+            height,
+        };
+        let screens = vec![
+            mon("DP-1", 3840, 2160),
+            mon("DP-2", 1920, 1080),
+            mon("HDMI-1", 3840, 2160),
+        ];
+        assert_eq!(
+            distinct_sizes(&screens),
+            vec![(3840, 2160), (1920, 1080)],
+            "重複を除き、最初に現れた順を保つ"
+        );
+    }
+
+    /// `primary_size` と同じフォールバックに揃える。空でも 0 件を返すと
+    /// 先読みも加工も走らなくなる。
+    #[test]
+    fn distinct_sizes_falls_back_when_no_screens() {
+        assert_eq!(
+            distinct_sizes(&[]),
+            vec![(FALLBACK_SCREEN_W, FALLBACK_SCREEN_H)]
+        );
     }
 
     #[test]
