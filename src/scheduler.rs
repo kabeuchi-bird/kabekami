@@ -161,23 +161,24 @@ impl Scheduler {
         }
     }
 
-    /// 並び順だけを変更する。画像一覧はそのまま保ち、現在の画像と一時停止状態は
-    /// `rebuild` が引き継ぐ。
+    /// 並び順だけを変更する。画像一覧・`current`・`paused`・`history` はそのまま。
     ///
     /// 設定リロードで再スキャンを省いた場合でも並び順の変更を反映するために使う。
-    /// 同じ並び順なら何もしない。`rebuild` は履歴を捨て、`Random` ならキューを
-    /// 再シャッフルするため、変更が無いリロードで呼ばれても副作用を出さないようにする。
+    /// 同じ並び順なら何もしない（`Random` では呼ぶたびに再シャッフルになるため）。
+    ///
+    /// `rebuild` は通さない。あちらは画像一覧の差し替えが前提で `image_set` の
+    /// 再構築と `history` の破棄を伴うため、ここでは打ち消す必要のない副作用に
+    /// なる。並び順だけなら未表示キューを作り直せば足りる。
     pub fn set_order(&mut self, order: Order) {
         if self.order == order {
             return;
         }
-        // `rebuild` は履歴を捨てるが、画像一覧が変わらない以上、履歴が持つ
-        // インデックスはそのまま有効。並び順を変えただけで `prev()` が
-        // 使えなくなるのは意図しないので、退避して戻す。
-        let history = std::mem::take(&mut self.history);
-        let images = self.images.clone();
-        self.rebuild(images, order);
-        self.history = history;
+        self.order = order;
+        self.queue = Self::build_queue(self.images.len(), order, None);
+        // 表示中の画像は未表示キューに残さない（`restore_current` と同じ扱い）
+        if let Some(cur) = self.current {
+            self.queue.retain(|&i| i != cur);
+        }
     }
 
     /// パスから画像インデックスを引く。
@@ -447,6 +448,11 @@ mod tests {
         assert_eq!(s.image_count(), all.len(), "image list should be untouched");
         assert_eq!(s.current(), Some(&keep), "current should survive set_order");
         assert!(s.is_paused(), "paused state should survive set_order");
+        let cur = s.current.expect("current should be set");
+        assert!(
+            !s.queue.contains(&cur),
+            "表示中の画像を未表示キューに残さない（すぐ同じ画像に戻ってしまう）"
+        );
     }
 
     /// 並び順を変えても履歴は残り、`prev()` で戻れること。

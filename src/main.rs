@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
 
     // スキャン対象と監視対象は同一。1 つの一覧を両方で使う。
     let source_dirs = collect_source_dirs(&config);
-    let images = scan_images(source_dirs.clone(), config.sources.recursive, &blacklist)
+    let images = scan_images(&source_dirs, config.sources.recursive, &blacklist)
         .await
         .context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
@@ -123,8 +123,9 @@ async fn main() -> Result<()> {
     let mut prefetcher = Prefetcher::new();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
+    // 起動時はトレイも D-Bus もまだ立っていないので、登録の同期待ちは問題ない。
     let (mut watch_rx, mut watcher_handle) =
-        spawn_dir_watcher(&source_dirs, config.sources.recursive);
+        watcher::spawn(&source_dirs, config.sources.recursive);
     // 最後に「成功して」スキャンした対象。リロード時の再スキャン要否をこれと比べる。
     // `config` と比べないのは、スキャンが空／失敗して旧一覧を保った場合に
     // 次のリロードで再試行できるようにするため。
@@ -170,14 +171,12 @@ async fn main() -> Result<()> {
     // KDE グローバルショートカットを登録・監視する
     shortcuts::spawn_shortcut_watcher(cmd_tx).await;
 
-    // 設定ファイル監視を起動。失敗時は閉じたチャンネルにフォールバック
-    // （`Some(()) = ...` パターンが一致せず select! で無害にスキップされる）。
-    let (mut config_change_rx, _configwatcher_handle) = match Config::config_path()
-        .ok()
-        .and_then(|p| watcher::spawn_config(&p))
-    {
-        Some((w, rx)) => (rx, Some(w)),
-        None => {
+    // 設定ファイル監視を起動。パスが取れない場合も含め、失敗時は
+    // `watcher::spawn_config` 側が閉じた受信端を返す。
+    let (mut config_change_rx, _config_watcher_handle) = match Config::config_path() {
+        Ok(path) => watcher::spawn_config(&path),
+        Err(e) => {
+            tracing::warn!("config path unavailable, not watching config: {}", e);
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
             drop(tx);
             (rx, None)
@@ -300,10 +299,7 @@ async fn main() -> Result<()> {
                         provider,
                         added
                     );
-                    if let Some(ref h) = tray_handle {
-                        let count = scheduler.image_count();
-                        h.update(|t| t.image_count = count).await;
-                    }
+                    update_tray_count(&tray_handle, scheduler.image_count()).await;
                     if added > 0 && config.ui.notify_fetch {
                         let strings = i18n::strings(lang);
                         let body = strings.notify_fetch_body
@@ -416,9 +412,7 @@ async fn main() -> Result<()> {
                                     if let Some(next) = scheduler.next() {
                                         apply_and_notify(apply_ctx!(), &next, "apply after trash failed").await;
                                     }
-                                    if let Some(ref h) = tray_handle {
-                                        h.update(|t| t.image_count = scheduler.image_count()).await;
-                                    }
+                                    update_tray_count(&tray_handle, scheduler.image_count()).await;
                                     ticker = make_ticker(config.rotation.interval_secs);
                                 }
                             }
@@ -438,9 +432,7 @@ async fn main() -> Result<()> {
                                 match scheduler.next() {
                                     Some(next) => {
                                         apply_and_notify(apply_ctx!(), &next, "apply after blacklist failed").await;
-                                        if let Some(ref h) = tray_handle {
-                                            h.update(|t| t.image_count = scheduler.image_count()).await;
-                                        }
+                                        update_tray_count(&tray_handle, scheduler.image_count()).await;
                                     }
                                     None => {
                                         if let Some(ref h) = tray_handle {
@@ -496,15 +488,15 @@ async fn main() -> Result<()> {
                                 // worker thread が 1 本なので、大きなソースを持つ環境では
                                 // `interval_secs` を変えただけの保存でも数百 ms 止まりうる。
                                 //
-                                // 監視が使えない環境（watcher_handle が None）では設定保存が
-                                // 唯一の再スキャン契機になるため、その場合は省かない。
                                 let source_dirs = collect_source_dirs(&new_cfg);
                                 let sources_changed = source_dirs != scanned_dirs
-                                    || new_cfg.sources.recursive != scanned_recursive
-                                    || watcher_handle.is_none();
+                                    || new_cfg.sources.recursive != scanned_recursive;
+                                // 監視が使えない環境では設定保存が唯一の再スキャン契機に
+                                // なるので、対象が変わっていなくても走らせる。
+                                let needs_rescan = sources_changed || watcher_handle.is_none();
 
-                                if sources_changed {
-                                    match scan_images(source_dirs.clone(), new_cfg.sources.recursive, &blacklist).await {
+                                if needs_rescan {
+                                    match scan_images(&source_dirs, new_cfg.sources.recursive, &blacklist).await {
                                         Ok(images) if !images.is_empty() => {
                                             tracing::info!("reload: {} image(s) found", images.len());
                                             // 一時停止状態と現在画像は rebuild が引き継ぐ
@@ -513,8 +505,11 @@ async fn main() -> Result<()> {
                                             // 旧一覧を保ったまま監視だけ新ディレクトリへ移すと、
                                             // 旧画像の削除イベントを取りこぼし、消えた画像が
                                             // ローテーションに残り続ける。
-                                            (watch_rx, watcher_handle) =
-                                                spawn_dir_watcher(&source_dirs, new_cfg.sources.recursive);
+                                            (watch_rx, watcher_handle) = spawn_dir_watcher_offloaded(
+                                                &source_dirs,
+                                                new_cfg.sources.recursive,
+                                            )
+                                            .await;
                                             scanned_dirs = source_dirs;
                                             scanned_recursive = new_cfg.sources.recursive;
                                         }
@@ -538,11 +533,23 @@ async fn main() -> Result<()> {
                                 // rebuild 済みなら同値なので何もしない。
                                 scheduler.set_order(new_cfg.rotation.order);
 
-                                prefetcher.abort();
-                                cache = Arc::new(Cache::new(
-                                    new_cfg.cache.directory.clone(),
-                                    new_cfg.cache.max_size_mb,
-                                ));
+                                // キャッシュキーに効く設定が変わったかどうか。変わって
+                                // いなければ温まったキャッシュ（`known` セットと集計済み
+                                // サイズ）も走行中の先読みもそのまま活かす。
+                                // `interval_secs` や言語を変えただけの保存で、ほぼ終わって
+                                // いるデコードを捨てると次の切り替えでその分待たされる。
+                                let cache_changed = new_cfg.cache != config.cache;
+                                let display_changed = new_cfg.display != config.display;
+
+                                if needs_rescan || cache_changed || display_changed {
+                                    prefetcher.abort();
+                                }
+                                if cache_changed {
+                                    cache = Arc::new(Cache::new(
+                                        new_cfg.cache.directory.clone(),
+                                        new_cfg.cache.max_size_mb,
+                                    ));
+                                }
 
                                 ticker = make_ticker(new_cfg.rotation.interval_secs);
 
@@ -563,9 +570,12 @@ async fn main() -> Result<()> {
 
                                 config = new_cfg;
 
-                                // rebuild 後の current を使う。新しいソースから外れた画像や
-                                // ブラックリスト入りした画像は rebuild で current から落ちるため、
-                                // ここで拾わないことで「除外したはずの画像が再適用される」のを防ぐ。
+                                // ここで参照する current は、再スキャンして rebuild を
+                                // 通った場合は「新しい一覧に残っていた画像」（外れた画像や
+                                // ブラックリスト入りした画像は rebuild で current から落ちる）、
+                                // 再スキャンを省いた・空だった・失敗した場合は据え置きの
+                                // current。いずれも「いま表示しているべき画像」なので
+                                // そのまま再適用してよい。
                                 match scheduler.current().cloned() {
                                     // 再適用が成功した場合だけ apply_and_notify 内で
                                     // state に記録される。ここで先に persist すると、
@@ -656,10 +666,7 @@ async fn main() -> Result<()> {
                         scheduler.remove_image(&path);
                     }
                 }
-                if let Some(ref h) = tray_handle {
-                    let count = scheduler.image_count();
-                    h.update(|t| t.image_count = count).await;
-                }
+                update_tray_count(&tray_handle, scheduler.image_count()).await;
             }
 
             // config.toml の変更を検知したら、連続イベントを集約してから ReloadConfig を送信。
@@ -705,14 +712,39 @@ async fn main() -> Result<()> {
 /// 占有し、その間 D-Bus・トレイ・監視イベントの処理が止まる。
 /// 絞り込みはメモリ上の処理なので呼び出し側のタスクで行う。
 async fn scan_images(
-    scan_dirs: Vec<std::path::PathBuf>,
+    scan_dirs: &[std::path::PathBuf],
     recursive: bool,
     blacklist: &blacklist::Blacklist,
 ) -> Result<Vec<std::path::PathBuf>> {
-    let scanned = tokio::task::spawn_blocking(move || crate::scanner::scan(&scan_dirs, recursive))
+    let dirs = scan_dirs.to_vec();
+    let scanned = tokio::task::spawn_blocking(move || crate::scanner::scan(&dirs, recursive))
         .await
         .context("scan task panicked")??;
     Ok(scanned.into_iter().filter(|p| !blacklist.contains(p)).collect())
+}
+
+/// ディレクトリ監視の登録もブロッキング処理。`notify` の `watch()` は内部スレッドへ
+/// 要求を投げて応答を待つため、`recursive` では対象ツリー全体の走査と
+/// ディレクトリごとの `inotify_add_watch` が終わるまで戻らない。走査と同じ理由で
+/// `spawn_blocking` へ逃がす（メインループから呼ぶのはリロード時のみ）。
+async fn spawn_dir_watcher_offloaded(
+    source_dirs: &[std::path::PathBuf],
+    recursive: bool,
+) -> (
+    tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
+    Option<watcher::DirWatcher>,
+) {
+    let dirs = source_dirs.to_vec();
+    match tokio::task::spawn_blocking(move || watcher::spawn(&dirs, recursive)).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            // 監視の起動に失敗したのと同じ縮退状態にする。
+            tracing::warn!("watcher task panicked, running without file watcher: {}", e);
+            let (tx, rx) = tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
+            drop(tx);
+            (rx, None)
+        }
+    }
 }
 
 /// tracing subscriber を初期化する。
@@ -941,25 +973,6 @@ fn collect_source_dirs(config: &Config) -> Vec<std::path::PathBuf> {
     dirs
 }
 
-/// ディレクトリ監視を起動する。監視が使えない環境では閉じたチャンネルを返し、
-/// `Some(ev) = watch_rx.recv()` が一致しなくなることで select! が無害にスキップする。
-fn spawn_dir_watcher(
-    source_dirs: &[std::path::PathBuf],
-    recursive: bool,
-) -> (
-    tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
-    Option<watcher::DirWatcher>,
-) {
-    match watcher::spawn(source_dirs, recursive) {
-        Some((w, rx)) => (rx, Some(w)),
-        None => {
-            let (tx, rx) = tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
-            drop(tx);
-            (rx, None)
-        }
-    }
-}
-
 /// 先頭（プライマリ扱い）モニターの解像度。
 ///
 /// `resolve_screens()` は検出に失敗してもフォールバックの `Monitor` を 1 つ返し、
@@ -1098,6 +1111,16 @@ async fn update_tray_error(
 ) {
     if let Some(ref h) = tray_handle {
         h.update(|t| t.last_error = Some(msg)).await;
+    }
+}
+
+/// トレイの画像枚数表示を更新する。
+async fn update_tray_count(
+    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
+    count: usize,
+) {
+    if let Some(ref h) = tray_handle {
+        h.update(|t| t.image_count = count).await;
     }
 }
 

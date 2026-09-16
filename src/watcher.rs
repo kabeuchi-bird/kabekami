@@ -47,12 +47,15 @@ pub struct DirWatcher {
 /// ディレクトリ監視を開始する。
 ///
 /// `dirs` 内の各ディレクトリを `recursive` に応じた深さで監視する。
-/// エラー時（`notify` 初期化失敗、ディレクトリ追加失敗）は警告を出して `None` を返し、
-/// アプリはウォッチャーなしで動作を継続する。
+///
+/// エラー時（`notify` 初期化失敗、ディレクトリ追加失敗）はハンドルが `None` に
+/// なるが、受信端は常に返す。その場合は送信端が落ちた「閉じたチャンネル」なので、
+/// `Some(ev) = rx.recv()` パターンが一致せず `select!` の該当 arm が無害に
+/// 無効化される。呼び出し側は縮退時の受信端を自分で用意しなくてよい。
 pub fn spawn(
     dirs: &[PathBuf],
     recursive: bool,
-) -> Option<(DirWatcher, Receiver<WatchEvent>)> {
+) -> (Receiver<WatchEvent>, Option<DirWatcher>) {
     let (tx, rx) = mpsc::channel::<WatchEvent>(WATCH_QUEUE_CAPACITY);
 
     let mut watcher =
@@ -85,7 +88,7 @@ pub fn spawn(
             Ok(w) => w,
             Err(e) => {
                 tracing::warn!("failed to create file watcher: {}", e);
-                return None;
+                return (rx, None);
             }
         };
 
@@ -110,10 +113,10 @@ pub fn spawn(
 
     if !any_ok {
         tracing::warn!("no directories could be watched; running without file watcher");
-        return None;
+        return (rx, None);
     }
 
-    Some((DirWatcher { _inner: watcher }, rx))
+    (rx, Some(DirWatcher { _inner: watcher }))
 }
 
 /// 設定ファイル（`~/.config/kabekami/config.toml`）の変更を監視する。
@@ -124,14 +127,19 @@ pub fn spawn(
 ///
 /// イベントは内容なし `()` のチャンネルで通知する。バーストはメインループ側の
 /// 100ms スロットルおよび `ReloadConfig` ハンドラの冪等性で吸収する。
-pub fn spawn_config(config_path: &Path) -> Option<(DirWatcher, UnboundedReceiver<()>)> {
-    let parent = config_path.parent()?.to_path_buf();
+pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<DirWatcher>) {
+    // `spawn` と同じく、失敗時も閉じた受信端を返す。
+    let (tx, rx) = mpsc::unbounded_channel::<()>();
+
+    let Some(parent) = config_path.parent().map(|p| p.to_path_buf()) else {
+        tracing::warn!("config path has no parent dir: {}", config_path.display());
+        return (rx, None);
+    };
     if let Err(e) = std::fs::create_dir_all(&parent) {
         tracing::warn!("failed to create config dir {}: {}", parent.display(), e);
-        return None;
+        return (rx, None);
     }
 
-    let (tx, rx) = mpsc::unbounded_channel::<()>();
     let target = config_path.to_path_buf();
 
     let mut watcher = match notify::recommended_watcher(
@@ -152,7 +160,7 @@ pub fn spawn_config(config_path: &Path) -> Option<(DirWatcher, UnboundedReceiver
         Ok(w) => w,
         Err(e) => {
             tracing::warn!("failed to create config watcher: {}", e);
-            return None;
+            return (rx, None);
         }
     };
 
@@ -162,13 +170,13 @@ pub fn spawn_config(config_path: &Path) -> Option<(DirWatcher, UnboundedReceiver
             parent.display(),
             e
         );
-        return None;
+        return (rx, None);
     }
 
     tracing::info!(
         "watching {} for config changes",
         config_path.display()
     );
-    Some((DirWatcher { _inner: watcher }, rx))
+    (rx, Some(DirWatcher { _inner: watcher }))
 }
 
