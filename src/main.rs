@@ -75,7 +75,8 @@ async fn main() -> Result<()> {
 
     // スキャン対象と監視対象は同一。1 つの一覧を両方で使う。
     let source_dirs = collect_source_dirs(&config);
-    let images = build_filtered_images_list(&source_dirs, config.sources.recursive, &blacklist)
+    let images = scan_images(source_dirs.clone(), config.sources.recursive, &blacklist)
+        .await
         .context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
     if images.is_empty() {
@@ -124,6 +125,11 @@ async fn main() -> Result<()> {
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
     let (mut watch_rx, mut watcher_handle) =
         spawn_dir_watcher(&source_dirs, config.sources.recursive);
+    // 最後に「成功して」スキャンした対象。リロード時の再スキャン要否をこれと比べる。
+    // `config` と比べないのは、スキャンが空／失敗して旧一覧を保った場合に
+    // 次のリロードで再試行できるようにするため。
+    let mut scanned_dirs = source_dirs;
+    let mut scanned_recursive = config.sources.recursive;
 
     // 言語設定を解決する（環境変数 → config → デフォルト ja）
     // 初回呼び出しで言語ファイルの探索（同期 I/O）が走るが、この時点では
@@ -493,22 +499,36 @@ async fn main() -> Result<()> {
                                 // 監視が使えない環境（watcher_handle が None）では設定保存が
                                 // 唯一の再スキャン契機になるため、その場合は省かない。
                                 let source_dirs = collect_source_dirs(&new_cfg);
-                                let sources_changed = source_dirs != collect_source_dirs(&config)
-                                    || new_cfg.sources.recursive != config.sources.recursive
+                                let sources_changed = source_dirs != scanned_dirs
+                                    || new_cfg.sources.recursive != scanned_recursive
                                     || watcher_handle.is_none();
 
                                 if sources_changed {
-                                    match build_filtered_images_list(&source_dirs, new_cfg.sources.recursive, &blacklist) {
+                                    match scan_images(source_dirs.clone(), new_cfg.sources.recursive, &blacklist).await {
                                         Ok(images) if !images.is_empty() => {
                                             tracing::info!("reload: {} image(s) found", images.len());
                                             // 一時停止状態と現在画像は rebuild が引き継ぐ
                                             scheduler.rebuild(images, new_cfg.rotation.order);
+                                            // 画像一覧を差し替えたときだけ監視対象も差し替える。
+                                            // 旧一覧を保ったまま監視だけ新ディレクトリへ移すと、
+                                            // 旧画像の削除イベントを取りこぼし、消えた画像が
+                                            // ローテーションに残り続ける。
+                                            (watch_rx, watcher_handle) =
+                                                spawn_dir_watcher(&source_dirs, new_cfg.sources.recursive);
+                                            scanned_dirs = source_dirs;
+                                            scanned_recursive = new_cfg.sources.recursive;
                                         }
-                                        Ok(_) => tracing::warn!("reload: no images found, keeping current list"),
-                                        Err(e) => tracing::warn!("reload: scan error: {}", e),
+                                        // 空・失敗のときは画像一覧も監視対象も据え置く
+                                        // （ネットワークマウントの一時的な不在などで
+                                        // ローテーションが空になるのを避ける）。
+                                        // `scanned_dirs` を更新しないので次のリロードで再試行される。
+                                        Ok(_) => tracing::warn!(
+                                            "reload: no images found, keeping current list and watcher"
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            "reload: scan error, keeping current list and watcher: {}", e
+                                        ),
                                     }
-                                    (watch_rx, watcher_handle) =
-                                        spawn_dir_watcher(&source_dirs, new_cfg.sources.recursive);
                                 } else {
                                     tracing::debug!("reload: source dirs unchanged, skipping rescan");
                                 }
@@ -678,16 +698,21 @@ async fn main() -> Result<()> {
 
 // ── ヘルパー関数 ─────────────────────────────────────────────────────────────
 
-fn build_filtered_images_list(
-    scan_dirs: &[std::path::PathBuf],
+/// ソースディレクトリを走査し、ブラックリストを除いた画像一覧を返す。
+///
+/// `scanner::scan` は `std::fs` の同期 I/O なので `spawn_blocking` へ逃がす。
+/// メインループから直接呼ぶとワーカースレッド（`worker_threads = 1`）を
+/// 占有し、その間 D-Bus・トレイ・監視イベントの処理が止まる。
+/// 絞り込みはメモリ上の処理なので呼び出し側のタスクで行う。
+async fn scan_images(
+    scan_dirs: Vec<std::path::PathBuf>,
     recursive: bool,
     blacklist: &blacklist::Blacklist,
 ) -> Result<Vec<std::path::PathBuf>> {
-    let images: Vec<_> = crate::scanner::scan(scan_dirs, recursive)?
-        .into_iter()
-        .filter(|p| !blacklist.contains(p))
-        .collect();
-    Ok(images)
+    let scanned = tokio::task::spawn_blocking(move || crate::scanner::scan(&scan_dirs, recursive))
+        .await
+        .context("scan task panicked")??;
+    Ok(scanned.into_iter().filter(|p| !blacklist.contains(p)).collect())
 }
 
 /// tracing subscriber を初期化する。

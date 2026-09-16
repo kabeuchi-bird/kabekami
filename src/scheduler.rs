@@ -171,8 +171,13 @@ impl Scheduler {
         if self.order == order {
             return;
         }
+        // `rebuild` は履歴を捨てるが、画像一覧が変わらない以上、履歴が持つ
+        // インデックスはそのまま有効。並び順を変えただけで `prev()` が
+        // 使えなくなるのは意図しないので、退避して戻す。
+        let history = std::mem::take(&mut self.history);
         let images = self.images.clone();
         self.rebuild(images, order);
+        self.history = history;
     }
 
     /// パスから画像インデックスを引く。
@@ -442,6 +447,26 @@ mod tests {
         assert_eq!(s.image_count(), all.len(), "image list should be untouched");
         assert_eq!(s.current(), Some(&keep), "current should survive set_order");
         assert!(s.is_paused(), "paused state should survive set_order");
+    }
+
+    /// 並び順を変えても履歴は残り、`prev()` で戻れること。
+    /// `rebuild` は履歴を捨てるが、画像一覧が同じなら履歴のインデックスは
+    /// 有効なままなので、並び順の変更だけで `prev()` が壊れてはいけない。
+    #[test]
+    fn set_order_keeps_history_so_prev_still_works() {
+        let mut s = Scheduler::new(paths(5), Order::Sequential);
+        let first = s.next().unwrap();
+        let second = s.next().unwrap();
+        assert_ne!(first, second, "前提: 2 枚進んでいる");
+
+        s.set_order(Order::Random);
+
+        assert_eq!(s.current(), Some(&second), "current は維持される");
+        assert_eq!(
+            s.prev(),
+            Some(first),
+            "並び順を変えただけで prev() が戻れなくなってはいけない"
+        );
     }
 
     /// 同じ並び順で呼ばれたら何もしない。`rebuild` を通してしまうと履歴が消えて
