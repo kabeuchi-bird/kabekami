@@ -491,9 +491,14 @@ async fn main() -> Result<()> {
                                 let source_dirs = collect_source_dirs(&new_cfg);
                                 let sources_changed = source_dirs != scanned_dirs
                                     || new_cfg.sources.recursive != scanned_recursive;
-                                // 監視が使えない環境では設定保存が唯一の再スキャン契機に
-                                // なるので、対象が変わっていなくても走らせる。
-                                let needs_rescan = sources_changed || watcher_handle.is_none();
+                                // 監視が全ディレクトリに張れていない環境では、設定保存が
+                                // 唯一の再スキャン契機になるので、対象が変わっていなくても
+                                // 走らせる。一部だけ失敗している場合も同じ扱いにする
+                                // （そのディレクトリのイベントは一切届かないため、
+                                // 再スキャンと登録の再試行の両方が必要）。
+                                let watching_everything =
+                                    watcher_handle.as_ref().is_some_and(|w| w.is_complete());
+                                let needs_rescan = sources_changed || !watching_everything;
 
                                 if needs_rescan {
                                     match scan_images(&source_dirs, new_cfg.sources.recursive, &blacklist).await {

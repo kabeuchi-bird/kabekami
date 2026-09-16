@@ -175,10 +175,16 @@ impl Scheduler {
         }
         self.order = order;
         self.queue = Self::build_queue(self.images.len(), order, None);
-        // 表示中の画像は未表示キューに残さない（`restore_current` と同じ扱い）
-        if let Some(cur) = self.current {
-            self.queue.retain(|&i| i != cur);
-        }
+        // `build_queue` は全画像を並べ直すので、この一巡で表示済みのものまで
+        // 未表示キューに戻ってくる。表示中の画像と履歴にあるものを取り除いて
+        // 「この一巡でまだ出していない画像」という不変条件を保つ。これを怠ると
+        // `prev()` が履歴から戻した画像がキューにも残り、一巡し切る前に
+        // 同じ画像が再登場する。
+        //
+        // 履歴は `HISTORY_LIMIT` で打ち切られるため、それより長い一巡では
+        // 古い表示分を除き切れない。分かる範囲で最大限除く、という扱い。
+        self.queue
+            .retain(|&i| self.current != Some(i) && !self.history.contains(&i));
     }
 
     /// パスから画像インデックスを引く。
@@ -434,6 +440,54 @@ mod tests {
 
     /// 設定リロードで再スキャンを省いたときも並び順の変更が効くこと。
     /// 画像一覧・現在の画像・一時停止状態は維持される。
+    /// `order` フィールドだけ書き換えて未表示キューを作り直さない、という抜けを防ぐ。
+    /// Random → Sequential は結果が一意に決まるので確かめられる。
+    #[test]
+    fn set_order_rebuilds_the_queue_in_the_new_order() {
+        let mut s = Scheduler::new(paths(10), Order::Random);
+        s.next().unwrap();
+
+        s.set_order(Order::Sequential);
+
+        let queue: Vec<usize> = s.queue.iter().copied().collect();
+        let mut ascending = queue.clone();
+        ascending.sort_unstable();
+        assert_eq!(
+            queue, ascending,
+            "Sequential にしたらキューは昇順に並び直るべき: {:?}",
+            queue
+        );
+    }
+
+    /// `build_queue` は全画像を並べ直すので、そのままだとこの一巡で表示済みの
+    /// 画像まで未表示キューに戻る。`prev()` で履歴から戻した画像が `current` と
+    /// キューの両方に居座ると、一巡し切る前に同じ画像が再登場する。
+    #[test]
+    fn set_order_does_not_requeue_history_so_one_cycle_shows_each_image_once() {
+        let n = 4;
+        let mut s = Scheduler::new(paths(n), Order::Sequential);
+        let first = s.next().unwrap();
+        s.next().unwrap();
+
+        s.set_order(Order::Random);
+        assert_eq!(s.prev().unwrap(), first, "前提: prev で 1 枚目に戻る");
+
+        // この時点の `current` と、キューを空にするまでの `next()` で一巡分になる
+        let mut seen = vec![s.current().unwrap().clone()];
+        while !s.queue.is_empty() {
+            seen.push(s.next().unwrap());
+        }
+
+        let distinct: std::collections::HashSet<_> = seen.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            seen.len(),
+            "一巡の中で同じ画像が二度出てはいけない: {:?}",
+            seen
+        );
+        assert_eq!(distinct.len(), n, "一巡で全画像が出るべき: {:?}", seen);
+    }
+
     #[test]
     fn set_order_changes_order_and_keeps_images_current_and_paused() {
         let all = paths(5);

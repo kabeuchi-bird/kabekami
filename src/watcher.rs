@@ -42,6 +42,18 @@ pub struct DirWatcher {
     /// 内部の `notify` ウォッチャー。フィールドとして保持することで
     /// `DirWatcher` がドロップされるまで監視が続く。
     _inner: notify::RecommendedWatcher,
+    /// 対象ディレクトリすべての登録に成功したか。
+    complete: bool,
+}
+
+impl DirWatcher {
+    /// 対象ディレクトリすべてを監視できているか。
+    ///
+    /// `false` のときは一部のディレクトリの登録に失敗しており、そこでの追加・削除は
+    /// 一切届かない。呼び出し側が再スキャンと登録の再試行を判断するために使う。
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
 }
 
 /// ディレクトリ監視を開始する。
@@ -98,12 +110,12 @@ pub fn spawn(
         RecursiveMode::NonRecursive
     };
 
-    let mut any_ok = false;
+    let mut ok_count = 0usize;
     for dir in dirs {
         match watcher.watch(dir, mode) {
             Ok(()) => {
                 tracing::info!("watching {} for changes", dir.display());
-                any_ok = true;
+                ok_count += 1;
             }
             Err(e) => {
                 tracing::warn!("failed to watch {}: {}", dir.display(), e);
@@ -111,12 +123,22 @@ pub fn spawn(
         }
     }
 
-    if !any_ok {
+    if ok_count == 0 {
         tracing::warn!("no directories could be watched; running without file watcher");
         return (rx, None);
     }
 
-    (rx, Some(DirWatcher { _inner: watcher }))
+    // 一部でも登録に失敗していれば「監視できている」と言ってはいけない。
+    // そのディレクトリの追加・削除は届かず、呼び出し側が再スキャンで補う必要がある。
+    let complete = ok_count == dirs.len();
+    if !complete {
+        tracing::warn!(
+            "watching {} of {} directories; the rest rely on rescans",
+            ok_count, dirs.len(),
+        );
+    }
+
+    (rx, Some(DirWatcher { _inner: watcher, complete }))
 }
 
 /// 設定ファイル（`~/.config/kabekami/config.toml`）の変更を監視する。
@@ -177,6 +199,7 @@ pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<DirWat
         "watching {} for config changes",
         config_path.display()
     );
-    (rx, Some(DirWatcher { _inner: watcher }))
+    // 対象は 1 ディレクトリだけなので、ここに来た時点で部分失敗はない
+    (rx, Some(DirWatcher { _inner: watcher, complete: true }))
 }
 

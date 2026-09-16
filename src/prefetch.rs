@@ -11,8 +11,9 @@
 //!           └─ 画像 C の加工を非同期開始
 //! ```
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use image::ImageDecoder;
 use tokio::task::JoinHandle;
@@ -26,11 +27,21 @@ use crate::cache::{Cache, CacheKey};
 pub struct Prefetcher {
     /// 走行中の先読みタスク。解像度ごとに 1 本走るため複数持つ。
     pending: Vec<JoinHandle<()>>,
+    /// 加工中のキャッシュ出力パス（= キーの同一性）。
+    ///
+    /// `abort()` は外側のタスクしか止められず、`spawn_blocking` に入った
+    /// デコードと加工は走り切る。この集合が無いと、abort 直後の `start()` が
+    /// 同じキーを投げ直して同じ画像を二重にデコードする。
+    /// `Cache::store` は書き込みだけは弾くが、そこに至るまでの加工は弾けない。
+    inflight: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl Prefetcher {
     pub fn new() -> Self {
-        Self { pending: Vec::new() }
+        Self {
+            pending: Vec::new(),
+            inflight: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 
     /// 指定したキャッシュキー群に対応する画像の先読み加工をバックグラウンドで開始する。
@@ -54,14 +65,30 @@ impl Prefetcher {
                 continue;
             }
 
+            // 加工中のキーは投げ直さない（abort しても加工自体は止まらないため）
+            let out = cache.path_for(&key);
+            if !lock(&self.inflight).insert(out.clone()) {
+                tracing::debug!(
+                    "prefetch: already in flight, skipping {} ({}x{})",
+                    key.src.display(), key.screen_w, key.screen_h,
+                );
+                continue;
+            }
+            // ガードは `spawn_blocking` のクロージャに持たせる。外側のタスクを
+            // abort されても、加工が終わった時点で必ずキーが外れる。
+            let guard = InflightGuard { set: Arc::clone(&self.inflight), out };
+
             tracing::debug!(
                 "prefetch: starting for {} ({}x{})",
                 key.src.display(), key.screen_w, key.screen_h,
             );
             let cache = cache.clone();
             self.pending.push(tokio::spawn(async move {
-                let result =
-                    tokio::task::spawn_blocking(move || process_for_cache(&key, &cache)).await;
+                let result = tokio::task::spawn_blocking(move || {
+                    let _guard = guard;
+                    process_for_cache(&key, &cache)
+                })
+                .await;
 
                 match result {
                     Ok(Ok(path)) => tracing::debug!("prefetch: done → {}", path.display()),
@@ -79,6 +106,29 @@ impl Prefetcher {
             handle.abort();
         }
     }
+}
+
+/// 加工中キーの集合からパスを外す RAII ガード。
+///
+/// `spawn_blocking` のクロージャが所有する。クロージャは一度走り出せば
+/// 必ず終わるので、外側のタスクが abort されても取り残しが起きない。
+/// 走り出す前にタスクが捨てられた場合はクロージャごとドロップされ、
+/// やはりキーが外れる。
+struct InflightGuard {
+    set: Arc<Mutex<HashSet<PathBuf>>>,
+    out: PathBuf,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        lock(&self.set).remove(&self.out);
+    }
+}
+
+/// 毒された Mutex から中身を回収する。臨界区間は `insert` / `remove` だけなので
+/// 毒されていても集合は壊れていない。先読みの重複排除でデーモンを落とさない。
+fn lock(set: &Arc<Mutex<HashSet<PathBuf>>>) -> std::sync::MutexGuard<'_, HashSet<PathBuf>> {
+    set.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Default for Prefetcher {
@@ -146,4 +196,52 @@ pub fn process_for_cache(key: &CacheKey, cache: &Arc<Cache>) -> anyhow::Result<P
     );
 
     cache.store(key, &processed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DisplayMode;
+
+    fn key(src: &str) -> CacheKey {
+        CacheKey {
+            src: PathBuf::from(src),
+            screen_w: 1920,
+            screen_h: 1080,
+            mode: DisplayMode::Fill,
+            blur_sigma: 0.0,
+            bg_darken: 0.0,
+        }
+    }
+
+    /// 加工中のキーが外れないと、そのキーは二度と先読みされなくなる。
+    /// `spawn_blocking` が走り切ったあと必ず外れることが前提。
+    #[test]
+    fn inflight_guard_releases_the_key_on_drop() {
+        let set: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
+        let out = PathBuf::from("/cache/out.webp");
+        lock(&set).insert(out.clone());
+        {
+            let _guard = InflightGuard { set: Arc::clone(&set), out: out.clone() };
+            assert!(lock(&set).contains(&out), "前提: ガード生存中は保持される");
+        }
+        assert!(!lock(&set).contains(&out), "ドロップで必ず外れる");
+    }
+
+    /// 同じキーに 2 本のタスクを立てない。`start` は同期なので、`await` する前に
+    /// 立ったタスクの本数を数えられる（加工そのものはまだ走っていない）。
+    #[tokio::test]
+    async fn start_submits_one_task_per_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(Cache::new(dir.path().to_path_buf(), 0));
+        let mut prefetcher = Prefetcher::new();
+
+        prefetcher.start([key("/nonexistent/a.jpg"), key("/nonexistent/a.jpg")], cache);
+
+        assert_eq!(
+            prefetcher.pending.len(),
+            1,
+            "同じキーを渡されても加工は 1 本だけ"
+        );
+    }
 }
