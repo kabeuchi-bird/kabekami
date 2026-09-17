@@ -11,14 +11,13 @@
 //!           └─ 画像 C の加工を非同期開始
 //! ```
 
-use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use image::ImageDecoder;
 use tokio::task::JoinHandle;
 
-use crate::cache::{Cache, CacheKey};
+use crate::cache::{Cache, CacheKey, Claim, ClaimGuard};
 
 /// 先読みタスクの管理。
 ///
@@ -27,26 +26,18 @@ use crate::cache::{Cache, CacheKey};
 pub struct Prefetcher {
     /// 走行中の先読みタスク。解像度ごとに 1 本走る。
     pending: Vec<JoinHandle<()>>,
-    /// 加工中のキャッシュ出力パス（= キーの同一性）。
-    ///
-    /// `abort()` は外側のタスクしか止められず `spawn_blocking` の中は走り切る。
-    /// これが無いと abort 直後の `start()` が同じ画像を二重にデコードする
-    /// （`Cache::store` が弾けるのは書き込みだけ）。
-    inflight: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 impl Prefetcher {
     pub fn new() -> Self {
-        Self {
-            pending: Vec::new(),
-            inflight: Arc::new(Mutex::new(HashSet::new())),
-        }
+        Self { pending: Vec::new() }
     }
 
     /// 指定したキャッシュキー群に対応する画像の先読み加工をバックグラウンドで開始する。
     ///
-    /// 先読み中のタスクは abort してから起動し、キャッシュにあるキーと加工中の
-    /// キーは飛ばす。キーが複数なのは `CacheKey` が解像度を含むため
+    /// 先読み中のタスクは abort してから起動し、キャッシュにあるキーは飛ばす。
+    /// 加工中のキーは `process_single_flight` が待ち側に回すので、ここでは見ない。
+    /// キーが複数なのは `CacheKey` が解像度を含むため
     /// （1 つだけ温めても解像度の違うモニターはミスする）。
     pub fn start(&mut self, keys: impl IntoIterator<Item = CacheKey>, cache: Arc<Cache>) {
         self.abort();
@@ -61,35 +52,15 @@ impl Prefetcher {
                 continue;
             }
 
-            // 加工中のキーは投げ直さない（abort しても加工は止まらない）
-            let out = cache.path_for(&key);
-            if !lock(&self.inflight).insert(out.clone()) {
-                tracing::debug!(
-                    "prefetch: already in flight, skipping {} ({}x{})",
-                    key.src.display(), key.screen_w, key.screen_h,
-                );
-                continue;
-            }
-            // ガードはクロージャに持たせる（abort されても加工完了時に必ず外れる）
-            let guard = InflightGuard { set: Arc::clone(&self.inflight), out };
-
             tracing::debug!(
                 "prefetch: starting for {} ({}x{})",
                 key.src.display(), key.screen_w, key.screen_h,
             );
             let cache = cache.clone();
             self.pending.push(tokio::spawn(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    let _guard = guard;
-                    process_for_cache(&key, &cache)
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(path)) => tracing::debug!("prefetch: done → {}", path.display()),
-                    Ok(Err(e)) => tracing::warn!("prefetch: processing error: {}", e),
-                    Err(e) if e.is_cancelled() => tracing::debug!("prefetch: cancelled"),
-                    Err(e) => tracing::warn!("prefetch: task panicked: {}", e),
+                match process_single_flight(&key, &cache).await {
+                    Ok(path) => tracing::debug!("prefetch: done → {}", path.display()),
+                    Err(e) => tracing::warn!("prefetch: processing error: {:#}", e),
                 }
             }));
         }
@@ -103,25 +74,54 @@ impl Prefetcher {
     }
 }
 
-/// 加工中キーの集合からパスを外す RAII ガード。
+/// 1 つのキャッシュキーを加工してキャッシュパスを返す。同じキーの加工は
+/// 同時に 1 回しか走らない（shared single-flight）。
 ///
-/// `spawn_blocking` のクロージャに持たせる。走り出せば必ず終わり、走り出す前なら
-/// クロージャごと捨てられるので、abort されてもキーが取り残されない。
-struct InflightGuard {
-    set: Arc<Mutex<HashSet<PathBuf>>>,
-    out: PathBuf,
-}
-
-impl Drop for InflightGuard {
-    fn drop(&mut self) {
-        lock(&self.set).remove(&self.out);
+/// 前景の壁紙適用と先読みは同じ `Arc<Cache>` を共有するので、受付を `Cache` に
+/// 置くことで両方が同じ門を見る。`Prefetcher` 側だけで重複排除しても、
+/// 前景が `abort()` 直後に同じキーを投げる経路（Next 連打）は防げない。
+///
+/// 後から来た側は先行の完了を待ってキャッシュを引き直す。先行が失敗・panic・
+/// キャンセルされた場合は待ちが解放されてキャッシュミスになるので、そのときだけ
+/// 自分で加工し直す。ループが回るのは「加工するか、加工している誰かを待つか」の
+/// どちらかなので、同時に居る要求者の数で止まる。
+pub async fn process_single_flight(key: &CacheKey, cache: &Arc<Cache>) -> anyhow::Result<PathBuf> {
+    let out = cache.path_for(key);
+    loop {
+        if let Some(cached) = cache.get(key) {
+            tracing::debug!("cache hit: {}", key.src.display());
+            return Ok(cached);
+        }
+        match cache.claim(out.clone()) {
+            Claim::Owned(guard) => {
+                return run_blocking(key.clone(), Arc::clone(cache), guard).await;
+            }
+            Claim::Waiting(gate) => {
+                // 門が閉じるまで待つ。閉じた `Semaphore` では即戻るので、
+                // 待ち始めが完了より後でも取りこぼさない。
+                let _ = gate.acquire().await;
+            }
+        }
     }
 }
 
-/// 毒された Mutex から中身を回収する。臨界区間は `insert` / `remove` だけで集合は
-/// 壊れていないので、先読みの重複排除でデーモンを落とさない。
-fn lock(set: &Arc<Mutex<HashSet<PathBuf>>>) -> std::sync::MutexGuard<'_, HashSet<PathBuf>> {
-    set.lock().unwrap_or_else(|e| e.into_inner())
+/// 加工を `spawn_blocking` に投げる。加工権はクロージャに持たせる。
+///
+/// 外側の future がキャンセルされてもクロージャは走り切るので、加工が終わるまで
+/// 加工権が解放されない（待ち側が二重に走り出さない）。走り出す前に捨てられた
+/// 場合はクロージャごと落ちるので、やはり取り残されない。
+async fn run_blocking(
+    key: CacheKey,
+    cache: Arc<Cache>,
+    guard: ClaimGuard,
+) -> anyhow::Result<PathBuf> {
+    use anyhow::Context;
+    tokio::task::spawn_blocking(move || {
+        let _guard = guard;
+        process_for_cache(&key, &cache)
+    })
+    .await
+    .context("image processing task panicked")?
 }
 
 impl Default for Prefetcher {
@@ -195,44 +195,177 @@ pub fn process_for_cache(key: &CacheKey, cache: &Arc<Cache>) -> anyhow::Result<P
 mod tests {
     use super::*;
     use crate::config::DisplayMode;
+    use image::{Rgba, RgbaImage};
 
     fn key(src: &str) -> CacheKey {
         CacheKey {
             src: PathBuf::from(src),
-            screen_w: 1920,
-            screen_h: 1080,
+            screen_w: 64,
+            screen_h: 64,
             mode: DisplayMode::Fill,
             blur_sigma: 0.0,
             bg_darken: 0.0,
         }
     }
 
-    /// キーが外れないとそのキーは二度と先読みされない。
-    #[test]
-    fn inflight_guard_releases_the_key_on_drop() {
-        let set: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
-        let out = PathBuf::from("/cache/out.webp");
-        lock(&set).insert(out.clone());
-        {
-            let _guard = InflightGuard { set: Arc::clone(&set), out: out.clone() };
-            assert!(lock(&set).contains(&out), "前提: ガード生存中は保持される");
+    fn owned(claim: Claim) -> ClaimGuard {
+        match claim {
+            Claim::Owned(g) => g,
+            Claim::Waiting(_) => panic!("加工権を取れるはずの場面で待ち側になった"),
         }
-        assert!(!lock(&set).contains(&out), "ドロップで必ず外れる");
     }
 
-    /// 同じキーに 2 本立てない。`start` は同期なので `await` 前に本数を数えられる。
+    fn waiting(claim: Claim) -> Arc<tokio::sync::Semaphore> {
+        match claim {
+            Claim::Waiting(gate) => gate,
+            Claim::Owned(_) => panic!("待ち側になるはずの場面で加工権を取った"),
+        }
+    }
+
+    fn cache(dir: &tempfile::TempDir) -> Arc<Cache> {
+        Arc::new(Cache::new(dir.path().to_path_buf(), 0))
+    }
+
+    /// 同じ出力パスの加工権は 1 つだけ。2 人目以降は待ち側になる。
     #[tokio::test]
-    async fn start_submits_one_task_per_key() {
+    async fn only_one_claimant_owns_a_given_output() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::new(dir.path().to_path_buf(), 0));
-        let mut prefetcher = Prefetcher::new();
+        let cache = cache(&dir);
+        let out = PathBuf::from("/cache/a.webp");
 
-        prefetcher.start([key("/nonexistent/a.jpg"), key("/nonexistent/a.jpg")], cache);
-
-        assert_eq!(
-            prefetcher.pending.len(),
-            1,
-            "同じキーを渡されても加工は 1 本だけ"
+        let guard = owned(cache.claim(out.clone()));
+        let gate = waiting(cache.claim(out.clone()));
+        assert!(
+            gate.try_acquire().is_err(),
+            "加工権を持っている間は待ち側が通れてはいけない"
         );
+        drop(guard);
+    }
+
+    /// 加工権が外れると待ち側が解放され、次の要求者が加工権を取れる。
+    #[tokio::test]
+    async fn releasing_the_claim_wakes_waiters_and_frees_the_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir);
+        let out = PathBuf::from("/cache/a.webp");
+
+        let guard = owned(cache.claim(out.clone()));
+        let gate = waiting(cache.claim(out.clone()));
+
+        drop(guard);
+
+        // 閉じた門なので即戻る（待ち始めが解放より後でも取りこぼさない）
+        assert!(gate.acquire().await.is_err(), "門が閉じたので待ちは解ける");
+        owned(cache.claim(out));
+    }
+
+    /// 加工権を持ったまま panic しても、巻き戻しで `Drop` が走って待ちが解ける。
+    /// ここが漏れると、そのキーの加工を待つ側が永久に止まる。
+    #[tokio::test]
+    async fn a_panicking_holder_releases_waiters() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir);
+        let out = PathBuf::from("/cache/a.webp");
+
+        let gate = {
+            let guard = owned(cache.claim(out.clone()));
+            let gate = waiting(cache.claim(out.clone()));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let _guard = guard;
+                panic!("加工中の panic");
+            }));
+            assert!(result.is_err(), "前提: panic している");
+            gate
+        };
+
+        assert!(gate.acquire().await.is_err(), "panic でも待ちは解ける");
+        owned(cache.claim(out));
+    }
+
+    /// 加工権を持った future が走り出す前に捨てられても待ちが解ける
+    /// （`Prefetcher::abort()` でタスクがキャンセルされる経路）。
+    #[tokio::test]
+    async fn a_cancelled_holder_releases_waiters() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir);
+        let out = PathBuf::from("/cache/a.webp");
+
+        let guard = owned(cache.claim(out.clone()));
+        let gate = waiting(cache.claim(out.clone()));
+
+        // 加工権をクロージャへ移し、そのクロージャごと捨てる
+        let never_run = move || {
+            let _guard = guard;
+        };
+        drop(never_run);
+
+        assert!(gate.acquire().await.is_err(), "キャンセルでも待ちは解ける");
+        owned(cache.claim(out));
+    }
+
+    /// 同じキーを同時に投げても、全員が同じ出力パスを受け取る。
+    /// 加工に入るのは `Claim::Owned` を取った 1 本だけで、残りは待って引き直す。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_requests_agree_on_one_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.png");
+        RgbaImage::from_pixel(32, 32, Rgba([10, 20, 30, 255]))
+            .save(&src)
+            .expect("テスト画像を書けるべき");
+        let cache = Arc::new(Cache::new(dir.path().join("cache"), 0));
+        let k = key(src.to_str().unwrap());
+
+        let results = futures_util::future::join_all((0..4).map(|_| {
+            let cache = Arc::clone(&cache);
+            let k = k.clone();
+            async move { process_single_flight(&k, &cache).await }
+        }))
+        .await;
+
+        let paths: Vec<PathBuf> = results
+            .into_iter()
+            .map(|r| r.expect("加工は成功するべき"))
+            .collect();
+        assert_eq!(paths.len(), 4);
+        assert!(
+            paths.windows(2).all(|w| w[0] == w[1]),
+            "全員が同じ出力パスを受け取るべき: {:?}",
+            paths
+        );
+        assert!(paths[0].exists(), "出力が書かれているべき");
+    }
+
+    /// 先行が失敗したら待ち側はキャッシュミスに戻り、自分で試して失敗を受け取る。
+    /// 待ちっぱなしにならないことがここの主眼。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failing_source_does_not_leave_waiters_stuck() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir);
+        let k = key("/nonexistent/missing.png");
+
+        let results = futures_util::future::join_all((0..3).map(|_| {
+            let cache = Arc::clone(&cache);
+            let k = k.clone();
+            async move { process_single_flight(&k, &cache).await }
+        }))
+        .await;
+
+        assert!(results.iter().all(|r| r.is_err()), "全員がエラーを受け取る");
+        // 受付が空に戻っているので、次の要求者は加工権を取れる
+        owned(cache.claim(cache.path_for(&k)));
+    }
+
+    /// `start` はキャッシュにあるキーを飛ばす。
+    #[tokio::test]
+    async fn start_skips_keys_already_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir);
+        let k = key("/nonexistent/a.jpg");
+        cache.store(&k, &RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 255]))).unwrap();
+
+        let mut prefetcher = Prefetcher::new();
+        prefetcher.start([k], Arc::clone(&cache));
+
+        assert!(prefetcher.pending.is_empty(), "キャッシュ済みなら起動しない");
     }
 }

@@ -8,11 +8,13 @@
 //! `store()` の後に `evict_if_needed()` を呼び、総容量が `max_size_bytes` を
 //! 超えていれば更新日時の古いファイルから削除する。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
+
+use tokio::sync::Semaphore;
 
 use anyhow::{Context, Result};
 
@@ -31,6 +33,39 @@ pub struct Cache {
     known: Mutex<HashSet<PathBuf>>,
     /// バックグラウンド退避タスクが走行中。重複起動を防ぐ。
     eviction_running: AtomicBool,
+    /// 加工中の出力パスと、その完了を知らせる門。
+    ///
+    /// 前景の適用と先読みは同じ `Arc<Cache>` を共有するので、ここに置けば
+    /// 両方が同じ受付を見る。`Semaphore` を「完了したら閉じる門」として使う
+    /// のは取りこぼしを避けるため。閉じた `Semaphore` の `acquire()` は即
+    /// エラーで返るので、待ち始めが完了より後でも待ちっぱなしにならない
+    /// （`Notify` は通知前に待ち始めていないと取りこぼす）。
+    inflight: Mutex<HashMap<PathBuf, Arc<Semaphore>>>,
+}
+
+/// `Cache::claim` の結果。
+pub enum Claim {
+    /// 加工権を取れた。`ClaimGuard` を落とすと待っている側が解放される。
+    Owned(ClaimGuard),
+    /// 他の誰かが加工中。この門が閉じるまで待ってからキャッシュを引き直す。
+    Waiting(Arc<Semaphore>),
+}
+
+/// 加工権。`Drop` で受付から外し、待っている側を解放する。
+///
+/// 正常終了・エラー・panic の巻き戻し・future の破棄（タスクのキャンセル）の
+/// いずれでも走るので、待ち側が取り残されない。
+pub struct ClaimGuard {
+    cache: Arc<Cache>,
+    out: PathBuf,
+    gate: Arc<Semaphore>,
+}
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        self.cache.lock_inflight().remove(&self.out);
+        self.gate.close();
+    }
 }
 
 /// キャッシュのルックアップ・格納に使うキー。
@@ -70,7 +105,29 @@ impl Cache {
             tracked_size: AtomicU64::new(u64::MAX), // u64::MAX = 未初期化
             known: Mutex::new(HashSet::new()),
             eviction_running: AtomicBool::new(false),
+            inflight: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 出力パスごとの加工権を取る。すでに誰かが加工中なら待つ側になる。
+    pub fn claim(self: &Arc<Self>, out: PathBuf) -> Claim {
+        let mut inflight = self.lock_inflight();
+        if let Some(gate) = inflight.get(&out) {
+            return Claim::Waiting(Arc::clone(gate));
+        }
+        let gate = Arc::new(Semaphore::new(0));
+        inflight.insert(out.clone(), Arc::clone(&gate));
+        Claim::Owned(ClaimGuard {
+            cache: Arc::clone(self),
+            out,
+            gate,
+        })
+    }
+
+    /// 毒された Mutex から中身を回収する。臨界区間は挿入と削除だけなので
+    /// 毒されていても表は壊れていない。先読みの調整でデーモンを落とさない。
+    fn lock_inflight(&self) -> MutexGuard<'_, HashMap<PathBuf, Arc<Semaphore>>> {
+        self.inflight.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// キャッシュヒットなら該当ファイルのパスを返す。

@@ -1066,20 +1066,6 @@ fn cache_keys(src: &Path, screens: &[screen::Monitor], config: &Config) -> Vec<C
         .collect()
 }
 
-/// 1 つのキャッシュキー向けに壁紙を加工してキャッシュパスを返す。
-async fn process_key(key: &CacheKey, cache: &Arc<Cache>) -> Result<std::path::PathBuf> {
-    let src = key.src.as_path();
-    if let Some(cached) = cache.get(key) {
-        tracing::debug!("cache hit: {}", src.display());
-        return Ok(cached);
-    }
-    let cache_owned = Arc::clone(cache);
-    let key_owned = key.clone();
-    tokio::task::spawn_blocking(move || prefetch::process_for_cache(&key_owned, &cache_owned))
-        .await
-        .context("image processing task panicked")?
-}
-
 /// 壁紙を加工してキャッシュし、Plasma に反映する。
 ///
 /// 解像度ごとに 1 回だけ加工して同解像度のモニターで使い回す。並列に投げると
@@ -1096,7 +1082,7 @@ async fn apply(
         futures_util::future::try_join_all(cache_keys(src, screens, config).into_iter().map(
             |key| async move {
                 let size = (key.screen_w, key.screen_h);
-                process_key(&key, cache).await.map(|p| (size, p))
+                prefetch::process_single_flight(&key, cache).await.map(|p| (size, p))
             },
         ))
         .await?
