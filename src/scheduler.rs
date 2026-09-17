@@ -166,25 +166,20 @@ impl Scheduler {
     /// 設定リロードで再スキャンを省いた場合でも並び順の変更を反映するために使う。
     /// 同じ並び順なら何もしない（`Random` では呼ぶたびに再シャッフルになるため）。
     ///
-    /// `rebuild` は通さない。あちらは画像一覧の差し替えが前提で `image_set` の
-    /// 再構築と `history` の破棄を伴うため、ここでは打ち消す必要のない副作用に
-    /// なる。並び順だけなら未表示キューを作り直せば足りる。
+    /// 未表示キューは中身をそのまま並べ替える。`build_queue` で作り直すと全画像が
+    /// 戻ってくるので、この一巡で表示済みのもの（`current` と `history`）を
+    /// 引き算して打ち消す必要が出る。しかも `history` は `HISTORY_LIMIT` で
+    /// 打ち切られるため、それより長い一巡では引き切れない。キューは既に
+    /// 「この一巡でまだ出していない画像」なので、順番だけ変えれば
+    /// その不変条件は保たれる。
     pub fn set_order(&mut self, order: Order) {
         if self.order == order {
             return;
         }
         self.order = order;
-        self.queue = Self::build_queue(self.images.len(), order, None);
-        // `build_queue` は全画像を並べ直すので、この一巡で表示済みのものまで
-        // 未表示キューに戻ってくる。表示中の画像と履歴にあるものを取り除いて
-        // 「この一巡でまだ出していない画像」という不変条件を保つ。これを怠ると
-        // `prev()` が履歴から戻した画像がキューにも残り、一巡し切る前に
-        // 同じ画像が再登場する。
-        //
-        // 履歴は `HISTORY_LIMIT` で打ち切られるため、それより長い一巡では
-        // 古い表示分を除き切れない。分かる範囲で最大限除く、という扱い。
-        self.queue
-            .retain(|&i| self.current != Some(i) && !self.history.contains(&i));
+        let mut pending: Vec<usize> = self.queue.drain(..).collect();
+        order_indices(&mut pending, order);
+        self.queue = pending.into();
     }
 
     /// パスから画像インデックスを引く。
@@ -282,22 +277,27 @@ impl Scheduler {
         order: Order,
         avoid_first: Option<usize>,
     ) -> VecDeque<usize> {
-        match order {
-            Order::Sequential => (0..image_count).collect(),
-            Order::Random => {
-                let mut v: Vec<usize> = (0..image_count).collect();
-                fisher_yates(&mut v);
-                // 直前に表示していた画像が先頭に来てしまったら 1 つずらす
-                if v.len() > 1 {
-                    if let Some(avoid) = avoid_first {
-                        if v.first() == Some(&avoid) {
-                            v.rotate_left(1);
-                        }
-                    }
+        let mut v: Vec<usize> = (0..image_count).collect();
+        order_indices(&mut v, order);
+        // シャッフルの結果、直前に表示していた画像が先頭に来てしまったら 1 つずらす。
+        // `Sequential` は並びが決まっているので触らない。
+        if order == Order::Random && v.len() > 1 {
+            if let Some(avoid) = avoid_first {
+                if v.first() == Some(&avoid) {
+                    v.rotate_left(1);
                 }
-                v.into()
             }
         }
+        v.into()
+    }
+}
+
+/// インデックス列を指定の並び順に並べ替える。
+/// 「並び順とは何か」の定義をここ 1 箇所に置き、`build_queue` と `set_order` で共有する。
+fn order_indices(indices: &mut [usize], order: Order) {
+    match order {
+        Order::Sequential => indices.sort_unstable(),
+        Order::Random => fisher_yates(indices),
     }
 }
 
@@ -440,10 +440,10 @@ mod tests {
 
     /// 設定リロードで再スキャンを省いたときも並び順の変更が効くこと。
     /// 画像一覧・現在の画像・一時停止状態は維持される。
-    /// `order` フィールドだけ書き換えて未表示キューを作り直さない、という抜けを防ぐ。
+    /// `order` フィールドだけ書き換えて未表示キューを並べ替えない、という抜けを防ぐ。
     /// Random → Sequential は結果が一意に決まるので確かめられる。
     #[test]
-    fn set_order_rebuilds_the_queue_in_the_new_order() {
+    fn set_order_reorders_the_pending_queue() {
         let mut s = Scheduler::new(paths(10), Order::Random);
         s.next().unwrap();
 

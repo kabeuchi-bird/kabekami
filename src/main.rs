@@ -177,9 +177,7 @@ async fn main() -> Result<()> {
         Ok(path) => watcher::spawn_config(&path),
         Err(e) => {
             tracing::warn!("config path unavailable, not watching config: {}", e);
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-            drop(tx);
-            (rx, None)
+            (watcher::degraded_config(), None)
         }
     };
 
@@ -224,15 +222,12 @@ async fn main() -> Result<()> {
     let fetch_in_progress = Arc::new(AtomicBool::new(false));
 
     // トレイに初期画像枚数と復元した現在画像名を反映
-    if let Some(ref h) = tray_handle {
-        let count = scheduler.image_count();
-        let name = tray_display_name(scheduler.current().map(|p| p.as_path()));
-        h.update(|t| {
-            t.image_count = count;
-            t.current_name = name;
-        })
-        .await;
-    }
+    update_tray_current_and_count(
+        &tray_handle,
+        scheduler.current().map(|p| p.as_path()),
+        scheduler.image_count(),
+    )
+    .await;
 
     // `apply_and_notify` に渡す `ApplyCtx` を組み立てる。参照するローカル変数が多く
     // 呼び出しが 10 箇所あるため、借用リストの重複をここ 1 箇所に閉じ込める。
@@ -432,13 +427,15 @@ async fn main() -> Result<()> {
                                         apply_and_notify(apply_ctx!(), &next, "apply after blacklist failed").await;
                                         update_tray_count(&tray_handle, scheduler.image_count()).await;
                                     }
+                                    // 最後の 1 枚を除外した場合。`remove_image` が
+                                    // `current` を落としているので名前は空になる。
                                     None => {
-                                        if let Some(ref h) = tray_handle {
-                                            h.update(|t| {
-                                                t.current_name = String::new();
-                                                t.image_count = scheduler.image_count();
-                                            }).await;
-                                        }
+                                        update_tray_current_and_count(
+                                            &tray_handle,
+                                            scheduler.current().map(|p| p.as_path()),
+                                            scheduler.image_count(),
+                                        )
+                                        .await;
                                     }
                                 }
                                 ticker = make_ticker(config.rotation.interval_secs);
@@ -500,9 +497,10 @@ async fn main() -> Result<()> {
                                     watcher_handle.as_ref().is_some_and(|w| w.is_complete());
                                 let needs_rescan = sources_changed || !watching_everything;
 
-                                // 実際に一覧を差し替えたか。`needs_rescan` は「走査を試みたか」
-                                // でしかなく、空・失敗で据え置いた場合も真になる。
-                                let mut list_changed = false;
+                                // 走行中の先読みが温めている画像。再スキャンと並び順の
+                                // 反映を挟んだあとで変わっていれば、その先読みはもう
+                                // 「次の画像」を指していない。
+                                let warming = scheduler.peek_next().cloned();
                                 if needs_rescan {
                                     match scan_images(&source_dirs, new_cfg.sources.recursive, &blacklist).await {
                                         Ok(images) if !images.is_empty() => {
@@ -520,7 +518,6 @@ async fn main() -> Result<()> {
                                             .await;
                                             scanned_dirs = source_dirs;
                                             scanned_recursive = new_cfg.sources.recursive;
-                                            list_changed = true;
                                         }
                                         // 空・失敗のときは画像一覧も監視対象も据え置く
                                         // （ネットワークマウントの一時的な不在などで
@@ -540,7 +537,6 @@ async fn main() -> Result<()> {
                                 // rebuild を通らなかった場合（再スキャンを省いた・画像が
                                 // 見つからなかった・スキャンが失敗した）も並び順は反映する。
                                 // rebuild 済みなら同値なので何もしない。
-                                let order_changed = new_cfg.rotation.order != config.rotation.order;
                                 scheduler.set_order(new_cfg.rotation.order);
 
                                 // キャッシュキーに効く設定が変わったかどうか。変わって
@@ -551,10 +547,14 @@ async fn main() -> Result<()> {
                                 let cache_changed = new_cfg.cache != config.cache;
                                 let display_changed = new_cfg.display != config.display;
 
-                                // 走行中の先読みが指す先が変わったときだけ捨てる。
-                                // 走査が空・失敗で一覧を据え置いたなら `peek_next()` は
-                                // 同じままなので、ほぼ終わっているデコードを捨てる理由がない。
-                                if list_changed || order_changed || cache_changed || display_changed {
+                                // 先読みの指す先が変わったときだけ捨てる。走査が空・失敗で
+                                // 一覧を据え置いたなら `peek_next()` は同じままなので、
+                                // ほぼ終わっているデコードを捨てる理由がない。表示設定と
+                                // キャッシュ設定はパスが同じでもキーが変わるので別に見る。
+                                if scheduler.peek_next() != warming.as_ref()
+                                    || cache_changed
+                                    || display_changed
+                                {
                                     prefetcher.abort();
                                 }
                                 if cache_changed {
@@ -630,10 +630,15 @@ async fn main() -> Result<()> {
                     }
 
                     TrayCmd::OpenSettings => {
-                        match std::process::Command::new("kabekami-config").spawn() {
-                            Ok(_) => tracing::info!("launched kabekami-config"),
-                            Err(e) => tracing::warn!("failed to launch kabekami-config: {}", e),
-                        }
+                        // fork/exec はデーモンのアドレス空間サイズに比例してブロックする
+                        // （加工直後は RSS が大きい）。隣の `OpenCurrent` と同じく
+                        // 単一ワーカーの外へ出す。
+                        tokio::task::spawn_blocking(|| {
+                            match std::process::Command::new("kabekami-config").spawn() {
+                                Ok(_) => tracing::info!("launched kabekami-config"),
+                                Err(e) => tracing::warn!("failed to launch kabekami-config: {}", e),
+                            }
+                        });
                     }
 
                     TrayCmd::PlasmaRestarted => {
@@ -665,15 +670,27 @@ async fn main() -> Result<()> {
             }
 
             Some(ev) = watch_rx.recv() => {
-                apply_watch_event(ev, &mut scheduler, &blacklist);
                 // 監視ディレクトリへの大量コピーではイベントが連続して届く。1 件ごとに
                 // トレイを更新すると ksni への往復がイベント数だけ積み上がるが、
                 // 途中の枚数は誰も読めない。イベント自体はパスを運ぶので捨てられない
                 // ため、保留分を取り込んでから枚数表示を 1 回だけ更新する。
-                while let Ok(ev) = watch_rx.try_recv() {
+                //
+                // ただし 1 パスで飲む件数には上限を置く。`remove_image` は画像数に
+                // 比例した走査を数回行い、この間 await が無いので、キュー
+                // （容量 256）を一気に飲むとその間 D-Bus・トレイ・タイマーが
+                // 一切動けない。上限で抜ければ残りは次のループでまたこの arm が拾う。
+                const MAX_DRAIN_PER_PASS: usize = 32;
+                let count_before = scheduler.image_count();
+                apply_watch_event(ev, &mut scheduler, &blacklist);
+                for _ in 1..MAX_DRAIN_PER_PASS {
+                    let Ok(ev) = watch_rx.try_recv() else { break };
                     apply_watch_event(ev, &mut scheduler, &blacklist);
                 }
-                update_tray_count(&tray_handle, scheduler.image_count()).await;
+                // 枚数が動いていなければ往復も要らない（ブラックリスト済みパスの
+                // 追加や、一覧に無いパスの削除では動かない）。
+                if scheduler.image_count() != count_before {
+                    update_tray_count(&tray_handle, scheduler.image_count()).await;
+                }
             }
 
             // config.toml の変更を検知したら、連続イベントを集約してから ReloadConfig を送信。
@@ -747,9 +764,7 @@ async fn spawn_dir_watcher_offloaded(
         Err(e) => {
             // 監視の起動に失敗したのと同じ縮退状態にする。
             tracing::warn!("watcher task panicked, running without file watcher: {}", e);
-            let (tx, rx) = tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
-            drop(tx);
-            (rx, None)
+            (watcher::degraded(), None)
         }
     }
 }
@@ -1038,28 +1053,27 @@ fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
     t
 }
 
-/// 1 つのモニター解像度向けに壁紙を加工してキャッシュパスを返す。
-async fn process_image(
-    src: &Path,
-    screen_w: u32,
-    screen_h: u32,
-    config: &Config,
-    cache: &Arc<Cache>,
-) -> Result<std::path::PathBuf> {
-    let key = CacheKey {
-        src: src.to_path_buf(),
-        screen_w,
-        screen_h,
-        mode: config.display.mode,
-        blur_sigma: config.display.blur_sigma,
-        bg_darken: config.display.bg_darken,
-    };
-    if let Some(cached) = cache.get(&key) {
+/// `screens` を表示するのに必要なキャッシュキーの一式（解像度ごとに 1 つ）。
+///
+/// 適用側と先読み側の唯一の共有点。解像度の集合だけでなくキーの中身まで
+/// ここで決めるので、表示設定にフィールドが増えても両者がズレない。
+/// ズレた場合はエラーにならず、先読みが誰も引かないファイルを温め続ける。
+fn cache_keys(src: &Path, screens: &[screen::Monitor], config: &Config) -> Vec<CacheKey> {
+    distinct_sizes(screens)
+        .into_iter()
+        .map(|(w, h)| CacheKey::new(src, w, h, &config.display))
+        .collect()
+}
+
+/// 1 つのキャッシュキー向けに壁紙を加工してキャッシュパスを返す。
+async fn process_key(key: &CacheKey, cache: &Arc<Cache>) -> Result<std::path::PathBuf> {
+    let src = key.src.as_path();
+    if let Some(cached) = cache.get(key) {
         tracing::debug!("cache hit: {}", src.display());
         return Ok(cached);
     }
     let cache_owned = Arc::clone(cache);
-    let key_owned = key;
+    let key_owned = key.clone();
     tokio::task::spawn_blocking(move || prefetch::process_for_cache(&key_owned, &cache_owned))
         .await
         .context("image processing task panicked")?
@@ -1067,10 +1081,13 @@ async fn process_image(
 
 /// 壁紙を加工してキャッシュし、Plasma に反映する。
 ///
-/// マルチモニター時は解像度ごとに 1 回だけ加工し、同じ解像度のモニターには
-/// その結果を使い回して `set_wallpaper_multi` を呼ぶ。同解像度を並列に投げると
-/// `process_for_cache` の二重チェックをどちらもすり抜けて同じ画像を 2 回
-/// デコードしてしまうため、加工を投げる前に解像度で畳む。
+/// 解像度ごとに 1 回だけ加工し、同じ解像度のモニターにはその結果を使い回す。
+/// 同解像度を並列に投げると `process_for_cache` の二重チェックをどちらもすり抜けて
+/// 同じ画像を 2 回デコードしてしまうため、加工を投げる前に解像度で畳む。
+///
+/// モニター 1 台でも分岐しない。`set_wallpaper_multi` が 1 件なら
+/// `set_wallpaper` に委譲し、0 件なら何もしないので、壁紙適用の経路を
+/// 2 本持って歩調を合わせ続ける必要がない。
 async fn apply(
     src: &Path,
     screens: &[screen::Monitor],
@@ -1078,30 +1095,23 @@ async fn apply(
     cache: &Arc<Cache>,
     plasma: &plasma::PlasmaShell,
 ) -> Result<()> {
-    if screens.len() <= 1 {
-        let (w, h) = primary_size(screens);
-        let output = process_image(src, w, h, config, cache).await?;
-        plasma.set_wallpaper(&output).await
-    } else {
-        let processed: std::collections::HashMap<(u32, u32), std::path::PathBuf> =
-            futures_util::future::try_join_all(distinct_sizes(screens).into_iter().map(
-                |(w, h)| async move {
-                    process_image(src, w, h, config, cache).await.map(|p| ((w, h), p))
-                },
-            ))
-            .await?
-            .into_iter()
-            .collect();
-        // `processed` のキーは `screens` の解像度そのものなので、取りこぼしは起きない
-        let entries: Vec<(usize, &Path)> = screens
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, m)| {
-                processed.get(&(m.width, m.height)).map(|p| (idx, p.as_path()))
-            })
-            .collect();
-        plasma.set_wallpaper_multi(&entries).await
-    }
+    let processed: std::collections::HashMap<(u32, u32), std::path::PathBuf> =
+        futures_util::future::try_join_all(cache_keys(src, screens, config).into_iter().map(
+            |key| async move {
+                let size = (key.screen_w, key.screen_h);
+                process_key(&key, cache).await.map(|p| (size, p))
+            },
+        ))
+        .await?
+        .into_iter()
+        .collect();
+    // `processed` のキーは `screens` の解像度そのものなので、取りこぼしは起きない
+    let entries: Vec<(usize, &Path)> = screens
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, m)| processed.get(&(m.width, m.height)).map(|p| (idx, p.as_path())))
+        .collect();
+    plasma.set_wallpaper_multi(&entries).await
 }
 
 /// `apply_and_notify` の long-lived な引数束。
@@ -1168,6 +1178,24 @@ fn apply_watch_event(
             tracing::info!("image removed: {}", path.display());
             scheduler.remove_image(&path);
         }
+    }
+}
+
+/// トレイの「現在の壁紙名」と「画像枚数」をまとめて更新する。
+///
+/// 2 フィールドを 1 回の `update` で送り、ksni への往復を 1 回に保つ。
+async fn update_tray_current_and_count(
+    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
+    current: Option<&Path>,
+    count: usize,
+) {
+    if let Some(ref h) = tray_handle {
+        let name = tray_display_name(current);
+        h.update(|t| {
+            t.current_name = name;
+            t.image_count = count;
+        })
+        .await;
     }
 }
 
@@ -1262,17 +1290,7 @@ fn start_prefetch(
         return;
     }
     if let Some(next) = scheduler.peek_next() {
-        let keys = distinct_sizes(screens)
-            .into_iter()
-            .map(|(screen_w, screen_h)| CacheKey {
-                src: next.clone(),
-                screen_w,
-                screen_h,
-                mode: config.display.mode,
-                blur_sigma: config.display.blur_sigma,
-                bg_darken: config.display.bg_darken,
-            });
-        prefetcher.start(keys, cache.clone());
+        prefetcher.start(cache_keys(next, screens, config), cache.clone());
     }
 }
 
@@ -1324,18 +1342,48 @@ mod tests {
 
     /// 解像度が同じモニターは同じ `CacheKey` になるため、加工も先読みも
     /// 1 回で足りる。ここが重複すると同じ画像を並列に 2 回デコードする。
-    #[test]
-    fn distinct_sizes_dedupes_identical_resolutions() {
-        let mon = |name: &str, width, height| screen::Monitor {
-            name: name.to_string(),
-            width,
-            height,
-        };
-        let screens = vec![
+    fn mon(name: &str, width: u32, height: u32) -> screen::Monitor {
+        screen::Monitor { name: name.to_string(), width, height }
+    }
+
+    /// 解像度の違う 2 台 + 片方と同じ解像度の 3 台目。
+    fn mixed_screens() -> Vec<screen::Monitor> {
+        vec![
             mon("DP-1", 3840, 2160),
             mon("DP-2", 1920, 1080),
             mon("HDMI-1", 3840, 2160),
-        ];
+        ]
+    }
+
+    /// `cache_keys` は適用側 (`apply`) と先読み側 (`start_prefetch`) の唯一の共有点。
+    /// 解像度ごとに 1 つで、表示設定がそのまま乗ることを固定する。ここがズレると
+    /// エラーにならず、先読みが誰も引かないファイルを温め続ける。
+    #[test]
+    fn cache_keys_are_one_per_resolution_and_carry_display_settings() {
+        let mut config = Config::default();
+        config.display.mode = DisplayMode::Fit;
+        config.display.blur_sigma = 12.5;
+        config.display.bg_darken = 0.25;
+        let src = std::path::Path::new("/pics/a.jpg");
+
+        let keys = cache_keys(src, &mixed_screens(), &config);
+
+        assert_eq!(
+            keys.iter().map(|k| (k.screen_w, k.screen_h)).collect::<Vec<_>>(),
+            vec![(3840, 2160), (1920, 1080)],
+            "解像度ごとに 1 つ（同じ解像度は畳む）"
+        );
+        for k in &keys {
+            assert_eq!(k.src, src, "元画像は共通");
+            assert_eq!(k.mode, DisplayMode::Fit, "表示モードが落ちている");
+            assert_eq!(k.blur_sigma, 12.5, "blur_sigma が落ちている");
+            assert_eq!(k.bg_darken, 0.25, "bg_darken が落ちている");
+        }
+    }
+
+    #[test]
+    fn distinct_sizes_dedupes_identical_resolutions() {
+        let screens = mixed_screens();
         assert_eq!(
             distinct_sizes(&screens),
             vec![(3840, 2160), (1920, 1080)],
