@@ -46,11 +46,10 @@ impl Blacklist {
     /// すでに登録済みの場合は何もしない。保存に失敗した場合はメモリ上の集合も
     /// ロールバックし、`false` を返す（失敗の詳細は `save_offloaded` が warn に出す）。
     ///
-    /// 書き込みは `kabekami_common::atomic_write`（一意な tmp 名 (PID + nanos) +
-    /// fsync + 親ディレクトリ fsync）で行い、電源断・並列書き込みに耐える。
-    /// その fsync 2 回は `state::save_offloaded` 経由で `spawn_blocking` に逃がす。
-    /// 単一ワーカースレッド上で同期実行すると D-Bus・トレイ・タイマーを巻き込んで
-    /// 待たせ、トレイや CLI の操作にその場停止として見えるため。
+    /// 書き込みは `atomic_write`（一意な tmp 名 + fsync + 親ディレクトリ fsync）で
+    /// 電源断・並列書き込みに耐える。その fsync 2 回は `state::save_offloaded` で
+    /// `spawn_blocking` に逃がす（単一ワーカー上で同期実行すると D-Bus・トレイ・
+    /// タイマーごと待たせ、キー操作がその場で止まって見える）。
     pub async fn add(&mut self, path: &Path) -> bool {
         let path_buf = path.to_path_buf();
         if !self.paths.insert(path_buf.clone()) {

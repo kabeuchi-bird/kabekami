@@ -670,15 +670,10 @@ async fn main() -> Result<()> {
             }
 
             Some(ev) = watch_rx.recv() => {
-                // 監視ディレクトリへの大量コピーではイベントが連続して届く。1 件ごとに
-                // トレイを更新すると ksni への往復がイベント数だけ積み上がるが、
-                // 途中の枚数は誰も読めない。イベント自体はパスを運ぶので捨てられない
-                // ため、保留分を取り込んでから枚数表示を 1 回だけ更新する。
-                //
-                // ただし 1 パスで飲む件数には上限を置く。`remove_image` は画像数に
-                // 比例した走査を数回行い、この間 await が無いので、キュー
-                // （容量 256）を一気に飲むとその間 D-Bus・トレイ・タイマーが
-                // 一切動けない。上限で抜ければ残りは次のループでまたこの arm が拾う。
+                // 大量コピー時は 1 件ごとにトレイを更新しても途中の枚数は誰も読めない。
+                // イベントはパスを運ぶので捨てられず、処理はして更新だけまとめる。
+                // 1 パスの件数に上限を置くのは、この中に await が無く `remove_image` が
+                // 画像数に比例するため。上限で抜ければ残りは次のループでまた拾う。
                 const MAX_DRAIN_PER_PASS: usize = 32;
                 let count_before = scheduler.image_count();
                 apply_watch_event(ev, &mut scheduler, &blacklist);
@@ -686,8 +681,7 @@ async fn main() -> Result<()> {
                     let Ok(ev) = watch_rx.try_recv() else { break };
                     apply_watch_event(ev, &mut scheduler, &blacklist);
                 }
-                // 枚数が動いていなければ往復も要らない（ブラックリスト済みパスの
-                // 追加や、一覧に無いパスの削除では動かない）。
+                // 枚数が動いていなければ往復も要らない
                 if scheduler.image_count() != count_before {
                     update_tray_count(&tray_handle, scheduler.image_count()).await;
                 }
@@ -1081,13 +1075,9 @@ async fn process_key(key: &CacheKey, cache: &Arc<Cache>) -> Result<std::path::Pa
 
 /// 壁紙を加工してキャッシュし、Plasma に反映する。
 ///
-/// 解像度ごとに 1 回だけ加工し、同じ解像度のモニターにはその結果を使い回す。
-/// 同解像度を並列に投げると `process_for_cache` の二重チェックをどちらもすり抜けて
-/// 同じ画像を 2 回デコードしてしまうため、加工を投げる前に解像度で畳む。
-///
-/// モニター 1 台でも分岐しない。`set_wallpaper_multi` が 1 件なら
-/// `set_wallpaper` に委譲し、0 件なら何もしないので、壁紙適用の経路を
-/// 2 本持って歩調を合わせ続ける必要がない。
+/// 解像度ごとに 1 回だけ加工して同解像度のモニターで使い回す。並列に投げると
+/// `process_for_cache` の二重チェックをすり抜けて同じ画像を 2 回デコードする。
+/// モニター 1 台でも分岐しない（`set_wallpaper_multi` が 1 件なら委譲、0 件なら無処理）。
 async fn apply(
     src: &Path,
     screens: &[screen::Monitor],
@@ -1181,9 +1171,8 @@ fn apply_watch_event(
     }
 }
 
-/// トレイの「現在の壁紙名」と「画像枚数」をまとめて更新する。
-///
-/// 2 フィールドを 1 回の `update` で送り、ksni への往復を 1 回に保つ。
+/// トレイの「現在の壁紙名」と「画像枚数」を 1 回の `update` で更新する
+/// （分けると ksni への往復が 2 回になる）。
 async fn update_tray_current_and_count(
     tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
     current: Option<&Path>,
@@ -1274,11 +1263,7 @@ impl Drop for FlagGuard {
     }
 }
 
-/// 次に表示する画像の先読みを開始する。
-///
-/// `screens` に現れる解像度すべてを温める。プライマリだけ温めると、解像度の
-/// 違うモニターは切り替えのたびに確実にキャッシュミスし、`apply` が
-/// クリティカルパスでデコードと縮小を待つことになる。
+/// 次に表示する画像の先読みを開始する（`apply` と同じキー一式を温める）。
 fn start_prefetch(
     prefetcher: &mut Prefetcher,
     scheduler: &Scheduler,
