@@ -404,10 +404,15 @@ async fn main() -> Result<()> {
                                     tracing::info!("moved to trash: {}", path.display());
                                     scheduler.remove_image(&path);
                                     prefetcher.abort();
-                                    if let Some(next) = scheduler.next() {
-                                        apply_and_notify(apply_ctx!(), &next, "apply after trash failed").await;
+                                    match scheduler.next() {
+                                        Some(next) => {
+                                            apply_and_notify(apply_ctx!(), &next, "apply after trash failed").await;
+                                            update_tray_count(&tray_handle, scheduler.image_count()).await;
+                                        }
+                                        None => {
+                                            clear_current_wallpaper(&tray_handle, &mut state_writer, &scheduler).await;
+                                        }
                                     }
-                                    update_tray_count(&tray_handle, scheduler.image_count()).await;
                                     ticker = make_ticker(config.rotation.interval_secs);
                                 }
                             }
@@ -427,15 +432,8 @@ async fn main() -> Result<()> {
                                         apply_and_notify(apply_ctx!(), &next, "apply after blacklist failed").await;
                                         update_tray_count(&tray_handle, scheduler.image_count()).await;
                                     }
-                                    // 最後の 1 枚を除外した場合。`remove_image` が
-                                    // `current` を落としているので名前は空になる。
                                     None => {
-                                        update_tray_current_and_count(
-                                            &tray_handle,
-                                            scheduler.current().map(|p| p.as_path()),
-                                            scheduler.image_count(),
-                                        )
-                                        .await;
+                                        clear_current_wallpaper(&tray_handle, &mut state_writer, &scheduler).await;
                                     }
                                 }
                                 ticker = make_ticker(config.rotation.interval_secs);
@@ -472,10 +470,22 @@ async fn main() -> Result<()> {
                                 notifier.error(&msg, None).await;
                                 update_tray_error(&tray_handle, msg).await;
                             }
-                            Ok(new_cfg) if new_cfg == config => {
-                                // 内容が同一なら何もしない。トレイからのモード／間隔変更で
-                                // デーモン自身が config.toml を保存した場合もここで弾かれ、
-                                // 不要な再スキャンとスケジューラ再構築を避けられる。
+                            // 内容が同一で、かつ前回の走査と監視登録がどちらも完遂して
+                            // いるときだけ何もしない。トレイからのモード／間隔変更で
+                            // デーモン自身が保存した場合もここで弾ける。
+                            //
+                            // 走査が空・失敗した場合や監視登録が部分失敗した場合は、
+                            // 設定保存が唯一の再試行契機になる。内容が同一だからと
+                            // ここで弾くと、その再試行が永久に走らない。
+                            Ok(new_cfg)
+                                if reload_is_a_noop(
+                                    &new_cfg,
+                                    &config,
+                                    &scanned_dirs,
+                                    scanned_recursive,
+                                    watcher_handle.as_ref().is_some_and(|w| w.is_complete()),
+                                ) =>
+                            {
                                 tracing::debug!("config unchanged, skipping reload");
                             }
                             Ok(new_cfg) => {
@@ -999,6 +1009,24 @@ fn distinct_sizes(screens: &[screen::Monitor]) -> Vec<(u32, u32)> {
     sizes
 }
 
+/// 設定リロードを丸ごと省いてよいか。
+///
+/// 内容が同一でも、前回の走査や監視登録が完遂していなければ省けない。走査が
+/// 空・失敗した場合や監視登録が部分失敗した場合、設定保存が唯一の再試行契機に
+/// なるので、内容が同一だからと弾くとその再試行が永久に走らない。
+fn reload_is_a_noop(
+    new_cfg: &Config,
+    config: &Config,
+    scanned_dirs: &[std::path::PathBuf],
+    scanned_recursive: bool,
+    watching_everything: bool,
+) -> bool {
+    new_cfg == config
+        && collect_source_dirs(new_cfg) == scanned_dirs
+        && new_cfg.sources.recursive == scanned_recursive
+        && watching_everything
+}
+
 /// 連続して届いたコマンドの 2 発目以降を捨てるか判定する。
 ///
 /// 500ms という長さの理由: KRunner で `kabekami --next` を実行すると
@@ -1148,6 +1176,26 @@ fn apply_watch_event(
             scheduler.remove_image(&path);
         }
     }
+}
+
+/// 最後の 1 枚が無くなったときのトレイと state の後始末。
+///
+/// 枚数だけ更新すると、トレイの壁紙名が消えた画像のまま残り、state も
+/// その画像を「現在の壁紙」として指し続ける。再起動後にトレイやゴミ箱操作が
+/// 画面に出ていない画像を指すことになる。
+async fn clear_current_wallpaper(
+    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
+    state_writer: &mut state::StateWriter,
+    scheduler: &Scheduler,
+) {
+    // `remove_image` が `current` を落としているので名前は空になる
+    update_tray_current_and_count(
+        tray_handle,
+        scheduler.current().map(|p| p.as_path()),
+        scheduler.image_count(),
+    )
+    .await;
+    state_writer.persist(scheduler.is_paused(), None).await;
 }
 
 /// トレイの壁紙名と枚数を 1 回の `update` で更新する（分けると往復が 2 回になる）。
@@ -1361,6 +1409,41 @@ mod tests {
         assert_eq!(
             distinct_sizes(&[]),
             vec![(FALLBACK_SCREEN_W, FALLBACK_SCREEN_H)]
+        );
+    }
+
+    /// 内容が同一でも、走査や監視登録が完遂していなければリロードを省けない。
+    /// 省いてしまうと、走査が空・失敗した状態や監視が部分失敗した状態から
+    /// 永久に抜け出せなくなる（設定保存が唯一の再試行契機のため）。
+    #[test]
+    fn reload_is_only_a_noop_when_scan_and_watch_are_both_complete() {
+        let mut config = Config::default();
+        config.sources.directories = vec![std::path::PathBuf::from("/pics")];
+        let scanned = vec![std::path::PathBuf::from("/pics")];
+        let recursive = config.sources.recursive;
+
+        assert!(
+            reload_is_a_noop(&config, &config, &scanned, recursive, true),
+            "同一内容 + 走査済み + 全監視済みなら省ける"
+        );
+        assert!(
+            !reload_is_a_noop(&config, &config, &[], recursive, true),
+            "走査が未完了なら省けない（空・失敗のあと再試行が要る）"
+        );
+        assert!(
+            !reload_is_a_noop(&config, &config, &scanned, !recursive, true),
+            "recursive が前回の走査と違えば省けない"
+        );
+        assert!(
+            !reload_is_a_noop(&config, &config, &scanned, recursive, false),
+            "監視が全ディレクトリに張れていなければ省けない"
+        );
+
+        let mut other = config.clone();
+        other.rotation.interval_secs += 1;
+        assert!(
+            !reload_is_a_noop(&other, &config, &scanned, recursive, true),
+            "内容が違えば当然省けない"
         );
     }
 
