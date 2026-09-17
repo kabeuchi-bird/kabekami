@@ -42,29 +42,76 @@ impl Blacklist {
         self.paths.contains(path)
     }
 
-    /// パスをブラックリストに追加してファイルに永続化する。
-    /// すでに登録済みの場合は何もしない。保存失敗時はロールバックして `Err` を返す。
-    pub fn add(&mut self, path: &Path) -> Result<()> {
+    /// パスをブラックリストに追加してファイルに永続化する。登録済みなら何もしない。
+    /// 保存に失敗したらメモリ上の集合もロールバックして `false` を返す
+    /// （詳細は `save_offloaded` が warn に出す）。
+    ///
+    /// 書き込みは `atomic_write`（一意な tmp 名 + fsync 2 回）で電源断に耐える。
+    /// その fsync は `state::save_offloaded` で `spawn_blocking` へ逃がす
+    /// （単一ワーカー上で同期実行するとキー操作がその場で止まって見える）。
+    pub async fn add(&mut self, path: &Path) -> bool {
         let path_buf = path.to_path_buf();
-        if self.paths.insert(path_buf.clone()) {
-            if let Err(e) = self.save() {
-                self.paths.remove(&path_buf);
-                return Err(e);
-            }
+        if !self.paths.insert(path_buf.clone()) {
+            return true;
         }
-        Ok(())
+        let content = self.serialize();
+        let file_path = self.file_path.clone();
+        let saved = crate::state::save_offloaded(
+            move || {
+                kabekami_common::atomic_write::atomic_write(&file_path, content.as_bytes())?;
+                Ok(())
+            },
+            "blacklist",
+        )
+        .await;
+        if !saved {
+            self.paths.remove(&path_buf);
+        }
+        saved
     }
 
-    /// `kabekami_common::atomic_write` でブラックリストを永続化する。
-    /// 一意な tmp 名 (PID + nanos) + fsync + 親ディレクトリ fsync で
-    /// 電源断・並列書き込み耐性を確保する。
-    fn save(&self) -> Result<()> {
-        let content: String = self
-            .paths
+    /// ファイルに書き出す内容（1 行 1 パス）。
+    fn serialize(&self) -> String {
+        self.paths
             .iter()
             .map(|p| format!("{}\n", p.display()))
-            .collect();
-        kabekami_common::atomic_write::atomic_write(&self.file_path, content.as_bytes())?;
-        Ok(())
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ここが壊れると再起動でブラックリストが消え、除外した画像が戻ってくる。
+    #[tokio::test]
+    async fn add_persists_so_a_reload_still_excludes_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bl = Blacklist::load(dir.path()).unwrap();
+        let path = Path::new("/pics/nope.jpg");
+
+        assert!(bl.add(path).await, "保存は成功する");
+        assert!(bl.contains(path));
+
+        let reloaded = Blacklist::load(dir.path()).unwrap();
+        assert!(reloaded.contains(path), "読み直しても除外され続ける");
+    }
+
+    /// 登録済みのパスは書き込みを起こさない（連打で fsync を繰り返さない）。
+    #[tokio::test]
+    async fn adding_a_known_path_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bl = Blacklist::load(dir.path()).unwrap();
+        let path = Path::new("/pics/nope.jpg");
+        assert!(bl.add(path).await);
+
+        let file = dir.path().join("blacklist.txt");
+        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
+        assert!(bl.add(path).await, "二度目も成功扱い");
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().modified().unwrap(),
+            before,
+            "二度目は書き込まない"
+        );
     }
 }

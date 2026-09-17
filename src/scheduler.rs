@@ -161,6 +161,21 @@ impl Scheduler {
         }
     }
 
+    /// 並び順だけを変更する。画像一覧・`current`・`paused`・`history` はそのまま。
+    ///
+    /// 同じ並び順なら何もしない（`Random` は呼ぶたびに再シャッフルになる）。
+    /// 並べ替えるのは未表示キューの中身だけ。キューは既に「この一巡で未表示の
+    /// 画像」なので、全画像から作り直して表示済みを引き算する必要はない。
+    pub fn set_order(&mut self, order: Order) {
+        if self.order == order {
+            return;
+        }
+        self.order = order;
+        let mut pending: Vec<usize> = self.queue.drain(..).collect();
+        order_indices(&mut pending, order);
+        self.queue = pending.into();
+    }
+
     /// パスから画像インデックスを引く。
     fn find_index(&self, path: &Path) -> Option<usize> {
         self.images.iter().position(|p| p == path)
@@ -256,22 +271,26 @@ impl Scheduler {
         order: Order,
         avoid_first: Option<usize>,
     ) -> VecDeque<usize> {
-        match order {
-            Order::Sequential => (0..image_count).collect(),
-            Order::Random => {
-                let mut v: Vec<usize> = (0..image_count).collect();
-                fisher_yates(&mut v);
-                // 直前に表示していた画像が先頭に来てしまったら 1 つずらす
-                if v.len() > 1 {
-                    if let Some(avoid) = avoid_first {
-                        if v.first() == Some(&avoid) {
-                            v.rotate_left(1);
-                        }
-                    }
+        let mut v: Vec<usize> = (0..image_count).collect();
+        order_indices(&mut v, order);
+        // シャッフルで直前の画像が先頭に来たら 1 つずらす（`Sequential` は触らない）
+        if order == Order::Random && v.len() > 1 {
+            if let Some(avoid) = avoid_first {
+                if v.first() == Some(&avoid) {
+                    v.rotate_left(1);
                 }
-                v.into()
             }
         }
+        v.into()
+    }
+}
+
+/// インデックス列を並べ替える。並び順の定義を 1 箇所に置き、
+/// `build_queue` と `set_order` で共有する。
+fn order_indices(indices: &mut [usize], order: Order) {
+    match order {
+        Order::Sequential => indices.sort_unstable(),
+        Order::Random => fisher_yates(indices),
     }
 }
 
@@ -410,6 +429,111 @@ mod tests {
 
         assert!(s.is_paused(), "paused state should survive rebuild");
         assert_eq!(s.current(), Some(&keep), "current should survive rebuild");
+    }
+
+    /// 設定リロードで再スキャンを省いたときも並び順の変更が効くこと。
+    /// 画像一覧・現在の画像・一時停止状態は維持される。
+    /// `order` だけ書き換えて並べ替えない、という抜けを防ぐ。
+    /// Random → Sequential は結果が一意に決まる。
+    #[test]
+    fn set_order_reorders_the_pending_queue() {
+        let mut s = Scheduler::new(paths(10), Order::Random);
+        s.next().unwrap();
+
+        s.set_order(Order::Sequential);
+
+        let queue: Vec<usize> = s.queue.iter().copied().collect();
+        let mut ascending = queue.clone();
+        ascending.sort_unstable();
+        assert_eq!(
+            queue, ascending,
+            "Sequential にしたらキューは昇順に並び直るべき: {:?}",
+            queue
+        );
+    }
+
+    /// `prev()` で履歴から戻した画像が `current` とキューの両方に居座ると、
+    /// 一巡し切る前に同じ画像が再登場する。
+    #[test]
+    fn set_order_does_not_requeue_history_so_one_cycle_shows_each_image_once() {
+        let n = 4;
+        let mut s = Scheduler::new(paths(n), Order::Sequential);
+        let first = s.next().unwrap();
+        s.next().unwrap();
+
+        s.set_order(Order::Random);
+        assert_eq!(s.prev().unwrap(), first, "前提: prev で 1 枚目に戻る");
+
+        // この時点の `current` と、キューを空にするまでの `next()` で一巡分になる
+        let mut seen = vec![s.current().unwrap().clone()];
+        while !s.queue.is_empty() {
+            seen.push(s.next().unwrap());
+        }
+
+        let distinct: std::collections::HashSet<_> = seen.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            seen.len(),
+            "一巡の中で同じ画像が二度出てはいけない: {:?}",
+            seen
+        );
+        assert_eq!(distinct.len(), n, "一巡で全画像が出るべき: {:?}", seen);
+    }
+
+    #[test]
+    fn set_order_changes_order_and_keeps_images_current_and_paused() {
+        let all = paths(5);
+        let keep = all[2].clone();
+        let mut s = Scheduler::new(all.clone(), Order::Sequential);
+        s.restore_current(&keep);
+        s.pause();
+
+        s.set_order(Order::Random);
+
+        assert_eq!(s.order, Order::Random, "order should be updated");
+        assert_eq!(s.image_count(), all.len(), "image list should be untouched");
+        assert_eq!(s.current(), Some(&keep), "current should survive set_order");
+        assert!(s.is_paused(), "paused state should survive set_order");
+        let cur = s.current.expect("current should be set");
+        assert!(
+            !s.queue.contains(&cur),
+            "表示中の画像を未表示キューに残さない（すぐ同じ画像に戻ってしまう）"
+        );
+    }
+
+    /// 並び順を変えても履歴は残り、`prev()` で戻れること。
+    /// 画像一覧が同じなら履歴のインデックスは有効なまま。並び順の変更だけで
+    /// `prev()` が壊れてはいけない。
+    #[test]
+    fn set_order_keeps_history_so_prev_still_works() {
+        let mut s = Scheduler::new(paths(5), Order::Sequential);
+        let first = s.next().unwrap();
+        let second = s.next().unwrap();
+        assert_ne!(first, second, "前提: 2 枚進んでいる");
+
+        s.set_order(Order::Random);
+
+        assert_eq!(s.current(), Some(&second), "current は維持される");
+        assert_eq!(
+            s.prev(),
+            Some(first),
+            "並び順を変えただけで prev() が戻れなくなってはいけない"
+        );
+    }
+
+    /// 同じ並び順なら何もしない。変更の無いリロードで副作用を出さないこと。
+    #[test]
+    fn set_order_is_a_noop_for_the_same_order() {
+        let mut s = Scheduler::new(paths(5), Order::Sequential);
+        s.next();
+        let second = s.next().unwrap();
+        let history_before = s.history.clone();
+        assert!(!history_before.is_empty(), "前提: 履歴が積まれている");
+
+        s.set_order(Order::Sequential);
+
+        assert_eq!(s.history, history_before, "履歴を捨ててはいけない");
+        assert_eq!(s.current(), Some(&second), "current should not move");
     }
 
     #[test]

@@ -73,14 +73,10 @@ async fn main() -> Result<()> {
     let mut blacklist = blacklist::Blacklist::load(&kabekami_config_dir)
         .context("failed to load blacklist")?;
 
-    // ローカルディレクトリ + オンラインソースのダウンロードディレクトリを統合してスキャン
-    let mut scan_dirs = config.sources.directories.clone();
-    for oc in &config.online_sources {
-        if oc.enabled {
-            scan_dirs.push(oc.resolved_download_dir());
-        }
-    }
-    let images = build_filtered_images_list(&scan_dirs, config.sources.recursive, &blacklist)
+    // スキャン対象と監視対象は同一。1 つの一覧を両方で使う。
+    let source_dirs = collect_source_dirs(&config);
+    let images = scan_images(&source_dirs, config.sources.recursive, &blacklist)
+        .await
         .context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
     if images.is_empty() {
@@ -97,12 +93,9 @@ async fn main() -> Result<()> {
     }
 
     // モニター検出（マルチモニター対応）
+    // プライマリ解像度は `primary_size()` で都度導出する（`screens` と二重に
+    // 持つと ScreensChanged で同期を取り違える余地が残るため）。
     let mut screens = resolve_screens().await;
-    // プライマリ解像度: フェッチコンテキスト・プリフェッチに使用
-    let (mut screen_w, mut screen_h) = screens
-        .first()
-        .map(|m| (m.width, m.height))
-        .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
 
     // キャッシュ・スケジューラ・先読みを初期化
     let mut cache = Arc::new(Cache::new(
@@ -130,15 +123,14 @@ async fn main() -> Result<()> {
     let mut prefetcher = Prefetcher::new();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
-    let (mut watch_rx, mut _watcher_handle) =
-        match watcher::spawn(&collect_watch_dirs(&config), config.sources.recursive) {
-            Some((w, rx)) => (rx, Some(w)),
-            None => {
-                let (tx, rx) = tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
-                drop(tx);
-                (rx, None)
-            }
-        };
+    // 起動時はトレイも D-Bus もまだ立っていないので、登録の同期待ちは問題ない。
+    let (mut watch_rx, mut watcher_handle) =
+        watcher::spawn(&source_dirs, config.sources.recursive);
+    // 最後に「成功して」スキャンした対象。リロード時の再スキャン要否をこれと比べる。
+    // `config` と比べないのは、スキャンが空／失敗して旧一覧を保った場合に
+    // 次のリロードで再試行できるようにするため。
+    let mut scanned_dirs = source_dirs;
+    let mut scanned_recursive = config.sources.recursive;
 
     // 言語設定を解決する（環境変数 → config → デフォルト ja）
     // 初回呼び出しで言語ファイルの探索（同期 I/O）が走るが、この時点では
@@ -179,17 +171,13 @@ async fn main() -> Result<()> {
     // KDE グローバルショートカットを登録・監視する
     shortcuts::spawn_shortcut_watcher(cmd_tx).await;
 
-    // 設定ファイル監視を起動。失敗時は閉じたチャンネルにフォールバック
-    // （`Some(()) = ...` パターンが一致せず select! で無害にスキップされる）。
-    let (mut config_change_rx, _config_watcher_handle) = match Config::config_path()
-        .ok()
-        .and_then(|p| watcher::spawn_config(&p))
-    {
-        Some((w, rx)) => (rx, Some(w)),
-        None => {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-            drop(tx);
-            (rx, None)
+    // 設定ファイル監視を起動。パスが取れない場合も含め、失敗時は
+    // `watcher::spawn_config` 側が閉じた受信端を返す。
+    let (mut config_change_rx, _config_watcher_handle) = match Config::config_path() {
+        Ok(path) => watcher::spawn_config(&path),
+        Err(e) => {
+            tracing::warn!("config path unavailable, not watching config: {}", e);
+            (watcher::degraded_config(), None)
         }
     };
 
@@ -206,8 +194,6 @@ async fn main() -> Result<()> {
             None
         }
     };
-
-    let mut fetch_ctx = provider::FetchContext { screen_w, screen_h };
 
     // 30 分ごとにプロバイダーを確認する。
     //
@@ -233,41 +219,34 @@ async fn main() -> Result<()> {
     let mut fetch_ticker = interval_at(Instant::now() + FIRST_FETCH_DELAY, Duration::from_secs(1800));
     fetch_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    let online_configs = std::sync::Arc::new(std::sync::Mutex::new(
-        config.online_sources.clone(),
-    ));
-
     let fetch_in_progress = Arc::new(AtomicBool::new(false));
 
     // トレイに初期画像枚数と復元した現在画像名を反映
-    if let Some(ref h) = tray_handle {
-        let count = scheduler.image_count();
-        let name = tray_display_name(scheduler.current().map(|p| p.as_path()));
-        h.update(|t| {
-            t.image_count = count;
-            t.current_name = name;
-        })
-        .await;
-    }
+    update_tray_current_and_count(
+        &tray_handle,
+        scheduler.current().map(|p| p.as_path()),
+        scheduler.image_count(),
+    )
+    .await;
 
     // `apply_and_notify` に渡す `ApplyCtx` を組み立てる。参照するローカル変数が多く
-    // 呼び出しが 10 箇所あるため、引数リストの重複をここ 1 箇所に閉じ込める。
+    // 呼び出しが 10 箇所あるため、借用リストの重複をここ 1 箇所に閉じ込める。
     // マクロにすることで、借用がステートメント単位で完結する（関数に切り出すと
     // `&mut notifier` 等を保持するクロージャが main 全体を借用してしまう）。
     macro_rules! apply_ctx {
         () => {
-            &mut build_apply_ctx(
-                &screens,
-                &config,
-                &cache,
-                &plasma_shell,
-                &tray_handle,
-                &scheduler,
-                screen_check_tx.as_ref(),
-                &mut notifier,
-                &mut prefetcher,
-                &mut state_writer,
-            )
+            &mut ApplyCtx {
+                screens: &screens,
+                config: &config,
+                cache: &cache,
+                plasma: &plasma_shell,
+                tray_handle: &tray_handle,
+                scheduler: &scheduler,
+                screen_check_tx: screen_check_tx.as_ref(),
+                notifier: &mut notifier,
+                prefetcher: &mut prefetcher,
+                state_writer: &mut state_writer,
+            }
         };
     }
 
@@ -289,8 +268,13 @@ async fn main() -> Result<()> {
         tokio::select! {
             _ = fetch_ticker.tick() => {
                 if let Some(ref client) = online_client {
-                    let configs = online_configs.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                    try_spawn_fetch(client, configs, online_tx.clone(), fetch_in_progress.clone(), fetch_ctx, false);
+                    try_spawn_fetch(
+                        client,
+                        &config.online_sources,
+                        &online_tx,
+                        &fetch_in_progress,
+                        &screens,
+                    );
                 }
             }
 
@@ -310,10 +294,7 @@ async fn main() -> Result<()> {
                         provider,
                         added
                     );
-                    if let Some(ref h) = tray_handle {
-                        let count = scheduler.image_count();
-                        h.update(|t| t.image_count = count).await;
-                    }
+                    update_tray_count(&tray_handle, scheduler.image_count()).await;
                     if added > 0 && config.ui.notify_fetch {
                         let strings = i18n::strings(lang);
                         let body = strings.notify_fetch_body
@@ -379,17 +360,11 @@ async fn main() -> Result<()> {
                         // トレイでの変更を再起動後も保つ。保存で発生する監視イベントは
                         // ReloadConfig 側の同値スキップで吸収される。
                         persist_config(&config, "display mode").await;
+                        // 画像は同じだがモードが変わるとキャッシュキーも変わるので作り直す。
+                        // 適用後の通知・トレイ・先読みは apply_and_notify に任せる
+                        // （ここで手書きすると再適用経路が 2 系統に分かれる）。
                         if let Some(cur) = scheduler.current().cloned() {
-                            if let Err(e) = apply(&cur, &screens, &config, &cache, &plasma_shell).await {
-                                tracing::error!(error = %e, "reapply after mode change failed");
-                                let msg = e.to_string();
-                                notifier.error(&msg, Some(&cur)).await;
-                                update_tray_error(&tray_handle, msg).await;
-                            } else {
-                                notifier.clear();
-                                update_tray_clear_error(&tray_handle).await;
-                            }
-                            start_prefetch(&mut prefetcher, &scheduler, screen_w, screen_h, &config, &cache);
+                            apply_and_notify(apply_ctx!(), &cur, "reapply after mode change failed").await;
                         }
                     }
 
@@ -429,11 +404,14 @@ async fn main() -> Result<()> {
                                     tracing::info!("moved to trash: {}", path.display());
                                     scheduler.remove_image(&path);
                                     prefetcher.abort();
-                                    if let Some(next) = scheduler.next() {
-                                        apply_and_notify(apply_ctx!(), &next, "apply after trash failed").await;
-                                    }
-                                    if let Some(ref h) = tray_handle {
-                                        h.update(|t| t.image_count = scheduler.image_count()).await;
+                                    match scheduler.next() {
+                                        Some(next) => {
+                                            apply_and_notify(apply_ctx!(), &next, "apply after trash failed").await;
+                                            update_tray_count(&tray_handle, scheduler.image_count()).await;
+                                        }
+                                        None => {
+                                            clear_current_wallpaper(&tray_handle, &mut state_writer, &scheduler).await;
+                                        }
                                     }
                                     ticker = make_ticker(config.rotation.interval_secs);
                                 }
@@ -445,29 +423,23 @@ async fn main() -> Result<()> {
                         if !config.ui.enable_blacklist {
                             tracing::debug!("blacklist disabled in config, ignoring");
                         } else if let Some(path) = scheduler.current().cloned() {
-                            if let Err(e) = blacklist.add(&path) {
-                                tracing::error!("blacklist: failed to save {}: {}", path.display(), e);
-                            } else {
+                            if blacklist.add(&path).await {
                                 tracing::info!("blacklisted: {}", path.display());
                                 scheduler.remove_image(&path);
                                 prefetcher.abort();
                                 match scheduler.next() {
                                     Some(next) => {
                                         apply_and_notify(apply_ctx!(), &next, "apply after blacklist failed").await;
-                                        if let Some(ref h) = tray_handle {
-                                            h.update(|t| t.image_count = scheduler.image_count()).await;
-                                        }
+                                        update_tray_count(&tray_handle, scheduler.image_count()).await;
                                     }
                                     None => {
-                                        if let Some(ref h) = tray_handle {
-                                            h.update(|t| {
-                                                t.current_name = String::new();
-                                                t.image_count = scheduler.image_count();
-                                            }).await;
-                                        }
+                                        clear_current_wallpaper(&tray_handle, &mut state_writer, &scheduler).await;
                                     }
                                 }
                                 ticker = make_ticker(config.rotation.interval_secs);
+                            } else {
+                                // 失敗の詳細は `save_offloaded` が warn に出す
+                                tracing::error!("blacklist: failed to save {}", path.display());
                             }
                         }
                     }
@@ -498,47 +470,100 @@ async fn main() -> Result<()> {
                                 notifier.error(&msg, None).await;
                                 update_tray_error(&tray_handle, msg).await;
                             }
-                            Ok(new_cfg) if new_cfg == config => {
-                                // 内容が同一なら何もしない。トレイからのモード／間隔変更で
-                                // デーモン自身が config.toml を保存した場合もここで弾かれ、
-                                // 不要な再スキャンとスケジューラ再構築を避けられる。
+                            // 内容が同一で、かつ前回の走査と監視登録がどちらも完遂して
+                            // いるときだけ何もしない。トレイからのモード／間隔変更で
+                            // デーモン自身が保存した場合もここで弾ける。
+                            //
+                            // 走査が空・失敗した場合や監視登録が部分失敗した場合は、
+                            // 設定保存が唯一の再試行契機になる。内容が同一だからと
+                            // ここで弾くと、その再試行が永久に走らない。
+                            Ok(new_cfg)
+                                if reload_is_a_noop(
+                                    &new_cfg,
+                                    &config,
+                                    &scanned_dirs,
+                                    scanned_recursive,
+                                    watcher_handle.as_ref().is_some_and(|w| w.is_complete()),
+                                ) =>
+                            {
                                 tracing::debug!("config unchanged, skipping reload");
                             }
                             Ok(new_cfg) => {
                                 tracing::info!("reloading config");
 
-                                let mut reload_scan_dirs = new_cfg.sources.directories.clone();
-                                for oc in &new_cfg.online_sources {
-                                    if oc.enabled {
-                                        reload_scan_dirs.push(oc.resolved_download_dir());
-                                    }
-                                }
-                                match build_filtered_images_list(&reload_scan_dirs, new_cfg.sources.recursive, &blacklist) {
-                                    Ok(images) if !images.is_empty() => {
-                                        tracing::info!("reload: {} image(s) found", images.len());
-                                        // 一時停止状態と現在画像は rebuild が引き継ぐ
-                                        scheduler.rebuild(images, new_cfg.rotation.order);
-                                    }
-                                    Ok(_) => tracing::warn!("reload: no images found, keeping current list"),
-                                    Err(e) => tracing::warn!("reload: scan error: {}", e),
-                                }
+                                // 対象ディレクトリが変わっていなければ再スキャンも監視の
+                                // 張り替えも不要。単一ワーカーなので、大きなソースでは
+                                // `interval_secs` を変えただけの保存でも数百 ms 止まりうる。
+                                let source_dirs = collect_source_dirs(&new_cfg);
+                                let sources_changed = source_dirs != scanned_dirs
+                                    || new_cfg.sources.recursive != scanned_recursive;
+                                // 監視が全ディレクトリに張れていなければ、設定保存が唯一の
+                                // 再スキャン契機になる。一部失敗も同じ扱い（そのディレクトリの
+                                // イベントは届かないので、再スキャンと登録再試行の両方が要る）。
+                                let watching_everything =
+                                    watcher_handle.as_ref().is_some_and(|w| w.is_complete());
+                                let needs_rescan = sources_changed || !watching_everything;
 
-                                (watch_rx, _watcher_handle) =
-                                    match watcher::spawn(&collect_watch_dirs(&new_cfg), new_cfg.sources.recursive) {
-                                        Some((w, rx)) => (rx, Some(w)),
-                                        None => {
-                                            let (tx, rx) =
-                                                tokio::sync::mpsc::channel::<watcher::WatchEvent>(1);
-                                            drop(tx);
-                                            (rx, None)
+                                // 走行中の先読みが温めている画像。あとで変わっていれば、
+                                // その先読みはもう「次の画像」を指していない。
+                                let warming = scheduler.peek_next().cloned();
+                                if needs_rescan {
+                                    match scan_images(&source_dirs, new_cfg.sources.recursive, &blacklist).await {
+                                        Ok(images) if !images.is_empty() => {
+                                            tracing::info!("reload: {} image(s) found", images.len());
+                                            // 一時停止状態と現在画像は rebuild が引き継ぐ
+                                            scheduler.rebuild(images, new_cfg.rotation.order);
+                                            // 画像一覧を差し替えたときだけ監視対象も差し替える。
+                                            // 旧一覧を保ったまま監視だけ新ディレクトリへ移すと、
+                                            // 旧画像の削除イベントを取りこぼし、消えた画像が
+                                            // ローテーションに残り続ける。
+                                            (watch_rx, watcher_handle) = spawn_dir_watcher_offloaded(
+                                                &source_dirs,
+                                                new_cfg.sources.recursive,
+                                            )
+                                            .await;
+                                            scanned_dirs = source_dirs;
+                                            scanned_recursive = new_cfg.sources.recursive;
                                         }
-                                    };
+                                        // 空・失敗のときは画像一覧も監視対象も据え置く
+                                        // （ネットワークマウントの一時的な不在などで
+                                        // ローテーションが空になるのを避ける）。
+                                        // `scanned_dirs` を更新しないので次のリロードで再試行される。
+                                        Ok(_) => tracing::warn!(
+                                            "reload: no images found, keeping current list and watcher"
+                                        ),
+                                        Err(e) => tracing::warn!(
+                                            "reload: scan error, keeping current list and watcher: {}", e
+                                        ),
+                                    }
+                                } else {
+                                    tracing::debug!("reload: source dirs unchanged, skipping rescan");
+                                }
 
-                                prefetcher.abort();
-                                cache = Arc::new(Cache::new(
-                                    new_cfg.cache.directory.clone(),
-                                    new_cfg.cache.max_size_mb,
-                                ));
+                                // rebuild を通らなかった場合も並び順は反映する
+                                // （通っていれば同値なので何もしない）。
+                                scheduler.set_order(new_cfg.rotation.order);
+
+                                // キャッシュキーに効く設定が変わったか。変わっていなければ
+                                // 温まったキャッシュも走行中の先読みもそのまま活かす。
+                                let cache_changed = new_cfg.cache != config.cache;
+                                let display_changed = new_cfg.display != config.display;
+
+                                // 先読みの指す先が変わったときだけ捨てる（据え置きなら
+                                // ほぼ終わったデコードを捨てる理由がない）。表示・キャッシュ
+                                // 設定はパスが同じでもキーが変わるので別に見る。
+                                if scheduler.peek_next() != warming.as_ref()
+                                    || cache_changed
+                                    || display_changed
+                                {
+                                    prefetcher.abort();
+                                }
+                                if cache_changed {
+                                    cache = Arc::new(Cache::new(
+                                        new_cfg.cache.directory.clone(),
+                                        new_cfg.cache.max_size_mb,
+                                    ));
+                                }
 
                                 ticker = make_ticker(new_cfg.rotation.interval_secs);
 
@@ -557,18 +582,15 @@ async fn main() -> Result<()> {
                                     );
                                 }
 
-                                *online_configs.lock().unwrap_or_else(|e| e.into_inner()) = new_cfg.online_sources.clone();
                                 config = new_cfg;
 
-                                // rebuild 後の current を使う。新しいソースから外れた画像や
-                                // ブラックリスト入りした画像は rebuild で current から落ちるため、
-                                // ここで拾わないことで「除外したはずの画像が再適用される」のを防ぐ。
+                                // rebuild を通れば新しい一覧に残っていた画像、通らなければ
+                                // 据え置きの current。どちらも「いま表示しているべき画像」。
                                 match scheduler.current().cloned() {
-                                    // 再適用が成功した場合だけ apply_and_notify 内で
-                                    // state に記録される。ここで先に persist すると、
-                                    // 適用に失敗した壁紙を「現在の壁紙」として
-                                    // 保存してしまい、再起動後にトレイやゴミ箱操作が
-                                    // 画面に出ていない画像を指す（分岐を畳まないこと）。
+                                    // 記録は `apply_and_notify` 内、成功時のみ。先に persist
+                                    // すると、適用に失敗した壁紙を「現在」として保存し、
+                                    // 再起動後のトレイやゴミ箱操作が画面に無い画像を指す
+                                    // （分岐を畳まないこと）。
                                     Some(cur) => {
                                         apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
                                     }
@@ -604,10 +626,15 @@ async fn main() -> Result<()> {
                     }
 
                     TrayCmd::OpenSettings => {
-                        match std::process::Command::new("kabekami-config").spawn() {
-                            Ok(_) => tracing::info!("launched kabekami-config"),
-                            Err(e) => tracing::warn!("failed to launch kabekami-config: {}", e),
-                        }
+                        // fork/exec はデーモンのアドレス空間サイズに比例してブロックする
+                        // （加工直後は RSS が大きい）。隣の `OpenCurrent` と同じく
+                        // 単一ワーカーの外へ出す。
+                        tokio::task::spawn_blocking(|| {
+                            match std::process::Command::new("kabekami-config").spawn() {
+                                Ok(_) => tracing::info!("launched kabekami-config"),
+                                Err(e) => tracing::warn!("failed to launch kabekami-config: {}", e),
+                            }
+                        });
                     }
 
                     TrayCmd::PlasmaRestarted => {
@@ -618,17 +645,12 @@ async fn main() -> Result<()> {
                     }
 
                     TrayCmd::ScreensChanged(new_screens) => {
-                        let (new_w, new_h) = new_screens.first()
-                            .map(|m| (m.width, m.height))
-                            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
+                        let (new_w, new_h) = primary_size(&new_screens);
                         tracing::info!(
                             "screens updated: {} monitor(s), primary {}x{}",
                             new_screens.len(), new_w, new_h
                         );
                         screens = new_screens;
-                        screen_w = new_w;
-                        screen_h = new_h;
-                        fetch_ctx = provider::FetchContext { screen_w, screen_h };
                         // 解像度が変わるとキャッシュキーも変わるため、現在の壁紙を
                         // 新しい解像度で再加工して適用する。
                         if let Some(path) = scheduler.current().cloned() {
@@ -644,23 +666,19 @@ async fn main() -> Result<()> {
             }
 
             Some(ev) = watch_rx.recv() => {
-                match ev {
-                    watcher::WatchEvent::Added(path) => {
-                        if blacklist.contains(&path) {
-                            tracing::debug!("ignoring blacklisted image: {}", path.display());
-                        } else {
-                            tracing::info!("new image detected: {}", path.display());
-                            scheduler.add_image(path);
-                        }
-                    }
-                    watcher::WatchEvent::Removed(path) => {
-                        tracing::info!("image removed: {}", path.display());
-                        scheduler.remove_image(&path);
-                    }
+                // 大量コピー時、途中の枚数は誰も読めない。イベントはパスを運ぶので捨てず、
+                // 処理はして更新だけまとめる。上限を置くのは、この中に await が無く
+                // `remove_image` が画像数に比例するため（残りは次のループで拾う）。
+                const MAX_DRAIN_PER_PASS: usize = 32;
+                let count_before = scheduler.image_count();
+                apply_watch_event(ev, &mut scheduler, &blacklist);
+                for _ in 1..MAX_DRAIN_PER_PASS {
+                    let Ok(ev) = watch_rx.try_recv() else { break };
+                    apply_watch_event(ev, &mut scheduler, &blacklist);
                 }
-                if let Some(ref h) = tray_handle {
-                    let count = scheduler.image_count();
-                    h.update(|t| t.image_count = count).await;
+                // 枚数が動いていなければ往復も要らない
+                if scheduler.image_count() != count_before {
+                    update_tray_count(&tray_handle, scheduler.image_count()).await;
                 }
             }
 
@@ -700,16 +718,40 @@ async fn main() -> Result<()> {
 
 // ── ヘルパー関数 ─────────────────────────────────────────────────────────────
 
-fn build_filtered_images_list(
+/// ソースディレクトリを走査し、ブラックリストを除いた画像一覧を返す。
+///
+/// `scanner::scan` は同期 I/O。単一ワーカーを占有すると D-Bus・トレイ・監視が
+/// 止まるので `spawn_blocking` へ逃がす。絞り込みはメモリ上なので呼び出し側で行う。
+async fn scan_images(
     scan_dirs: &[std::path::PathBuf],
     recursive: bool,
     blacklist: &blacklist::Blacklist,
 ) -> Result<Vec<std::path::PathBuf>> {
-    let images: Vec<_> = crate::scanner::scan(scan_dirs, recursive)?
-        .into_iter()
-        .filter(|p| !blacklist.contains(p))
-        .collect();
-    Ok(images)
+    let dirs = scan_dirs.to_vec();
+    let scanned = tokio::task::spawn_blocking(move || crate::scanner::scan(&dirs, recursive))
+        .await
+        .context("scan task panicked")??;
+    Ok(scanned.into_iter().filter(|p| !blacklist.contains(p)).collect())
+}
+
+/// 監視の登録も同期。`notify` の `watch()` は内部スレッドの応答を待ち、`recursive`
+/// ならツリー全体の走査が終わるまで戻らないので、走査と同じく `spawn_blocking` へ。
+async fn spawn_dir_watcher_offloaded(
+    source_dirs: &[std::path::PathBuf],
+    recursive: bool,
+) -> (
+    tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
+    Option<watcher::DirWatcher>,
+) {
+    let dirs = source_dirs.to_vec();
+    match tokio::task::spawn_blocking(move || watcher::spawn(&dirs, recursive)).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            // 監視の起動に失敗したのと同じ縮退状態にする。
+            tracing::warn!("watcher task panicked, running without file watcher: {}", e);
+            (watcher::degraded(), None)
+        }
+    }
 }
 
 /// tracing subscriber を初期化する。
@@ -926,7 +968,9 @@ async fn resolve_screens() -> Vec<screen::Monitor> {
     vec![screen::Monitor { name: "fallback".into(), width: FALLBACK_SCREEN_W, height: FALLBACK_SCREEN_H }]
 }
 
-fn collect_watch_dirs(config: &Config) -> Vec<std::path::PathBuf> {
+/// スキャンと監視の対象ディレクトリ。ローカル指定分に、有効なオンライン
+/// ソースのダウンロード先を足したもの。両者は常に同一集合。
+fn collect_source_dirs(config: &Config) -> Vec<std::path::PathBuf> {
     let mut dirs = config.sources.directories.clone();
     for oc in &config.online_sources {
         if oc.enabled {
@@ -934,6 +978,53 @@ fn collect_watch_dirs(config: &Config) -> Vec<std::path::PathBuf> {
         }
     }
     dirs
+}
+
+/// 先頭（プライマリ扱い）モニターの解像度。
+///
+/// 空スライスは実際には来ない（`resolve_screens` は必ず 1 つ返し、`screen_watcher` は
+/// 空の検出を捨てる）。`unwrap_or` は panic 避けの保険。
+fn primary_size(screens: &[screen::Monitor]) -> (u32, u32) {
+    screens
+        .first()
+        .map(|m| (m.width, m.height))
+        .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H))
+}
+
+/// `screens` に現れる解像度を重複なしで列挙する（元の並び順を保つ）。
+///
+/// `CacheKey` は解像度を含むので同解像度のモニターは同じキー。加工も先読みも
+/// 解像度の数だけで足りる。
+fn distinct_sizes(screens: &[screen::Monitor]) -> Vec<(u32, u32)> {
+    let mut sizes: Vec<(u32, u32)> = Vec::with_capacity(screens.len());
+    for m in screens {
+        if !sizes.contains(&(m.width, m.height)) {
+            sizes.push((m.width, m.height));
+        }
+    }
+    if sizes.is_empty() {
+        // `primary_size` と同じフォールバック（実際には空スライスは来ない）
+        sizes.push(primary_size(screens));
+    }
+    sizes
+}
+
+/// 設定リロードを丸ごと省いてよいか。
+///
+/// 内容が同一でも、前回の走査や監視登録が完遂していなければ省けない。走査が
+/// 空・失敗した場合や監視登録が部分失敗した場合、設定保存が唯一の再試行契機に
+/// なるので、内容が同一だからと弾くとその再試行が永久に走らない。
+fn reload_is_a_noop(
+    new_cfg: &Config,
+    config: &Config,
+    scanned_dirs: &[std::path::PathBuf],
+    scanned_recursive: bool,
+    watching_everything: bool,
+) -> bool {
+    new_cfg == config
+        && collect_source_dirs(new_cfg) == scanned_dirs
+        && new_cfg.sources.recursive == scanned_recursive
+        && watching_everything
 }
 
 /// 連続して届いたコマンドの 2 発目以降を捨てるか判定する。
@@ -964,28 +1055,26 @@ fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
     t
 }
 
-/// 1 つのモニター解像度向けに壁紙を加工してキャッシュパスを返す。
-async fn process_image(
-    src: &Path,
-    screen_w: u32,
-    screen_h: u32,
-    config: &Config,
-    cache: &Arc<Cache>,
-) -> Result<std::path::PathBuf> {
-    let key = CacheKey {
-        src: src.to_path_buf(),
-        screen_w,
-        screen_h,
-        mode: config.display.mode,
-        blur_sigma: config.display.blur_sigma,
-        bg_darken: config.display.bg_darken,
-    };
-    if let Some(cached) = cache.get(&key) {
+/// `screens` を表示するのに必要なキャッシュキーの一式（解像度ごとに 1 つ）。
+///
+/// 適用側と先読み側の唯一の共有点。キーの中身までここで決めるので、表示設定に
+/// フィールドが増えてもズレない。ズレても無音で、先読みが無駄に回り続ける。
+fn cache_keys(src: &Path, screens: &[screen::Monitor], config: &Config) -> Vec<CacheKey> {
+    distinct_sizes(screens)
+        .into_iter()
+        .map(|(w, h)| CacheKey::new(src, w, h, &config.display))
+        .collect()
+}
+
+/// 1 つのキャッシュキー向けに壁紙を加工してキャッシュパスを返す。
+async fn process_key(key: &CacheKey, cache: &Arc<Cache>) -> Result<std::path::PathBuf> {
+    let src = key.src.as_path();
+    if let Some(cached) = cache.get(key) {
         tracing::debug!("cache hit: {}", src.display());
         return Ok(cached);
     }
     let cache_owned = Arc::clone(cache);
-    let key_owned = key;
+    let key_owned = key.clone();
     tokio::task::spawn_blocking(move || prefetch::process_for_cache(&key_owned, &cache_owned))
         .await
         .context("image processing task panicked")?
@@ -993,7 +1082,9 @@ async fn process_image(
 
 /// 壁紙を加工してキャッシュし、Plasma に反映する。
 ///
-/// マルチモニター時は各モニターの解像度で個別に処理して `set_wallpaper_multi` を呼ぶ。
+/// 解像度ごとに 1 回だけ加工して同解像度のモニターで使い回す。並列に投げると
+/// `process_for_cache` の二重チェックをすり抜けて同じ画像を 2 回デコードする。
+/// モニター 1 台でも分岐しない（`set_wallpaper_multi` が 1 件なら委譲、0 件なら無処理）。
 async fn apply(
     src: &Path,
     screens: &[screen::Monitor],
@@ -1001,26 +1092,23 @@ async fn apply(
     cache: &Arc<Cache>,
     plasma: &plasma::PlasmaShell,
 ) -> Result<()> {
-    if screens.len() <= 1 {
-        let (w, h) = screens
-            .first()
-            .map(|m| (m.width, m.height))
-            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
-        let output = process_image(src, w, h, config, cache).await?;
-        plasma.set_wallpaper(&output).await
-    } else {
-        let entries: Vec<(usize, std::path::PathBuf)> =
-            futures_util::future::try_join_all(screens.iter().enumerate().map(
-                |(idx, monitor)| async move {
-                    process_image(src, monitor.width, monitor.height, config, cache)
-                        .await
-                        .map(|p| (idx, p))
-                },
-            ))
-            .await?;
-        let entry_refs: Vec<(usize, &Path)> = entries.iter().map(|(i, p)| (*i, p.as_path())).collect();
-        plasma.set_wallpaper_multi(&entry_refs).await
-    }
+    let processed: std::collections::HashMap<(u32, u32), std::path::PathBuf> =
+        futures_util::future::try_join_all(cache_keys(src, screens, config).into_iter().map(
+            |key| async move {
+                let size = (key.screen_w, key.screen_h);
+                process_key(&key, cache).await.map(|p| (size, p))
+            },
+        ))
+        .await?
+        .into_iter()
+        .collect();
+    // `processed` のキーは `screens` の解像度そのものなので、取りこぼしは起きない
+    let entries: Vec<(usize, &Path)> = screens
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, m)| processed.get(&(m.width, m.height)).map(|p| (idx, p.as_path())))
+        .collect();
+    plasma.set_wallpaper_multi(&entries).await
 }
 
 /// `apply_and_notify` の long-lived な引数束。
@@ -1039,35 +1127,6 @@ struct ApplyCtx<'a> {
     state_writer: &'a mut state::StateWriter,
 }
 
-/// `ApplyCtx` を構築するコンストラクタ。`apply_and_notify` 呼び出しの直前で
-/// メインループ局所変数を渡して使う。引数が多いがすべて struct のフィールドに 1:1 対応。
-#[allow(clippy::too_many_arguments)]
-fn build_apply_ctx<'a>(
-    screens: &'a [screen::Monitor],
-    config: &'a Config,
-    cache: &'a Arc<Cache>,
-    plasma: &'a plasma::PlasmaShell,
-    tray_handle: &'a Option<ksni::Handle<tray::KabekamiTray>>,
-    scheduler: &'a Scheduler,
-    screen_check_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<()>>,
-    notifier: &'a mut notify::Notifier,
-    prefetcher: &'a mut Prefetcher,
-    state_writer: &'a mut state::StateWriter,
-) -> ApplyCtx<'a> {
-    ApplyCtx {
-        screens,
-        config,
-        cache,
-        plasma,
-        tray_handle,
-        scheduler,
-        screen_check_tx,
-        notifier,
-        prefetcher,
-        state_writer,
-    }
-}
-
 /// apply + 通知 + tray 更新 + prefetch 開始 + 画面構成再検出トリガーをまとめて行う。
 async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
     if let Err(e) = apply(path, ctx.screens, ctx.config, ctx.cache, ctx.plasma).await {
@@ -1080,11 +1139,7 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
         update_tray_ok(ctx.tray_handle, path).await;
         // 現在の壁紙を記録しておき、再起動後も同じ画像を「現在」として扱えるようにする
         ctx.state_writer.persist(ctx.scheduler.is_paused(), Some(path)).await;
-        let (w, h) = ctx.screens
-            .first()
-            .map(|m| (m.width, m.height))
-            .unwrap_or((FALLBACK_SCREEN_W, FALLBACK_SCREEN_H));
-        start_prefetch(ctx.prefetcher, ctx.scheduler, w, h, ctx.config, ctx.cache);
+        start_prefetch(ctx.prefetcher, ctx.scheduler, ctx.screens, ctx.config, ctx.cache);
         // 画面構成の再検出を要求（ウォッチャー側で 60s スロットル）
         if let Some(tx) = ctx.screen_check_tx {
             let _ = tx.send(());
@@ -1101,9 +1156,71 @@ async fn update_tray_error(
     }
 }
 
-async fn update_tray_clear_error(tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>) {
+/// 監視イベント 1 件を画像一覧に反映する。トレイ更新は呼び出し側でまとめる。
+fn apply_watch_event(
+    ev: watcher::WatchEvent,
+    scheduler: &mut Scheduler,
+    blacklist: &blacklist::Blacklist,
+) {
+    match ev {
+        watcher::WatchEvent::Added(path) => {
+            if blacklist.contains(&path) {
+                tracing::debug!("ignoring blacklisted image: {}", path.display());
+            } else {
+                tracing::info!("new image detected: {}", path.display());
+                scheduler.add_image(path);
+            }
+        }
+        watcher::WatchEvent::Removed(path) => {
+            tracing::info!("image removed: {}", path.display());
+            scheduler.remove_image(&path);
+        }
+    }
+}
+
+/// 最後の 1 枚が無くなったときのトレイと state の後始末。
+///
+/// 枚数だけ更新すると、トレイの壁紙名が消えた画像のまま残り、state も
+/// その画像を「現在の壁紙」として指し続ける。再起動後にトレイやゴミ箱操作が
+/// 画面に出ていない画像を指すことになる。
+async fn clear_current_wallpaper(
+    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
+    state_writer: &mut state::StateWriter,
+    scheduler: &Scheduler,
+) {
+    // `remove_image` が `current` を落としているので名前は空になる
+    update_tray_current_and_count(
+        tray_handle,
+        scheduler.current().map(|p| p.as_path()),
+        scheduler.image_count(),
+    )
+    .await;
+    state_writer.persist(scheduler.is_paused(), None).await;
+}
+
+/// トレイの壁紙名と枚数を 1 回の `update` で更新する（分けると往復が 2 回になる）。
+async fn update_tray_current_and_count(
+    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
+    current: Option<&Path>,
+    count: usize,
+) {
     if let Some(ref h) = tray_handle {
-        h.update(|t| t.last_error = None).await;
+        let name = tray_display_name(current);
+        h.update(|t| {
+            t.current_name = name;
+            t.image_count = count;
+        })
+        .await;
+    }
+}
+
+/// トレイの画像枚数表示を更新する。
+async fn update_tray_count(
+    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
+    count: usize,
+) {
+    if let Some(ref h) = tray_handle {
+        h.update(|t| t.image_count = count).await;
     }
 }
 
@@ -1130,32 +1247,37 @@ async fn persist_config(config: &Config, what: &str) {
     state::save_offloaded(move || owned.save(), what).await;
 }
 
+/// 期限の来たオンラインプロバイダーの取得をバックグラウンドで起動する。
+/// 走行中のフェッチがあれば何もしない。
 fn try_spawn_fetch(
     client: &reqwest::Client,
-    configs: Vec<crate::config::OnlineSourceConfig>,
-    tx: tokio::sync::mpsc::UnboundedSender<provider::FetchResult>,
-    in_progress: Arc<AtomicBool>,
-    ctx: provider::FetchContext,
-    force: bool,
-) -> bool {
+    configs: &[crate::config::OnlineSourceConfig],
+    tx: &tokio::sync::mpsc::UnboundedSender<provider::FetchResult>,
+    in_progress: &Arc<AtomicBool>,
+    screens: &[screen::Monitor],
+) {
     if configs.is_empty() {
-        return false;
+        return;
     }
-    // 取得＋セットを単一の atomic 操作で行う。`true` を返したなら既に走行中。
+    // 確認＋セットを単一の atomic 操作で行う。`true` が返れば既に走行中。
     if in_progress.swap(true, Ordering::AcqRel) {
-        return false;
+        return;
     }
+    // ここから先は必ず spawn するので、この時点で初めて複製する。
+    let configs = configs.to_vec();
     let client = client.clone();
+    let tx = tx.clone();
+    let in_progress = Arc::clone(in_progress);
+    let (screen_w, screen_h) = primary_size(screens);
+    let ctx = provider::FetchContext { screen_w, screen_h };
     tokio::spawn(async move {
         // パニックしてもスタック巻き戻し中に Drop が走り、フラグが false に戻る。
         // これによりタスクが死んでも以降のフェッチが永久にブロックされなくなる。
         let _guard = FlagGuard(in_progress);
-        let results = provider::fetch_all_due(&configs, &client, ctx, force).await;
-        for r in results {
+        for r in provider::fetch_all_due(&configs, &client, ctx).await {
             let _ = tx.send(r);
         }
     });
-    true
 }
 
 /// `Arc<AtomicBool>` を `Drop` で `false` に戻す RAII ガード。
@@ -1167,11 +1289,11 @@ impl Drop for FlagGuard {
     }
 }
 
+/// 次に表示する画像の先読みを開始する（`apply` と同じキー一式を温める）。
 fn start_prefetch(
     prefetcher: &mut Prefetcher,
     scheduler: &Scheduler,
-    screen_w: u32,
-    screen_h: u32,
+    screens: &[screen::Monitor],
     config: &Config,
     cache: &Arc<Cache>,
 ) {
@@ -1179,15 +1301,7 @@ fn start_prefetch(
         return;
     }
     if let Some(next) = scheduler.peek_next() {
-        let key = CacheKey {
-            src: next.clone(),
-            screen_w,
-            screen_h,
-            mode: config.display.mode,
-            blur_sigma: config.display.blur_sigma,
-            bg_darken: config.display.bg_darken,
-        };
-        prefetcher.start(key, cache.clone());
+        prefetcher.start(cache_keys(next, screens, config), cache.clone());
     }
 }
 
@@ -1198,8 +1312,9 @@ mod tests {
 
     /// スキャン・監視の対象ディレクトリは「ローカル指定 + 有効なオンライン
     /// ソースのダウンロード先」。ここを間違うと壁紙が黙って現れない／消える。
+    /// スキャンと監視で同じ関数を使うので、ズレる余地も無くなっている。
     #[test]
-    fn watch_dirs_include_only_enabled_online_sources() {
+    fn source_dirs_include_only_enabled_online_sources() {
         let config: Config = toml::from_str(
             r#"
             [sources]
@@ -1219,7 +1334,7 @@ mod tests {
         .expect("test config should parse");
 
         assert_eq!(
-            collect_watch_dirs(&config),
+            collect_source_dirs(&config),
             vec![
                 std::path::PathBuf::from("/pics/a"),
                 std::path::PathBuf::from("/pics/b"),
@@ -1230,10 +1345,106 @@ mod tests {
     }
 
     #[test]
-    fn watch_dirs_without_online_sources() {
+    fn source_dirs_without_online_sources() {
         let mut config = Config::default();
         config.sources.directories = vec![std::path::PathBuf::from("/pics")];
-        assert_eq!(collect_watch_dirs(&config), vec![std::path::PathBuf::from("/pics")]);
+        assert_eq!(collect_source_dirs(&config), vec![std::path::PathBuf::from("/pics")]);
+    }
+
+    /// 解像度が同じモニターは同じ `CacheKey` になるため、加工も先読みも
+    /// 1 回で足りる。ここが重複すると同じ画像を並列に 2 回デコードする。
+    fn mon(name: &str, width: u32, height: u32) -> screen::Monitor {
+        screen::Monitor { name: name.to_string(), width, height }
+    }
+
+    /// 解像度の違う 2 台 + 片方と同じ解像度の 3 台目。
+    fn mixed_screens() -> Vec<screen::Monitor> {
+        vec![
+            mon("DP-1", 3840, 2160),
+            mon("DP-2", 1920, 1080),
+            mon("HDMI-1", 3840, 2160),
+        ]
+    }
+
+    /// `cache_keys` は適用側 (`apply`) と先読み側 (`start_prefetch`) の唯一の共有点。
+    /// 解像度ごとに 1 つで、表示設定がそのまま乗ることを固定する。ここがズレると
+    /// エラーにならず、先読みが誰も引かないファイルを温め続ける。
+    #[test]
+    fn cache_keys_are_one_per_resolution_and_carry_display_settings() {
+        let mut config = Config::default();
+        config.display.mode = DisplayMode::Fit;
+        config.display.blur_sigma = 12.5;
+        config.display.bg_darken = 0.25;
+        let src = std::path::Path::new("/pics/a.jpg");
+
+        let keys = cache_keys(src, &mixed_screens(), &config);
+
+        assert_eq!(
+            keys.iter().map(|k| (k.screen_w, k.screen_h)).collect::<Vec<_>>(),
+            vec![(3840, 2160), (1920, 1080)],
+            "解像度ごとに 1 つ（同じ解像度は畳む）"
+        );
+        for k in &keys {
+            assert_eq!(k.src, src, "元画像は共通");
+            assert_eq!(k.mode, DisplayMode::Fit, "表示モードが落ちている");
+            assert_eq!(k.blur_sigma, 12.5, "blur_sigma が落ちている");
+            assert_eq!(k.bg_darken, 0.25, "bg_darken が落ちている");
+        }
+    }
+
+    #[test]
+    fn distinct_sizes_dedupes_identical_resolutions() {
+        let screens = mixed_screens();
+        assert_eq!(
+            distinct_sizes(&screens),
+            vec![(3840, 2160), (1920, 1080)],
+            "重複を除き、最初に現れた順を保つ"
+        );
+    }
+
+    /// `primary_size` と同じフォールバックに揃える。空でも 0 件を返すと
+    /// 先読みも加工も走らなくなる。
+    #[test]
+    fn distinct_sizes_falls_back_when_no_screens() {
+        assert_eq!(
+            distinct_sizes(&[]),
+            vec![(FALLBACK_SCREEN_W, FALLBACK_SCREEN_H)]
+        );
+    }
+
+    /// 内容が同一でも、走査や監視登録が完遂していなければリロードを省けない。
+    /// 省いてしまうと、走査が空・失敗した状態や監視が部分失敗した状態から
+    /// 永久に抜け出せなくなる（設定保存が唯一の再試行契機のため）。
+    #[test]
+    fn reload_is_only_a_noop_when_scan_and_watch_are_both_complete() {
+        let mut config = Config::default();
+        config.sources.directories = vec![std::path::PathBuf::from("/pics")];
+        let scanned = vec![std::path::PathBuf::from("/pics")];
+        let recursive = config.sources.recursive;
+
+        assert!(
+            reload_is_a_noop(&config, &config, &scanned, recursive, true),
+            "同一内容 + 走査済み + 全監視済みなら省ける"
+        );
+        assert!(
+            !reload_is_a_noop(&config, &config, &[], recursive, true),
+            "走査が未完了なら省けない（空・失敗のあと再試行が要る）"
+        );
+        assert!(
+            !reload_is_a_noop(&config, &config, &scanned, !recursive, true),
+            "recursive が前回の走査と違えば省けない"
+        );
+        assert!(
+            !reload_is_a_noop(&config, &config, &scanned, recursive, false),
+            "監視が全ディレクトリに張れていなければ省けない"
+        );
+
+        let mut other = config.clone();
+        other.rotation.interval_secs += 1;
+        assert!(
+            !reload_is_a_noop(&other, &config, &scanned, recursive, true),
+            "内容が違えば当然省けない"
+        );
     }
 
     #[test]

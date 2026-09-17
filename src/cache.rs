@@ -16,7 +16,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 
-use crate::config::DisplayMode;
+use crate::config::{Display, DisplayMode};
 
 /// 加工済み画像のキャッシュ。`Arc<Cache>` で共有して使う。
 pub struct Cache {
@@ -42,6 +42,24 @@ pub struct CacheKey {
     pub mode: DisplayMode,
     pub blur_sigma: f32,
     pub bg_darken: f32,
+}
+
+impl CacheKey {
+    /// 1 モニター分のキャッシュキーを組む。
+    ///
+    /// 加工結果を決めるのは「元画像・解像度・表示設定」だけ。適用側と先読み側が
+    /// 別々に組み立てると、片方に設定を足したとき先読みが無音でミスし続ける。
+    /// 組み立てを型の側に 1 つ置いて、そのズレが起きない形にする。
+    pub fn new(src: &Path, screen_w: u32, screen_h: u32, display: &Display) -> Self {
+        Self {
+            src: src.to_path_buf(),
+            screen_w,
+            screen_h,
+            mode: display.mode,
+            blur_sigma: display.blur_sigma,
+            bg_darken: display.bg_darken,
+        }
+    }
 }
 
 impl Cache {
