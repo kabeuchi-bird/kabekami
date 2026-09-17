@@ -25,13 +25,13 @@ use crate::cache::{Cache, CacheKey};
 /// - `start()` で新しい先読みを開始する。前の先読みが走っていれば abort する。
 /// - `abort()` で明示的にキャンセルできる（「次へ」連打時など）。
 pub struct Prefetcher {
-    /// 走行中の先読みタスク。解像度ごとに 1 本走るため複数持つ。
+    /// 走行中の先読みタスク。解像度ごとに 1 本走る。
     pending: Vec<JoinHandle<()>>,
     /// 加工中のキャッシュ出力パス（= キーの同一性）。
     ///
-    /// `abort()` は外側のタスクしか止められず `spawn_blocking` の中は走り切るため、
-    /// これが無いと abort 直後の `start()` が同じ画像を二重にデコードする。
-    /// `Cache::store` が弾けるのは書き込みだけで、そこに至る加工は弾けない。
+    /// `abort()` は外側のタスクしか止められず `spawn_blocking` の中は走り切る。
+    /// これが無いと abort 直後の `start()` が同じ画像を二重にデコードする
+    /// （`Cache::store` が弾けるのは書き込みだけ）。
     inflight: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
@@ -45,9 +45,9 @@ impl Prefetcher {
 
     /// 指定したキャッシュキー群に対応する画像の先読み加工をバックグラウンドで開始する。
     ///
-    /// すでに先読み中のタスクは abort してから起動する。キャッシュにあるキーと
-    /// 加工中のキーは飛ばす。`CacheKey` が解像度を含むのでキーは複数受け取る
-    /// （1 つだけ温めても解像度の違うモニターは切り替えの瞬間にミスする）。
+    /// 先読み中のタスクは abort してから起動し、キャッシュにあるキーと加工中の
+    /// キーは飛ばす。キーが複数なのは `CacheKey` が解像度を含むため
+    /// （1 つだけ温めても解像度の違うモニターはミスする）。
     pub fn start(&mut self, keys: impl IntoIterator<Item = CacheKey>, cache: Arc<Cache>) {
         self.abort();
 
@@ -61,7 +61,7 @@ impl Prefetcher {
                 continue;
             }
 
-            // 加工中のキーは投げ直さない（abort しても加工自体は止まらないため）
+            // 加工中のキーは投げ直さない（abort しても加工は止まらない）
             let out = cache.path_for(&key);
             if !lock(&self.inflight).insert(out.clone()) {
                 tracing::debug!(
@@ -70,8 +70,7 @@ impl Prefetcher {
                 );
                 continue;
             }
-            // ガードは `spawn_blocking` のクロージャに持たせる。外側のタスクを
-            // abort されても、加工が終わった時点で必ずキーが外れる。
+            // ガードはクロージャに持たせる（abort されても加工完了時に必ず外れる）
             let guard = InflightGuard { set: Arc::clone(&self.inflight), out };
 
             tracing::debug!(
@@ -107,7 +106,7 @@ impl Prefetcher {
 /// 加工中キーの集合からパスを外す RAII ガード。
 ///
 /// `spawn_blocking` のクロージャに持たせる。走り出せば必ず終わり、走り出す前なら
-/// クロージャごと捨てられるので、外側を abort されてもキーが取り残されない。
+/// クロージャごと捨てられるので、abort されてもキーが取り残されない。
 struct InflightGuard {
     set: Arc<Mutex<HashSet<PathBuf>>>,
     out: PathBuf,
@@ -119,8 +118,8 @@ impl Drop for InflightGuard {
     }
 }
 
-/// 毒された Mutex から中身を回収する。臨界区間は `insert` / `remove` だけなので
-/// 毒されていても集合は壊れていない。先読みの重複排除でデーモンを落とさない。
+/// 毒された Mutex から中身を回収する。臨界区間は `insert` / `remove` だけで集合は
+/// 壊れていないので、先読みの重複排除でデーモンを落とさない。
 fn lock(set: &Arc<Mutex<HashSet<PathBuf>>>) -> std::sync::MutexGuard<'_, HashSet<PathBuf>> {
     set.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -208,8 +207,7 @@ mod tests {
         }
     }
 
-    /// 加工中のキーが外れないと、そのキーは二度と先読みされなくなる。
-    /// `spawn_blocking` が走り切ったあと必ず外れることが前提。
+    /// キーが外れないとそのキーは二度と先読みされない。
     #[test]
     fn inflight_guard_releases_the_key_on_drop() {
         let set: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -222,8 +220,7 @@ mod tests {
         assert!(!lock(&set).contains(&out), "ドロップで必ず外れる");
     }
 
-    /// 同じキーに 2 本のタスクを立てない。`start` は同期なので、`await` する前に
-    /// 立ったタスクの本数を数えられる（加工そのものはまだ走っていない）。
+    /// 同じキーに 2 本立てない。`start` は同期なので `await` 前に本数を数えられる。
     #[tokio::test]
     async fn start_submits_one_task_per_key() {
         let dir = tempfile::tempdir().unwrap();

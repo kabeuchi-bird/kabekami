@@ -42,14 +42,13 @@ impl Blacklist {
         self.paths.contains(path)
     }
 
-    /// パスをブラックリストに追加してファイルに永続化する。
-    /// すでに登録済みの場合は何もしない。保存に失敗した場合はメモリ上の集合も
-    /// ロールバックし、`false` を返す（失敗の詳細は `save_offloaded` が warn に出す）。
+    /// パスをブラックリストに追加してファイルに永続化する。登録済みなら何もしない。
+    /// 保存に失敗したらメモリ上の集合もロールバックして `false` を返す
+    /// （詳細は `save_offloaded` が warn に出す）。
     ///
-    /// 書き込みは `atomic_write`（一意な tmp 名 + fsync + 親ディレクトリ fsync）で
-    /// 電源断・並列書き込みに耐える。その fsync 2 回は `state::save_offloaded` で
-    /// `spawn_blocking` に逃がす（単一ワーカー上で同期実行すると D-Bus・トレイ・
-    /// タイマーごと待たせ、キー操作がその場で止まって見える）。
+    /// 書き込みは `atomic_write`（一意な tmp 名 + fsync 2 回）で電源断に耐える。
+    /// その fsync は `state::save_offloaded` で `spawn_blocking` へ逃がす
+    /// （単一ワーカー上で同期実行するとキー操作がその場で止まって見える）。
     pub async fn add(&mut self, path: &Path) -> bool {
         let path_buf = path.to_path_buf();
         if !self.paths.insert(path_buf.clone()) {
@@ -84,7 +83,6 @@ impl Blacklist {
 mod tests {
     use super::*;
 
-    /// 書き込みを `spawn_blocking` に逃がしても、ファイルには確実に残る。
     /// ここが壊れると再起動でブラックリストが消え、除外した画像が戻ってくる。
     #[tokio::test]
     async fn add_persists_so_a_reload_still_excludes_the_path() {
@@ -99,7 +97,7 @@ mod tests {
         assert!(reloaded.contains(path), "読み直しても除外され続ける");
     }
 
-    /// 登録済みのパスは書き込みを起こさない（同じキーの連打で fsync を繰り返さない）。
+    /// 登録済みのパスは書き込みを起こさない（連打で fsync を繰り返さない）。
     #[tokio::test]
     async fn adding_a_known_path_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();

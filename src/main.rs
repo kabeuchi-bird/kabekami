@@ -481,25 +481,21 @@ async fn main() -> Result<()> {
                             Ok(new_cfg) => {
                                 tracing::info!("reloading config");
 
-                                // 再スキャン（同期的なディレクトリ走査）と inotify の
-                                // 張り替えは、対象ディレクトリが変わっていなければ不要。
-                                // worker thread が 1 本なので、大きなソースを持つ環境では
+                                // 対象ディレクトリが変わっていなければ再スキャンも監視の
+                                // 張り替えも不要。単一ワーカーなので、大きなソースでは
                                 // `interval_secs` を変えただけの保存でも数百 ms 止まりうる。
                                 let source_dirs = collect_source_dirs(&new_cfg);
                                 let sources_changed = source_dirs != scanned_dirs
                                     || new_cfg.sources.recursive != scanned_recursive;
-                                // 監視が全ディレクトリに張れていない環境では、設定保存が
-                                // 唯一の再スキャン契機になるので、対象が変わっていなくても
-                                // 走らせる。一部だけ失敗している場合も同じ扱いにする
-                                // （そのディレクトリのイベントは一切届かないため、
-                                // 再スキャンと登録の再試行の両方が必要）。
+                                // 監視が全ディレクトリに張れていなければ、設定保存が唯一の
+                                // 再スキャン契機になる。一部失敗も同じ扱い（そのディレクトリの
+                                // イベントは届かないので、再スキャンと登録再試行の両方が要る）。
                                 let watching_everything =
                                     watcher_handle.as_ref().is_some_and(|w| w.is_complete());
                                 let needs_rescan = sources_changed || !watching_everything;
 
-                                // 走行中の先読みが温めている画像。再スキャンと並び順の
-                                // 反映を挟んだあとで変わっていれば、その先読みはもう
-                                // 「次の画像」を指していない。
+                                // 走行中の先読みが温めている画像。あとで変わっていれば、
+                                // その先読みはもう「次の画像」を指していない。
                                 let warming = scheduler.peek_next().cloned();
                                 if needs_rescan {
                                     match scan_images(&source_dirs, new_cfg.sources.recursive, &blacklist).await {
@@ -534,23 +530,18 @@ async fn main() -> Result<()> {
                                     tracing::debug!("reload: source dirs unchanged, skipping rescan");
                                 }
 
-                                // rebuild を通らなかった場合（再スキャンを省いた・画像が
-                                // 見つからなかった・スキャンが失敗した）も並び順は反映する。
-                                // rebuild 済みなら同値なので何もしない。
+                                // rebuild を通らなかった場合も並び順は反映する
+                                // （通っていれば同値なので何もしない）。
                                 scheduler.set_order(new_cfg.rotation.order);
 
-                                // キャッシュキーに効く設定が変わったかどうか。変わって
-                                // いなければ温まったキャッシュ（`known` セットと集計済み
-                                // サイズ）も走行中の先読みもそのまま活かす。
-                                // `interval_secs` や言語を変えただけの保存で、ほぼ終わって
-                                // いるデコードを捨てると次の切り替えでその分待たされる。
+                                // キャッシュキーに効く設定が変わったか。変わっていなければ
+                                // 温まったキャッシュも走行中の先読みもそのまま活かす。
                                 let cache_changed = new_cfg.cache != config.cache;
                                 let display_changed = new_cfg.display != config.display;
 
-                                // 先読みの指す先が変わったときだけ捨てる。走査が空・失敗で
-                                // 一覧を据え置いたなら `peek_next()` は同じままなので、
-                                // ほぼ終わっているデコードを捨てる理由がない。表示設定と
-                                // キャッシュ設定はパスが同じでもキーが変わるので別に見る。
+                                // 先読みの指す先が変わったときだけ捨てる（据え置きなら
+                                // ほぼ終わったデコードを捨てる理由がない）。表示・キャッシュ
+                                // 設定はパスが同じでもキーが変わるので別に見る。
                                 if scheduler.peek_next() != warming.as_ref()
                                     || cache_changed
                                     || display_changed
@@ -583,18 +574,13 @@ async fn main() -> Result<()> {
 
                                 config = new_cfg;
 
-                                // ここで参照する current は、再スキャンして rebuild を
-                                // 通った場合は「新しい一覧に残っていた画像」（外れた画像や
-                                // ブラックリスト入りした画像は rebuild で current から落ちる）、
-                                // 再スキャンを省いた・空だった・失敗した場合は据え置きの
-                                // current。いずれも「いま表示しているべき画像」なので
-                                // そのまま再適用してよい。
+                                // rebuild を通れば新しい一覧に残っていた画像、通らなければ
+                                // 据え置きの current。どちらも「いま表示しているべき画像」。
                                 match scheduler.current().cloned() {
-                                    // 再適用が成功した場合だけ apply_and_notify 内で
-                                    // state に記録される。ここで先に persist すると、
-                                    // 適用に失敗した壁紙を「現在の壁紙」として
-                                    // 保存してしまい、再起動後にトレイやゴミ箱操作が
-                                    // 画面に出ていない画像を指す（分岐を畳まないこと）。
+                                    // 記録は `apply_and_notify` 内、成功時のみ。先に persist
+                                    // すると、適用に失敗した壁紙を「現在」として保存し、
+                                    // 再起動後のトレイやゴミ箱操作が画面に無い画像を指す
+                                    // （分岐を畳まないこと）。
                                     Some(cur) => {
                                         apply_and_notify(apply_ctx!(), &cur, "reload: reapply failed").await;
                                     }
@@ -670,10 +656,9 @@ async fn main() -> Result<()> {
             }
 
             Some(ev) = watch_rx.recv() => {
-                // 大量コピー時は 1 件ごとにトレイを更新しても途中の枚数は誰も読めない。
-                // イベントはパスを運ぶので捨てられず、処理はして更新だけまとめる。
-                // 1 パスの件数に上限を置くのは、この中に await が無く `remove_image` が
-                // 画像数に比例するため。上限で抜ければ残りは次のループでまた拾う。
+                // 大量コピー時、途中の枚数は誰も読めない。イベントはパスを運ぶので捨てず、
+                // 処理はして更新だけまとめる。上限を置くのは、この中に await が無く
+                // `remove_image` が画像数に比例するため（残りは次のループで拾う）。
                 const MAX_DRAIN_PER_PASS: usize = 32;
                 let count_before = scheduler.image_count();
                 apply_watch_event(ev, &mut scheduler, &blacklist);
@@ -725,10 +710,8 @@ async fn main() -> Result<()> {
 
 /// ソースディレクトリを走査し、ブラックリストを除いた画像一覧を返す。
 ///
-/// `scanner::scan` は `std::fs` の同期 I/O なので `spawn_blocking` へ逃がす。
-/// メインループから直接呼ぶとワーカースレッド（`worker_threads = 1`）を
-/// 占有し、その間 D-Bus・トレイ・監視イベントの処理が止まる。
-/// 絞り込みはメモリ上の処理なので呼び出し側のタスクで行う。
+/// `scanner::scan` は同期 I/O。単一ワーカーを占有すると D-Bus・トレイ・監視が
+/// 止まるので `spawn_blocking` へ逃がす。絞り込みはメモリ上なので呼び出し側で行う。
 async fn scan_images(
     scan_dirs: &[std::path::PathBuf],
     recursive: bool,
@@ -741,10 +724,8 @@ async fn scan_images(
     Ok(scanned.into_iter().filter(|p| !blacklist.contains(p)).collect())
 }
 
-/// ディレクトリ監視の登録もブロッキング処理。`notify` の `watch()` は内部スレッドへ
-/// 要求を投げて応答を待つため、`recursive` では対象ツリー全体の走査と
-/// ディレクトリごとの `inotify_add_watch` が終わるまで戻らない。走査と同じ理由で
-/// `spawn_blocking` へ逃がす（メインループから呼ぶのはリロード時のみ）。
+/// 監視の登録も同期。`notify` の `watch()` は内部スレッドの応答を待ち、`recursive`
+/// ならツリー全体の走査が終わるまで戻らないので、走査と同じく `spawn_blocking` へ。
 async fn spawn_dir_watcher_offloaded(
     source_dirs: &[std::path::PathBuf],
     recursive: bool,
@@ -991,9 +972,8 @@ fn collect_source_dirs(config: &Config) -> Vec<std::path::PathBuf> {
 
 /// 先頭（プライマリ扱い）モニターの解像度。
 ///
-/// `resolve_screens()` は検出に失敗してもフォールバックの `Monitor` を 1 つ返し、
-/// `screen_watcher` も空の検出結果は捨てるため、空スライスは実際には来ない。
-/// `unwrap_or` は panic を避けるための保険。
+/// 空スライスは実際には来ない（`resolve_screens` は必ず 1 つ返し、`screen_watcher` は
+/// 空の検出を捨てる）。`unwrap_or` は panic 避けの保険。
 fn primary_size(screens: &[screen::Monitor]) -> (u32, u32) {
     screens
         .first()
@@ -1003,8 +983,8 @@ fn primary_size(screens: &[screen::Monitor]) -> (u32, u32) {
 
 /// `screens` に現れる解像度を重複なしで列挙する（元の並び順を保つ）。
 ///
-/// `CacheKey` は解像度を含むため、同じ解像度のモニターは同じキーになる。
-/// 加工も先読みも解像度の数だけで足り、モニターの数だけ回す必要はない。
+/// `CacheKey` は解像度を含むので同解像度のモニターは同じキー。加工も先読みも
+/// 解像度の数だけで足りる。
 fn distinct_sizes(screens: &[screen::Monitor]) -> Vec<(u32, u32)> {
     let mut sizes: Vec<(u32, u32)> = Vec::with_capacity(screens.len());
     for m in screens {
@@ -1049,9 +1029,8 @@ fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
 
 /// `screens` を表示するのに必要なキャッシュキーの一式（解像度ごとに 1 つ）。
 ///
-/// 適用側と先読み側の唯一の共有点。解像度の集合だけでなくキーの中身まで
-/// ここで決めるので、表示設定にフィールドが増えても両者がズレない。
-/// ズレた場合はエラーにならず、先読みが誰も引かないファイルを温め続ける。
+/// 適用側と先読み側の唯一の共有点。キーの中身までここで決めるので、表示設定に
+/// フィールドが増えてもズレない。ズレても無音で、先読みが無駄に回り続ける。
 fn cache_keys(src: &Path, screens: &[screen::Monitor], config: &Config) -> Vec<CacheKey> {
     distinct_sizes(screens)
         .into_iter()
@@ -1171,8 +1150,7 @@ fn apply_watch_event(
     }
 }
 
-/// トレイの「現在の壁紙名」と「画像枚数」を 1 回の `update` で更新する
-/// （分けると ksni への往復が 2 回になる）。
+/// トレイの壁紙名と枚数を 1 回の `update` で更新する（分けると往復が 2 回になる）。
 async fn update_tray_current_and_count(
     tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
     current: Option<&Path>,

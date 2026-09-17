@@ -49,8 +49,8 @@ pub struct DirWatcher {
 impl DirWatcher {
     /// 対象ディレクトリすべてを監視できているか。
     ///
-    /// `false` のときは一部のディレクトリの登録に失敗しており、そこでの追加・削除は
-    /// 一切届かない。呼び出し側が再スキャンと登録の再試行を判断するために使う。
+    /// `false` なら一部の登録に失敗しており、そこでの追加・削除は届かない。
+    /// 呼び出し側が再スキャンと登録の再試行を判断するために使う。
     pub fn is_complete(&self) -> bool {
         self.complete
     }
@@ -67,8 +67,7 @@ impl DirWatcher {
 /// 監視なしの縮退状態。送信端を落とした受信端を返す。
 ///
 /// 送信端が無いので `Some(ev) = rx.recv()` は一致せず、`select!` の該当 arm が
-/// 無害に無効化される。この「閉じたチャンネル」の作り方をここ 1 箇所に置き、
-/// 監視を張れなかった呼び出し側が自分で組み立てないようにする。
+/// 無害に無効化される。この作り方を 1 箇所に置き、呼び出し側で組み立てさせない。
 pub fn degraded() -> Receiver<WatchEvent> {
     let (tx, rx) = mpsc::channel::<WatchEvent>(1);
     drop(tx);
@@ -146,8 +145,8 @@ pub fn spawn(
         return (rx, None);
     }
 
-    // 一部でも登録に失敗していれば「監視できている」と言ってはいけない。
-    // そのディレクトリの追加・削除は届かず、呼び出し側が再スキャンで補う必要がある。
+    // 一部でも失敗していれば「監視できている」と言ってはいけない
+    // （そのディレクトリの追加・削除は届かず、呼び出し側が再スキャンで補う）
     let complete = ok_count == dirs.len();
     if !complete {
         tracing::warn!(
@@ -217,7 +216,7 @@ pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<DirWat
         "watching {} for config changes",
         config_path.display()
     );
-    // 対象は 1 ディレクトリだけなので、ここに来た時点で部分失敗はない
+    // 対象は 1 ディレクトリだけなので部分失敗はない
     (rx, Some(DirWatcher { _inner: watcher, complete: true }))
 }
 

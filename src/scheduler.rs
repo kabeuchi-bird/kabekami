@@ -163,10 +163,9 @@ impl Scheduler {
 
     /// 並び順だけを変更する。画像一覧・`current`・`paused`・`history` はそのまま。
     ///
-    /// 同じ並び順なら何もしない（`Random` では呼ぶたびに再シャッフルになる）。
-    /// 並べ替えるのは未表示キューの中身だけ。キューは既に「この一巡でまだ出して
-    /// いない画像」なので、`build_queue` で全画像から作り直して表示済みを
-    /// 引き算する必要はない。
+    /// 同じ並び順なら何もしない（`Random` は呼ぶたびに再シャッフルになる）。
+    /// 並べ替えるのは未表示キューの中身だけ。キューは既に「この一巡で未表示の
+    /// 画像」なので、全画像から作り直して表示済みを引き算する必要はない。
     pub fn set_order(&mut self, order: Order) {
         if self.order == order {
             return;
@@ -274,8 +273,7 @@ impl Scheduler {
     ) -> VecDeque<usize> {
         let mut v: Vec<usize> = (0..image_count).collect();
         order_indices(&mut v, order);
-        // シャッフルの結果、直前に表示していた画像が先頭に来てしまったら 1 つずらす。
-        // `Sequential` は並びが決まっているので触らない。
+        // シャッフルで直前の画像が先頭に来たら 1 つずらす（`Sequential` は触らない）
         if order == Order::Random && v.len() > 1 {
             if let Some(avoid) = avoid_first {
                 if v.first() == Some(&avoid) {
@@ -287,8 +285,8 @@ impl Scheduler {
     }
 }
 
-/// インデックス列を指定の並び順に並べ替える。
-/// 「並び順とは何か」の定義をここ 1 箇所に置き、`build_queue` と `set_order` で共有する。
+/// インデックス列を並べ替える。並び順の定義を 1 箇所に置き、
+/// `build_queue` と `set_order` で共有する。
 fn order_indices(indices: &mut [usize], order: Order) {
     match order {
         Order::Sequential => indices.sort_unstable(),
@@ -435,8 +433,8 @@ mod tests {
 
     /// 設定リロードで再スキャンを省いたときも並び順の変更が効くこと。
     /// 画像一覧・現在の画像・一時停止状態は維持される。
-    /// `order` フィールドだけ書き換えて未表示キューを並べ替えない、という抜けを防ぐ。
-    /// Random → Sequential は結果が一意に決まるので確かめられる。
+    /// `order` だけ書き換えて並べ替えない、という抜けを防ぐ。
+    /// Random → Sequential は結果が一意に決まる。
     #[test]
     fn set_order_reorders_the_pending_queue() {
         let mut s = Scheduler::new(paths(10), Order::Random);
@@ -454,9 +452,8 @@ mod tests {
         );
     }
 
-    /// `build_queue` は全画像を並べ直すので、そのままだとこの一巡で表示済みの
-    /// 画像まで未表示キューに戻る。`prev()` で履歴から戻した画像が `current` と
-    /// キューの両方に居座ると、一巡し切る前に同じ画像が再登場する。
+    /// `prev()` で履歴から戻した画像が `current` とキューの両方に居座ると、
+    /// 一巡し切る前に同じ画像が再登場する。
     #[test]
     fn set_order_does_not_requeue_history_so_one_cycle_shows_each_image_once() {
         let n = 4;
@@ -505,8 +502,8 @@ mod tests {
     }
 
     /// 並び順を変えても履歴は残り、`prev()` で戻れること。
-    /// `rebuild` は履歴を捨てるが、画像一覧が同じなら履歴のインデックスは
-    /// 有効なままなので、並び順の変更だけで `prev()` が壊れてはいけない。
+    /// 画像一覧が同じなら履歴のインデックスは有効なまま。並び順の変更だけで
+    /// `prev()` が壊れてはいけない。
     #[test]
     fn set_order_keeps_history_so_prev_still_works() {
         let mut s = Scheduler::new(paths(5), Order::Sequential);
@@ -524,8 +521,7 @@ mod tests {
         );
     }
 
-    /// 同じ並び順で呼ばれたら何もしない。`rebuild` を通してしまうと履歴が消えて
-    /// `prev()` が壊れるため、変更が無いリロードで副作用を出さないことを固定する。
+    /// 同じ並び順なら何もしない。変更の無いリロードで副作用を出さないこと。
     #[test]
     fn set_order_is_a_noop_for_the_same_order() {
         let mut s = Scheduler::new(paths(5), Order::Sequential);
