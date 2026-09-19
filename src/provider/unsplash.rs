@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::download_image;
+use super::ensure_downloaded;
 
 const API_URL: &str = "https://api.unsplash.com/photos/random";
 
@@ -75,21 +75,8 @@ pub async fn fetch(
 
     for photo in &photos {
         let filename = format!("unsplash_{}.jpg", photo.id);
-        let dest = dir.join(&filename);
-
-        if dest.exists() {
-            available.push(dest);
-            continue;
-        }
-
         let url = if use_full { &photo.urls.full } else { &photo.urls.regular };
-        match download_image(client, url, &dest).await {
-            Ok(()) => {
-                tracing::debug!("unsplash: downloaded {}", dest.display());
-                available.push(dest);
-            }
-            Err(e) => tracing::warn!("unsplash: failed {}: {:#}", photo.id, e),
-        }
+        available.extend(ensure_downloaded(client, "unsplash", url, dir.join(&filename)).await);
     }
 
     Ok(available)

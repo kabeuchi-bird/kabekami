@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::download_image;
+use super::{ensure_downloaded, safe_ext};
 
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 
@@ -93,28 +93,12 @@ pub async fn fetch(
             continue;
         }
 
-        let ext = post.url.rsplit('.').next().unwrap_or("jpg");
-        let ext: String = ext.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-        let ext = if ext.is_empty() { "jpg".to_owned() } else { ext };
         // `trim_start_matches` は文字集合 `"t3_"` を繰り返し剥がしてしまうため
         // (`"tt3_abc"` → `"abc"` のような誤動作になる)、prefix 完全一致の
         // `strip_prefix` を使う。
         let id = post.name.strip_prefix("t3_").unwrap_or(&post.name);
-        let filename = format!("reddit_{}.{}", id, ext);
-        let dest = dir.join(&filename);
-
-        if dest.exists() {
-            available.push(dest);
-            continue;
-        }
-
-        match download_image(client, &post.url, &dest).await {
-            Ok(()) => {
-                tracing::debug!("reddit: downloaded {}", dest.display());
-                available.push(dest);
-            }
-            Err(e) => tracing::warn!("reddit: failed {}: {:#}", post.url, e),
-        }
+        let filename = format!("reddit_{}.{}", id, safe_ext(&post.url));
+        available.extend(ensure_downloaded(client, "reddit", &post.url, dir.join(&filename)).await);
     }
 
     Ok(available)

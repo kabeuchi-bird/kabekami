@@ -152,6 +152,15 @@ fn opt_text_field(
     });
 }
 
+/// `Option<PathBuf>` 用の単一行入力欄。空（前後の空白除く）なら `None`。
+fn opt_path_field(ui: &mut egui::Ui, hint: &str, width: f32, val: &mut Option<PathBuf>) {
+    let mut s = val.as_deref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    let edit = egui::TextEdit::singleline(&mut s).hint_text(hint).desired_width(width);
+    if ui.add(edit).changed() {
+        *val = Some(s.trim()).filter(|t| !t.is_empty()).map(PathBuf::from);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Preview background thread
 // ---------------------------------------------------------------------------
@@ -189,16 +198,7 @@ fn render_preview(req: &PreviewRequest) -> anyhow::Result<egui::ColorImage> {
     const PREV_W: u32 = 480;
     const PREV_H: u32 = 270; // 16:9
 
-    // EXIF Orientation を読み取りつつデコード（縦撮り写真などが正しい向きで表示される）
-    use image::ImageDecoder;
-    let reader = image::ImageReader::open(&req.path)?
-        .with_guessed_format()?;
-    let mut decoder = reader.into_decoder()?;
-    let orientation = decoder
-        .orientation()
-        .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut src = image::DynamicImage::from_decoder(decoder)?;
-    src.apply_orientation(orientation);
+    let src = kabekami_common::display_mode::load_oriented(&req.path)?;
 
     let rgba = kabekami_common::display_mode::process(
         &src,
@@ -260,17 +260,11 @@ struct KabekamiApp {
 
     /// `kdialog` が利用可能か（起動時に 1 回判定し、参照ボタンの活性／非活性に使う）。
     has_kdialog: bool,
-
-    /// 現在の UI 表示言語。`config.ui.language` から派生し、language ドロップダウン
-    /// 変更時にも同期される。各フレームの描画でこの値を参照することで
-    /// 即座に表示が切り替わる（egui の immediate-mode のため再起動不要）。
-    lang: Lang,
 }
 
 impl KabekamiApp {
     fn new() -> Self {
         let config = Config::load().unwrap_or_default();
-        let lang = Lang::from_code(&config.ui.language);
 
         // channel: UI → worker (unbounded so UI never blocks)
         let (req_tx, req_rx) = mpsc::sync_channel::<PreviewRequest>(1);
@@ -294,24 +288,17 @@ impl KabekamiApp {
             new_online_provider: ProviderKind::Bing,
             cache_size_bytes: None,
             has_kdialog: kdialog_available(),
-            lang,
         }
     }
 
-    /// 設定の言語コードに変化があれば `self.lang` を同期する。
-    /// 毎フレームの先頭で呼ぶことで、UI タブの言語ドロップダウンで変更した瞬間に
-    /// GUI 全体の表示言語が切り替わる。
-    fn sync_lang(&mut self) {
-        self.lang = Lang::from_code(&self.config.ui.language);
-    }
-
-    /// 現在の言語の文字列テーブル。
+    /// 現在の言語の文字列テーブル。`config.ui.language` から毎回引くので、
+    /// UI タブの言語ドロップダウンを変えた瞬間に GUI 全体の表示が切り替わる。
     ///
     /// 返り値は `&'static` なので `self` の借用を持ち越さない。
     /// 各 `ui_*` の先頭で `let s = self.s();` と束縛しておけば、
     /// 以降 `&mut self.config` と同時に使っても借用が衝突しない。
     fn s(&self) -> &'static ConfigStrings {
-        i18n::config_strings(self.lang)
+        i18n::config_strings(Lang::from_code(&self.config.ui.language))
     }
 
     /// 「📁 参照」ボタンを描画する（kdialog 不在時は無効化＆ツールチップ）。
@@ -385,8 +372,6 @@ impl KabekamiApp {
 
 impl eframe::App for KabekamiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // UI タブで language を変えた瞬間に反映されるよう毎フレーム同期
-        self.sync_lang();
         self.poll_preview(ctx);
         let s = self.s();
 
@@ -449,23 +434,7 @@ impl KabekamiApp {
 
         // お気に入りフォルダ
         ui.label(s.favorites_dir);
-        ui.horizontal(|ui| {
-            let mut fav_str = self.config.sources.favorites_dir
-                .as_deref()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if ui.add(
-                egui::TextEdit::singleline(&mut fav_str)
-                    .hint_text(s.favorites_hint)
-                    .desired_width(400.0),
-            ).changed() {
-                self.config.sources.favorites_dir = if fav_str.trim().is_empty() {
-                    None
-                } else {
-                    Some(std::path::PathBuf::from(fav_str.trim()))
-                };
-            }
-        });
+        opt_path_field(ui, s.favorites_hint, 400.0, &mut self.config.sources.favorites_dir);
         ui.add_space(8.0);
 
         ui.label(s.directories);
@@ -758,24 +727,11 @@ impl KabekamiApp {
                     // ダウンロード先ディレクトリ
                     ui.horizontal(|ui| {
                         ui.label(s.download_dir);
-                        let mut dir_str = oc.download_dir.as_deref()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_default();
                         let hint = format!(
                             "~/.local/share/kabekami/{} {}",
                             oc.provider, s.default_option
                         );
-                        if ui.add(
-                            egui::TextEdit::singleline(&mut dir_str)
-                                .hint_text(hint)
-                                .desired_width(260.0)
-                        ).changed() {
-                            oc.download_dir = if dir_str.is_empty() {
-                                None
-                            } else {
-                                Some(PathBuf::from(dir_str))
-                            };
-                        }
+                        opt_path_field(ui, &hint, 260.0, &mut oc.download_dir);
                         if self.browse_button(ui) {
                             if let Some(path) = pick_folder(s, oc.download_dir.as_deref()) {
                                 oc.download_dir = Some(path);

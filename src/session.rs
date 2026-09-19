@@ -42,54 +42,23 @@ trait FreedesktopDBus {
 ///
 /// D-Bus が利用できない環境では警告を出してサイレントに無効化される。
 pub async fn spawn_session_watcher(tx: UnboundedSender<TrayCmd>) {
+    if let Err(e) = try_spawn(tx).await {
+        tracing::warn!("session watcher: unavailable ({})", e);
+    }
+}
+
+async fn try_spawn(tx: UnboundedSender<TrayCmd>) -> zbus::Result<()> {
     // login1 はシステムバス上にある
-    let sys_conn = match zbus::Connection::system().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("session watcher: system bus unavailable ({})", e);
-            return;
-        }
-    };
-
-    let session_conn = match zbus::Connection::session().await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("session watcher: session bus unavailable ({})", e);
-            return;
-        }
-    };
-
-    let login1 = match Login1ManagerProxy::new(&sys_conn).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("session watcher: login1 proxy unavailable ({})", e);
-            return;
-        }
-    };
-
-    let shutdown_stream = match login1.receive_prepare_for_shutdown().await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("session watcher: PrepareForShutdown signal unavailable ({})", e);
-            return;
-        }
-    };
-
-    let dbus_proxy = match FreedesktopDBusProxy::new(&session_conn).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("session watcher: DBus proxy unavailable ({})", e);
-            return;
-        }
-    };
-
-    let name_changed_stream = match dbus_proxy.receive_name_owner_changed().await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("session watcher: NameOwnerChanged signal unavailable ({})", e);
-            return;
-        }
-    };
+    let sys_conn = zbus::Connection::system().await?;
+    let session_conn = zbus::Connection::session().await?;
+    let shutdown_stream = Login1ManagerProxy::new(&sys_conn)
+        .await?
+        .receive_prepare_for_shutdown()
+        .await?;
+    let name_changed_stream = FreedesktopDBusProxy::new(&session_conn)
+        .await?
+        .receive_name_owner_changed()
+        .await?;
 
     tracing::info!("session watcher active (login1 + NameOwnerChanged)");
 
@@ -120,4 +89,5 @@ pub async fn spawn_session_watcher(tx: UnboundedSender<TrayCmd>) {
             }
         }
     });
+    Ok(())
 }
