@@ -171,34 +171,56 @@ async fn mark_fetch_done(cfg: &OnlineSourceConfig) {
     }
 }
 
+/// `dest` が未取得なら `url` からダウンロードし、利用可能になったときだけ `dest` を返す。
+/// 失敗は警告に留める（他の画像の取得は続ける）。
+async fn ensure_downloaded(
+    client: &reqwest::Client,
+    provider: &str,
+    url: &str,
+    dest: PathBuf,
+) -> Option<PathBuf> {
+    if dest.exists() {
+        return Some(dest);
+    }
+    match download_image(client, url, &dest).await {
+        Ok(()) => {
+            tracing::debug!("{}: downloaded {}", provider, dest.display());
+            Some(dest)
+        }
+        Err(e) => {
+            tracing::warn!("{}: failed {}: {:#}", provider, url, e);
+            None
+        }
+    }
+}
+
+/// URL 末尾の拡張子を取り出す。英数字だけ残し、空なら `jpg`。
+fn safe_ext(url: &str) -> String {
+    let ext: String = url
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if ext.is_empty() { "jpg".to_owned() } else { ext }
+}
+
 /// HTTP GET で画像をダウンロードして `dest` に書き出す。
 ///
 /// - Content-Type が `text/html` / `application/json` の場合はエラー（HTML エラーページ対策）
 /// - 一時ファイル経由のアトミック書き込み
 /// - 最大 3 回の指数バックオフリトライ（2s → 4s）
 pub async fn download_image(client: &reqwest::Client, url: &str, dest: &Path) -> Result<()> {
-    let mut last_err = anyhow::anyhow!("download not attempted");
-    let mut delay = Duration::from_secs(2);
-
-    for attempt in 0..3u32 {
-        match try_download(client, url, dest).await {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                last_err = e;
-                if attempt < 2 {
-                    tracing::debug!(
-                        "download attempt {}/3 failed for {}: {:#}",
-                        attempt + 1,
-                        url,
-                        last_err
-                    );
-                    tokio::time::sleep(delay).await;
-                    delay *= 2;
-                }
-            }
+    for (i, secs) in [2u64, 4].into_iter().enumerate() {
+        if let Err(e) = try_download(client, url, dest).await {
+            tracing::debug!("download attempt {}/3 failed for {}: {:#}", i + 1, url, e);
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+        } else {
+            return Ok(());
         }
     }
-    Err(last_err)
+    try_download(client, url, dest).await
 }
 
 /// ダウンロード 1 ファイルあたりの最大バイト数。

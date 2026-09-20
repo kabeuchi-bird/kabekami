@@ -22,18 +22,26 @@ use zbus::zvariant::{OwnedValue, Value};
 
 use kabekami_common::i18n::Lang;
 
+/// 1 種類の通知（エラー／警告）の置き換え状態。
+struct Slot {
+    /// 前回送信した通知の ID（0 = 未送信）。replaces_id として再利用する。
+    last_id: u32,
+    /// 通知のサマリー文字列。
+    summary: &'static str,
+}
+
+impl Slot {
+    fn new(summary: &'static str) -> Self {
+        Self { last_id: 0, summary }
+    }
+}
+
 /// デスクトップ通知の状態を保持する。
 ///
 /// `main()` で 1 インスタンスを作り、エラー／成功のたびに `error()` / `clear()` を呼ぶ。
 pub struct Notifier {
-    /// 前回送信したエラー通知の ID（0 = 未送信）。replaces_id として再利用する。
-    last_id: u32,
-    /// エラー通知のサマリー文字列。
-    summary: &'static str,
-    /// 前回送信した警告通知の ID（0 = 未送信）。
-    warn_last_id: u32,
-    /// 警告通知のサマリー文字列。
-    warn_summary: &'static str,
+    error: Slot,
+    warn: Slot,
     /// D-Bus セッション接続。確立済みの接続を保持して再利用する。
     conn: Option<zbus::Connection>,
 }
@@ -44,10 +52,8 @@ impl Notifier {
         let strings = crate::i18n::strings(lang);
         let conn = zbus::Connection::session().await.ok();
         Self {
-            last_id: 0,
-            summary: strings.notify_failed,
-            warn_last_id: 0,
-            warn_summary: strings.notify_warning,
+            error: Slot::new(strings.notify_failed),
+            warn: Slot::new(strings.notify_warning),
             conn,
         }
     }
@@ -65,23 +71,23 @@ impl Notifier {
         if let Some(ref u) = url {
             insert_hint(&mut hints, "x-kde-origin-url", Value::Str(u.as_str().into()));
         }
-        match self.send_dbus("dialog-error", self.summary, body, -1, self.last_id, hints).await {
-            Ok(id) => self.last_id = id,
+        match self.send_dbus("dialog-error", self.error.summary, body, -1, self.error.last_id, hints).await {
+            Ok(id) => self.error.last_id = id,
             Err(e) => tracing::debug!("desktop notification unavailable: {}", e),
         }
     }
 
     /// エラーが解消したときに呼ぶ。次回は新規通知として表示される。
     pub fn clear(&mut self) {
-        self.last_id = 0;
+        self.error.last_id = 0;
     }
 
     /// WARN レベルのログを通知として表示する。連続警告は 1 件に集約される。
     pub async fn warn(&mut self, body: &str) {
         let mut hints: HashMap<String, OwnedValue> = HashMap::new();
         insert_hint(&mut hints, "category", Value::Str("device.warning".into()));
-        match self.send_dbus("dialog-warning", self.warn_summary, body, 5000, self.warn_last_id, hints).await {
-            Ok(id) => self.warn_last_id = id,
+        match self.send_dbus("dialog-warning", self.warn.summary, body, 5000, self.warn.last_id, hints).await {
+            Ok(id) => self.warn.last_id = id,
             Err(e) => tracing::debug!("desktop notification unavailable: {}", e),
         }
     }

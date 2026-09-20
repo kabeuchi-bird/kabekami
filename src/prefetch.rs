@@ -14,7 +14,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use image::ImageDecoder;
 use tokio::task::JoinHandle;
 
 use crate::cache::{Cache, CacheKey, Claim, ClaimGuard};
@@ -144,40 +143,7 @@ pub fn process_for_cache(key: &CacheKey, cache: &Arc<Cache>) -> anyhow::Result<P
 
     tracing::debug!("prefetch: processing {}", src.display());
 
-    // マジックバイトによるフォーマット検出（拡張子に依存しない）
-    let reader = image::ImageReader::open(src)
-        .map_err(|e| anyhow::anyhow!("failed to open {}: {}", src.display(), e))?;
-    let ext_fmt = reader.format(); // 拡張子から推定したフォーマット
-    let reader = reader
-        .with_guessed_format()
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {}", src.display(), e))?;
-    let content_fmt = reader.format(); // マジックバイトから検出したフォーマット
-
-    // 拡張子と実際のフォーマットが異なる場合は警告
-    if let (Some(ef), Some(cf)) = (ext_fmt, content_fmt) {
-        if ef != cf {
-            tracing::warn!(
-                "extension/format mismatch: {} (extension → {:?}, content → {:?}); decoding as {:?}",
-                src.display(), ef, cf, cf,
-            );
-        }
-    }
-
-    // EXIF Orientation を読み取りつつデコード。decode() は orientation を取り出す前に
-    // reader を消費するので into_decoder() で分解する必要がある。
-    let mut decoder = reader
-        .into_decoder()
-        .map_err(|e| anyhow::anyhow!("failed to create decoder for {}: {}", src.display(), e))?;
-    let orientation = decoder.orientation().unwrap_or_else(|e| {
-        tracing::debug!("orientation read failed for {}: {}", src.display(), e);
-        image::metadata::Orientation::NoTransforms
-    });
-    let mut img = image::DynamicImage::from_decoder(decoder)
-        .map_err(|e| anyhow::anyhow!("failed to decode {}: {}", src.display(), e))?;
-    if !matches!(orientation, image::metadata::Orientation::NoTransforms) {
-        tracing::debug!("applying EXIF orientation {:?} to {}", orientation, src.display());
-        img.apply_orientation(orientation);
-    }
+    let img = crate::display_mode::load_oriented(src)?;
 
     let processed = crate::display_mode::process(
         &img,
