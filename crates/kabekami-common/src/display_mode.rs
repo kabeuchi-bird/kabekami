@@ -62,6 +62,47 @@ fn stretch(src: &DynamicImage, screen_w: u32, screen_h: u32) -> RgbaImage {
         .to_rgba8()
 }
 
+/// 画像を読み込み、EXIF Orientation を適用して返す。
+///
+/// フォーマットは拡張子ではなくマジックバイトで判定する（食い違えば警告）。
+/// `decode()` は orientation を取り出す前に reader を消費するため、
+/// `into_decoder()` で分解して orientation を先に読む。
+pub fn load_oriented(src: &std::path::Path) -> anyhow::Result<image::DynamicImage> {
+    use image::ImageDecoder;
+
+    let reader = image::ImageReader::open(src)
+        .map_err(|e| anyhow::anyhow!("failed to open {}: {}", src.display(), e))?;
+    let ext_fmt = reader.format(); // 拡張子から推定したフォーマット
+    let reader = reader
+        .with_guessed_format()
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {}", src.display(), e))?;
+    let content_fmt = reader.format(); // マジックバイトから検出したフォーマット
+
+    if let (Some(ef), Some(cf)) = (ext_fmt, content_fmt) {
+        if ef != cf {
+            tracing::warn!(
+                "extension/format mismatch: {} (extension → {:?}, content → {:?}); decoding as {:?}",
+                src.display(), ef, cf, cf,
+            );
+        }
+    }
+
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| anyhow::anyhow!("failed to create decoder for {}: {}", src.display(), e))?;
+    let orientation = decoder.orientation().unwrap_or_else(|e| {
+        tracing::debug!("orientation read failed for {}: {}", src.display(), e);
+        image::metadata::Orientation::NoTransforms
+    });
+    let mut img = image::DynamicImage::from_decoder(decoder)
+        .map_err(|e| anyhow::anyhow!("failed to decode {}: {}", src.display(), e))?;
+    if !matches!(orientation, image::metadata::Orientation::NoTransforms) {
+        tracing::debug!("applying EXIF orientation {:?} to {}", orientation, src.display());
+        img.apply_orientation(orientation);
+    }
+    Ok(img)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

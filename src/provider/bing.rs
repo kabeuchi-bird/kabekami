@@ -14,7 +14,7 @@ use url::Url;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::{download_image, FetchContext};
+use super::{ensure_downloaded, FetchContext};
 
 const BASE_URL: &str = "https://www.bing.com/";
 /// `urlbase` の resolve 後にこのホスト以外を返したら拒否する。
@@ -103,13 +103,7 @@ pub async fn fetch(
             continue;
         }
 
-        match download_image(client, url.as_str(), &dest).await {
-            Ok(()) => {
-                tracing::debug!("bing: downloaded {}", dest.display());
-                available.push(dest);
-            }
-            Err(e) => tracing::warn!("bing: failed to download {}: {:#}", url, e),
-        }
+        available.extend(ensure_downloaded(client, "bing", url.as_str(), dest).await);
     }
 
     Ok(available)

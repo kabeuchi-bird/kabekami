@@ -19,40 +19,34 @@ pub struct DaemonIface {
     pub tx: UnboundedSender<TrayCmd>,
 }
 
-#[zbus::interface(name = "org.kabekami.Daemon")]
-impl DaemonIface {
+/// `TrayCmd` を 1 つ転送するだけの D-Bus メソッド群を生成する。
+macro_rules! forward_methods {
+    ($( $(#[$doc:meta])* $name:ident => $cmd:ident ),* $(,)?) => {
+        #[zbus::interface(name = "org.kabekami.Daemon")]
+        impl DaemonIface {
+            $(
+                $(#[$doc])*
+                async fn $name(&self) {
+                    let _ = self.tx.send(TrayCmd::$cmd);
+                }
+            )*
+        }
+    };
+}
+
+forward_methods! {
     /// 次の壁紙へ切り替える。
-    async fn next(&self) {
-        let _ = self.tx.send(TrayCmd::Next);
-    }
-
+    next => Next,
     /// 前の壁紙に戻る。
-    async fn prev(&self) {
-        let _ = self.tx.send(TrayCmd::Prev);
-    }
-
+    prev => Prev,
     /// 自動切り替えを一時停止 / 再開する。
-    async fn toggle_pause(&self) {
-        let _ = self.tx.send(TrayCmd::TogglePause);
-    }
-
+    toggle_pause => TogglePause,
     /// デーモンを終了する。
-    async fn quit(&self) {
-        let _ = self.tx.send(TrayCmd::Quit);
-    }
-
+    quit => Quit,
     /// 現在の壁紙をゴミ箱に移動して次の壁紙へ進む。
-    async fn trash_current(&self) {
-        let _ = self.tx.send(TrayCmd::DeleteCurrent);
-    }
-
+    trash_current => DeleteCurrent,
     /// 現在の壁紙をお気に入りフォルダにコピーする。
-    async fn copy_to_favorites(&self) {
-        let _ = self.tx.send(TrayCmd::CopyToFavorites);
-    }
-
+    copy_to_favorites => CopyToFavorites,
     /// 現在の壁紙をブラックリストに追加して次へ進む。
-    async fn blacklist_current(&self) {
-        let _ = self.tx.send(TrayCmd::BlacklistCurrent);
-    }
+    blacklist_current => BlacklistCurrent,
 }

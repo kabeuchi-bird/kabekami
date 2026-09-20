@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::download_image;
+use super::{ensure_downloaded, safe_ext};
 
 const API_URL: &str = "https://wallhaven.cc/api/v1/search";
 
@@ -59,24 +59,8 @@ pub async fn fetch(
     let mut available = Vec::new();
 
     for img in &resp.data {
-        let raw_ext = img.path.rsplit('.').next().unwrap_or("jpg");
-        let ext: String = raw_ext.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
-        let ext = if ext.is_empty() { "jpg".to_owned() } else { ext };
-        let filename = format!("wallhaven_{}.{}", img.id, ext);
-        let dest = dir.join(&filename);
-
-        if dest.exists() {
-            available.push(dest);
-            continue;
-        }
-
-        match download_image(client, &img.path, &dest).await {
-            Ok(()) => {
-                tracing::debug!("wallhaven: downloaded {}", dest.display());
-                available.push(dest);
-            }
-            Err(e) => tracing::warn!("wallhaven: failed {}: {:#}", img.id, e),
-        }
+        let filename = format!("wallhaven_{}.{}", img.id, safe_ext(&img.path));
+        available.extend(ensure_downloaded(client, "wallhaven", &img.path, dir.join(&filename)).await);
     }
 
     Ok(available)
