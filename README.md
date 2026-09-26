@@ -17,7 +17,7 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 |------|------------|
 | OS | Linux |
 | DE | KDE Plasma 5.7+ or Plasma 6 |
-| Rust | 1.75+ (edition 2021) |
+| Rust | 1.88+ (edition 2021; required by the locked `image` crate) |
 | External | `plasma-apply-wallpaperimage` (bundled with `plasma-workspace`) |
 | D-Bus | Session bus (required for tray icon) |
 | `kscreen-doctor` | Optional — needed for multi-monitor auto-detection (`kscreen` package) |

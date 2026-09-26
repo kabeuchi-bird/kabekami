@@ -1785,7 +1785,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trash",
- "url",
  "zbus",
 ]
 

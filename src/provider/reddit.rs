@@ -123,13 +123,6 @@ mod tests {
         assert!(!is_valid_subreddit("wall papers"));
     }
 
-    #[test]
-    fn fetch_limit_no_overflow() {
-        assert_eq!(u32::MAX.saturating_mul(3).min(100), 100);
-        assert_eq!(10u32.saturating_mul(3).min(100), 30);
-        assert_eq!(50u32.saturating_mul(3).min(100), 100);
-    }
-
     fn make_post(post_hint: &str, url: &str, is_self: bool) -> RedditPost {
         RedditPost {
             name: "t3_abc".into(),

@@ -165,7 +165,7 @@ pub fn spawn(
 /// ファイル直接の watch だと取りこぼすことがある）。
 ///
 /// イベントは内容なし `()` のチャンネルで通知する。バーストはメインループ側の
-/// 100ms スロットルおよび `ReloadConfig` ハンドラの冪等性で吸収する。
+/// 100ms スロットルおよびリロード処理の冪等性で吸収する。
 pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<DirWatcher>) {
     // `spawn` と同じく、失敗時も閉じた受信端を返す。
     let (tx, rx) = mpsc::unbounded_channel::<()>();

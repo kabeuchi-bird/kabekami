@@ -17,7 +17,7 @@ KDE Plasma 向け壁紙ローテーションデーモン。Rust 製。
 |---|---|
 | OS | Linux |
 | DE | KDE Plasma 5.7 以降 または Plasma 6 |
-| Rust | 1.75 以降（edition 2021） |
+| Rust | 1.88 以降（edition 2021。ロック済みの `image` クレートの要件） |
 | 外部コマンド | `plasma-apply-wallpaperimage`（`plasma-workspace` 同梱） |
 | D-Bus | セッションバスへのアクセス（トレイ表示に必要） |
 | `kscreen-doctor` | 任意 — マルチモニター自動検出に必要（`kscreen` パッケージ） |

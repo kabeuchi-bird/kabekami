@@ -23,6 +23,7 @@ use crate::cache::{Cache, CacheKey};
 ///
 /// - `start()` で新しい先読みを開始する。前の先読みが走っていれば abort する。
 /// - `abort()` で明示的にキャンセルできる（「次へ」連打時など）。
+#[derive(Default)]
 pub struct Prefetcher {
     /// 走行中の先読みタスク。解像度ごとに 1 本走る。
     pending: Vec<JoinHandle<()>>,
@@ -35,13 +36,6 @@ pub struct Prefetcher {
 }
 
 impl Prefetcher {
-    pub fn new() -> Self {
-        Self {
-            pending: Vec::new(),
-            inflight: Arc::new(Mutex::new(HashSet::new())),
-        }
-    }
-
     /// 指定したキャッシュキー群に対応する画像の先読み加工をバックグラウンドで開始する。
     ///
     /// 先読み中のタスクは abort してから起動し、キャッシュにあるキーと加工中の
@@ -123,17 +117,11 @@ fn lock(set: &Arc<Mutex<HashSet<PathBuf>>>) -> std::sync::MutexGuard<'_, HashSet
     set.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-impl Default for Prefetcher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// `CacheKey` で指定された画像を読み込み・加工してキャッシュに保存する（ブロッキング処理）。
 ///
 /// この関数は `spawn_blocking` から呼ばれることを想定している。
 /// キャッシュにすでにある場合は二重書き込みを避けるためスキップする。
-pub fn process_for_cache(key: &CacheKey, cache: &Arc<Cache>) -> anyhow::Result<PathBuf> {
+pub fn process_for_cache(key: &CacheKey, cache: &Cache) -> anyhow::Result<PathBuf> {
     let src = key.src.as_path();
 
     // 二重チェック（並列 prefetch が先に書いた可能性）
@@ -191,7 +179,7 @@ mod tests {
     async fn start_submits_one_task_per_key() {
         let dir = tempfile::tempdir().unwrap();
         let cache = Arc::new(Cache::new(dir.path().to_path_buf(), 0));
-        let mut prefetcher = Prefetcher::new();
+        let mut prefetcher = Prefetcher::default();
 
         prefetcher.start([key("/nonexistent/a.jpg"), key("/nonexistent/a.jpg")], cache);
 

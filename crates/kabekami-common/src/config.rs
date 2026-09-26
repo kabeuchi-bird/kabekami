@@ -8,31 +8,25 @@ use serde::{Deserialize, Serialize};
 /// 壁紙切り替え間隔の下限（秒）。
 pub const MIN_INTERVAL_SECS: u64 = 5;
 
+// 各セクションは `#[serde(default)]` で、欠けたキーを `Default` 実装の値で埋める。
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Config {
-    #[serde(default)]
     pub sources: Sources,
-    #[serde(default)]
     pub rotation: Rotation,
-    #[serde(default)]
     pub display: Display,
-    #[serde(default)]
     pub cache: Cache,
-    #[serde(default)]
     pub ui: Ui,
     /// オンライン壁紙プロバイダー設定（`[[online_sources]]` 配列）。
-    #[serde(default)]
     pub online_sources: Vec<OnlineSourceConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Sources {
-    #[serde(default)]
     pub directories: Vec<PathBuf>,
-    #[serde(default = "default_true")]
     pub recursive: bool,
     /// お気に入り壁紙のコピー先ディレクトリ。`None` の場合は機能無効。
-    #[serde(default)]
     pub favorites_dir: Option<PathBuf>,
 }
 
@@ -47,21 +41,18 @@ impl Default for Sources {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Rotation {
-    #[serde(default = "default_interval_secs")]
     pub interval_secs: u64,
-    #[serde(default)]
     pub order: Order,
-    #[serde(default = "default_true")]
     pub change_on_start: bool,
-    #[serde(default = "default_true")]
     pub prefetch: bool,
 }
 
 impl Default for Rotation {
     fn default() -> Self {
         Self {
-            interval_secs: default_interval_secs(),
+            interval_secs: 1800,
             order: Order::default(),
             change_on_start: true,
             prefetch: true,
@@ -78,12 +69,10 @@ pub enum Order {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Display {
-    #[serde(default)]
     pub mode: DisplayMode,
-    #[serde(default = "default_blur_sigma")]
     pub blur_sigma: f32,
-    #[serde(default = "default_bg_darken")]
     pub bg_darken: f32,
 }
 
@@ -91,8 +80,8 @@ impl Default for Display {
     fn default() -> Self {
         Self {
             mode: DisplayMode::default(),
-            blur_sigma: default_blur_sigma(),
-            bg_darken: default_bg_darken(),
+            blur_sigma: 25.0,
+            bg_darken: 0.1,
         }
     }
 }
@@ -109,38 +98,36 @@ pub enum DisplayMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Cache {
-    #[serde(default = "default_cache_dir")]
     pub directory: PathBuf,
-    #[serde(default = "default_max_size_mb")]
     pub max_size_mb: u64,
 }
 
 impl Default for Cache {
     fn default() -> Self {
         Self {
-            directory: default_cache_dir(),
-            max_size_mb: default_max_size_mb(),
+            directory: xdg_dir("XDG_CACHE_HOME", ".cache")
+                .unwrap_or_else(|| PathBuf::from(".cache"))
+                .join("kabekami"),
+            max_size_mb: 500,
         }
     }
 }
 
 /// UI 表示言語の設定。
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Ui {
     /// `"ja"` または `"en"`。空文字列はデフォルト（英語）として扱う。
-    #[serde(default)]
     pub language: String,
     /// WARN レベルのログをデスクトップ通知として表示する（デフォルト: false）。
-    #[serde(default)]
     pub warn_notify: bool,
     /// オンラインソースが新しい画像を取得したときにデスクトップ通知を出す
     /// （デフォルト: true）。
-    #[serde(default = "default_true")]
     pub notify_fetch: bool,
     /// 「二度と表示しない」ブラックリスト機能を有効にする（デフォルト: true）。
     /// false にするとトレイメニュー項目・CLI・D-Bus メソッドが無効になる。
-    #[serde(default = "default_true")]
     pub enable_blacklist: bool,
 }
 
@@ -157,23 +144,6 @@ impl Default for Ui {
 
 fn default_true() -> bool {
     true
-}
-fn default_interval_secs() -> u64 {
-    1800
-}
-fn default_blur_sigma() -> f32 {
-    25.0
-}
-fn default_bg_darken() -> f32 {
-    0.1
-}
-fn default_max_size_mb() -> u64 {
-    500
-}
-fn default_cache_dir() -> PathBuf {
-    xdg_cache_dir()
-        .unwrap_or_else(|| PathBuf::from(".cache"))
-        .join("kabekami")
 }
 
 impl Config {
@@ -239,16 +209,17 @@ impl Config {
 
         // f32 フィールドは TOML 直編集で `nan` / `inf` が入りうる。
         // 画像処理側の前提を壊さないよう、非有限値はデフォルトに戻して clamp する。
+        let defaults = Display::default();
         sanitize_f32(
             &mut self.display.blur_sigma,
             BLUR_SIGMA_RANGE,
-            default_blur_sigma(),
+            defaults.blur_sigma,
             "blur_sigma",
         );
         sanitize_f32(
             &mut self.display.bg_darken,
             BG_DARKEN_RANGE,
-            default_bg_darken(),
+            defaults.bg_darken,
             "bg_darken",
         );
 
@@ -320,10 +291,8 @@ impl ProviderKind {
     /// デフォルトの再取得間隔（時間）。
     pub fn default_interval_hours(self) -> u64 {
         match self {
-            Self::Bing => 24,
-            Self::Unsplash => 24,
-            Self::Wallhaven => 24,
             Self::Reddit => 1,
+            _ => 24,
         }
     }
 }
@@ -375,7 +344,7 @@ impl OnlineSourceConfig {
         if let Some(dir) = &self.download_dir {
             return dir.clone();
         }
-        xdg_data_local_dir()
+        xdg_dir("XDG_DATA_HOME", ".local/share")
             .unwrap_or_else(|| PathBuf::from(".local/share"))
             .join("kabekami")
             .join(self.provider.name())
@@ -412,25 +381,16 @@ fn home_dir() -> Option<PathBuf> {
     Some(PathBuf::from(v))
 }
 
+/// `$<var>` が空でなければそれを、無ければ `$HOME/<home_rel>` を返す。
+fn xdg_dir(var: &str, home_rel: &str) -> Option<PathBuf> {
+    match std::env::var(var) {
+        Ok(v) if !v.is_empty() => Some(PathBuf::from(v)),
+        _ => home_dir().map(|h| h.join(home_rel)),
+    }
+}
+
 pub(crate) fn xdg_config_dir() -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("XDG_CONFIG_HOME") {
-        if !v.is_empty() { return Some(PathBuf::from(v)); }
-    }
-    home_dir().map(|h| h.join(".config"))
-}
-
-fn xdg_cache_dir() -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("XDG_CACHE_HOME") {
-        if !v.is_empty() { return Some(PathBuf::from(v)); }
-    }
-    home_dir().map(|h| h.join(".cache"))
-}
-
-fn xdg_data_local_dir() -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("XDG_DATA_HOME") {
-        if !v.is_empty() { return Some(PathBuf::from(v)); }
-    }
-    home_dir().map(|h| h.join(".local/share"))
+    xdg_dir("XDG_CONFIG_HOME", ".config")
 }
 
 #[cfg(test)]
@@ -569,12 +529,12 @@ max_size_mb = 123
         cfg.display.blur_sigma = f32::NAN;
         cfg.display.bg_darken = f32::INFINITY;
         cfg.normalize();
-        assert_eq!(cfg.display.blur_sigma, default_blur_sigma());
-        assert_eq!(cfg.display.bg_darken, default_bg_darken());
+        assert_eq!(cfg.display.blur_sigma, Display::default().blur_sigma);
+        assert_eq!(cfg.display.bg_darken, Display::default().bg_darken);
 
         cfg.display.blur_sigma = f32::NEG_INFINITY;
         cfg.normalize();
-        assert_eq!(cfg.display.blur_sigma, default_blur_sigma());
+        assert_eq!(cfg.display.blur_sigma, Display::default().blur_sigma);
     }
 
     #[test]

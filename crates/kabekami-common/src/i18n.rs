@@ -326,8 +326,6 @@ pub struct LangEntry {
     pub id: &'static str,
     /// GUI の言語選択ドロップダウンに表示する名前
     pub display_name: &'static str,
-    /// `false` のエントリは GUI に表示されない
-    pub gui_visible: bool,
     /// デーモン（トレイ・通知）用の文字列テーブル
     pub strings: &'static UiStrings,
     /// 設定 GUI 用の文字列テーブル
@@ -388,8 +386,6 @@ struct LangFile {
     #[serde(default)]
     display_name: Option<String>,
     #[serde(default)]
-    gui_visible: Option<bool>,
-    #[serde(default)]
     tray: RawUiStrings,
     #[serde(default)]
     config: RawConfigStrings,
@@ -400,9 +396,6 @@ impl LangFile {
     fn overlay(&mut self, other: Self) {
         if other.display_name.is_some() {
             self.display_name = other.display_name;
-        }
-        if other.gui_visible.is_some() {
-            self.gui_visible = other.gui_visible;
         }
         self.tray.overlay(other.tray);
         self.config.overlay(other.config);
@@ -519,7 +512,6 @@ fn make_entry(
         id,
         // display_name 未指定なら言語コードをそのまま表示名にする
         display_name: leak_str(file.display_name, id),
-        gui_visible: file.gui_visible.unwrap_or(true),
         strings: Box::leak(Box::new(ui)),
         config: Box::leak(Box::new(file.config.merge(base_cfg))),
     }
@@ -594,22 +586,6 @@ mod tests {
         assert_eq!(Lang::default(), Lang(0));
     }
 
-    /// 全ての登録言語が言語ドロップダウンに出ること。
-    ///
-    /// en.toml が無い場合の英語エントリは `LangFile::default()` から作られる。
-    /// derive した `Default` だと `gui_visible` が `false` になり、英語だけが
-    /// 選択肢から消えるという不具合が実際に起きたのでテストで固定する。
-    #[test]
-    fn all_languages_are_gui_visible_by_default() {
-        for entry in bundled_only() {
-            assert!(
-                entry.gui_visible,
-                "{}: gui_visible should default to true",
-                entry.id
-            );
-        }
-    }
-
     #[test]
     fn from_code_resolves_and_falls_back() {
         let reg = bundled_only();
@@ -679,7 +655,6 @@ mod tests {
         let f: LangFile = toml::from_str("[tray]\nquit = \"x\"").unwrap();
         let e = make_entry("de", f, &EN, &EN_CONFIG);
         assert_eq!(e.display_name, "de");
-        assert!(e.gui_visible, "gui_visible の既定は true");
     }
 
     /// 同梱分だけのレジストリ（ホスト上の言語ファイルを見ない）。
