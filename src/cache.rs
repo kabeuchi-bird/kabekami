@@ -7,13 +7,19 @@
 //! ## LRU 退避
 //! `store()` の中で `evict_if_needed()` を呼び、総容量が `max_size_bytes` を
 //! 超えていれば更新日時の古いファイルから削除する。
+//! ヒット時にも mtime を更新するので、順序は最終使用順になる。
+//! 直近 `EVICT_GRACE` 以内に使われたファイルは消さない（適用中・先読み中の
+//! 画像を消して存在しないパスを Plasma に渡すのを防ぐ）。
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 
 use crate::config::{Display, DisplayMode};
+
+// ponytail: 時間ベースの保護。上限が極端に小さいと一時的に超過する。厳密にするなら使用中パスを明示的に pin する
+const EVICT_GRACE: Duration = Duration::from_secs(60);
 
 /// 加工済み画像のキャッシュ。`Arc<Cache>` で共有して使う。
 pub struct Cache {
@@ -66,7 +72,7 @@ impl Cache {
     /// 呼び出し元は IO エラー時にキャッシュミスとして再処理すること。
     pub fn get(&self, key: &CacheKey) -> Option<PathBuf> {
         let path = self.path_for(key);
-        path.exists().then_some(path)
+        touch(&path).then_some(path)
     }
 
     /// 加工済み画像をキャッシュに保存し、そのパスを返す。
@@ -81,7 +87,7 @@ impl Cache {
             .with_context(|| format!("failed to create cache dir: {}", self.directory.display()))?;
 
         let path = self.path_for(key);
-        if path.exists() {
+        if touch(&path) {
             return Ok(path);
         }
 
@@ -104,9 +110,14 @@ impl Cache {
         let entries = cache_entries_by_mtime(&self.directory)?;
         let total: u64 = entries.iter().map(|(_, size, _)| size).sum();
 
+        let cutoff = SystemTime::now()
+            .checked_sub(EVICT_GRACE)
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+
         let mut remaining = total;
-        for (path, size, _) in &entries {
-            if remaining <= self.max_size_bytes {
+        for (path, size, mtime) in &entries {
+            // mtime 昇順なので、猶予内のファイルに達したら以降もすべて猶予内
+            if remaining <= self.max_size_bytes || *mtime > cutoff {
                 break;
             }
             match std::fs::remove_file(path) {
@@ -148,6 +159,15 @@ impl Cache {
         h.write(&key.bg_darken.to_bits().to_le_bytes());
         format!("{:016x}", h.finish())
     }
+}
+
+/// 既存ファイルの mtime を現在時刻にする（LRU の「使用」扱い）。ファイルが無ければ false。
+fn touch(path: &Path) -> bool {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(SystemTime::now()))
+        .is_ok()
 }
 
 /// kabekami がこれまでに書き出したことがある拡張子をすべて列挙する。
@@ -259,26 +279,41 @@ mod tests {
     }
 
     #[test]
-    fn eviction_removes_oldest_files_first() {
-        // max 1 MB に設定し、2 MB 相当のファイルを書き込む
-        let dir = std::env::temp_dir().join("kabekami-cache-evict");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let cache = Cache::new(dir.clone(), 1);
+    fn eviction_removes_old_files_but_keeps_recent_ones() {
+        // max 1 MB。新しいファイル単体で上限を超えても、猶予内なので消さない
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 1);
 
-        // ダミーファイルを 2 つ作成（それぞれ ~600KB）
-        let data = vec![0u8; 600 * 1024];
-        let old_path = dir.join("0000old.jpg");
-        let new_path = dir.join("zzzznew.jpg");
-        std::fs::write(&old_path, &data).unwrap();
-        // 少し待ってから新しいファイルを書く（mtime が変わるように）
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        std::fs::write(&new_path, &data).unwrap();
+        let old_path = dir.path().join("0000old.jpg");
+        let new_path = dir.path().join("zzzznew.jpg");
+        std::fs::write(&new_path, vec![0u8; 1200 * 1024]).unwrap();
+        let old = std::fs::File::create(&old_path).unwrap();
+        old.set_len(600 * 1024).unwrap();
+        old.set_modified(SystemTime::now() - EVICT_GRACE * 2)
+            .unwrap();
 
         cache.evict_if_needed().unwrap();
 
-        // 古い方が削除されているはず
-        assert!(!old_path.exists(), "oldest file should be evicted");
-        assert!(new_path.exists(), "newest file should remain");
+        assert!(!old_path.exists(), "old file should be evicted");
+        assert!(
+            new_path.exists(),
+            "recent file must survive even over the limit"
+        );
+    }
+
+    #[test]
+    fn cache_hit_protects_file_from_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 1);
+        let k = key("/tmp/hit.jpg");
+        let path = cache.path_for(&k);
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(1200 * 1024).unwrap();
+        f.set_modified(SystemTime::now() - EVICT_GRACE * 2).unwrap();
+
+        assert!(cache.get(&k).is_some());
+        cache.evict_if_needed().unwrap();
+
+        assert!(path.exists(), "a cache hit must refresh mtime");
     }
 }
