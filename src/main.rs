@@ -249,7 +249,8 @@ async fn main() -> Result<()> {
             match scheduler.next() {
                 Some(next) => {
                     apply_and_notify(apply_ctx!(), &next, $apply_err).await;
-                    sync_tray_current(&tray_handle, &scheduler).await;
+                    let count = scheduler.image_count();
+                    update_tray(&tray_handle, move |t| t.image_count = count).await;
                 }
                 None => {
                     // 最後の 1 枚が無くなった。トレイの壁紙名と state も消さないと、
