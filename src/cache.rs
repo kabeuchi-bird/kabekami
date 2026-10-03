@@ -468,4 +468,25 @@ mod tests {
         assert!(!old.exists(), "新しい上限で退避される");
     }
 
+
+    /// `store` が `write_atomically` を通っていることの確認。最終パスに「存在しない
+    /// 先を指すシンボリックリンク」を置くと、直接書き込みはリンクをたどって先に
+    /// ファイルを作り、rename はリンク自体を置き換える。この差で書き方を判別する。
+    #[cfg(unix)]
+    #[test]
+    fn store_replaces_the_final_path_instead_of_writing_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 0);
+        let k = key("/tmp/foo.jpg");
+        let final_path = cache.path_for(&k);
+        let target = dir.path().join("target.webp");
+        std::os::unix::fs::symlink(&target, &final_path).unwrap();
+
+        cache.store(&k, &solid_rgba(4, 4)).unwrap();
+
+        assert!(!target.exists(), "最終パスへ直接書いている（リンク先に書けた）");
+        let meta = std::fs::symlink_metadata(&final_path).unwrap();
+        assert!(meta.is_file(), "rename で通常ファイルに置き換わるべき");
+    }
+
 }
