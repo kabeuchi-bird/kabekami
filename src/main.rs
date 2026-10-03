@@ -842,8 +842,8 @@ fn cache_keys(src: &Path, screens: &[screen::Monitor], config: &Config) -> Vec<C
 
 /// 壁紙を加工してキャッシュし、Plasma に反映する。
 ///
-/// 解像度ごとに 1 回だけ加工して同解像度のモニターで使い回す。並列に投げると
-/// `process_for_cache` の二重チェックをすり抜けて同じ画像を 2 回デコードする。
+/// 解像度ごとに 1 回だけ加工して同解像度のモニターで使い回す（同じキーを並べても
+/// `process_single_flight` が待ち側に回すだけなので、投げる前に畳んでおく）。
 /// モニター 1 台でも分岐しない（`set_wallpaper_multi` が 1 件なら全スクリーンに適用、0 件なら無処理）。
 async fn apply(
     src: &Path,
@@ -856,11 +856,7 @@ async fn apply(
         futures_util::future::try_join_all(cache_keys(src, screens, config).into_iter().map(
             |key| async move {
                 let size = (key.screen_w, key.screen_h);
-                let cache = Arc::clone(cache);
-                tokio::task::spawn_blocking(move || prefetch::process_for_cache(&key, &cache))
-                    .await
-                    .context("image processing task panicked")?
-                    .map(|p| (size, p))
+                prefetch::process_single_flight(&key, cache).await.map(|p| (size, p))
             },
         ))
         .await?
