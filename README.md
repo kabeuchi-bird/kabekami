@@ -17,7 +17,7 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 |------|------------|
 | OS | Linux |
 | DE | KDE Plasma 5.7+ or Plasma 6 |
-| Rust | 1.75+ (edition 2021) |
+| Rust | 1.88+ (edition 2021; required by the locked `image` crate) |
 | External | `plasma-apply-wallpaperimage` (bundled with `plasma-workspace`) |
 | D-Bus | Session bus (required for tray icon) |
 | `kscreen-doctor` | Optional — needed for multi-monitor auto-detection (`kscreen` package) |
@@ -221,7 +221,7 @@ Note: bmp, tiff, and gif are not supported (the `image` crate features are limit
 
 **Multi-monitor: same image on all screens** — Install `kscreen` to enable per-monitor detection.
 
-**Wallpaper looks blurry / not at native resolution** — kabekami first tries `kscreen-doctor --json` (Plasma 6) and falls back to text parsing on older versions. If both fail (KScreen daemon unavailable at startup, etc.), it uses 1920×1080 until the next wallpaper-update triggers a re-detection (throttled to a 60s minimum). To diagnose, run `RUST_LOG=kabekami=debug kabekami` and check the `kscreen-doctor output` log line. As a workaround, override the resolution explicitly with `KABEKAMI_SCREEN=2560x1440` (your actual resolution).
+**Wallpaper looks blurry / not at native resolution** — kabekami detects screens with `kscreen-doctor --json`. If that fails (KScreen daemon unavailable at startup, etc.), it uses 1920×1080 until the next wallpaper-update triggers a re-detection (throttled to a 60s minimum). To diagnose, run `RUST_LOG=kabekami=debug kabekami` and check the `monitor detected` log lines. As a workaround, override the resolution explicitly with `KABEKAMI_SCREEN=2560x1440` (your actual resolution).
 
 **Online sources download 0 images** — Check API key, network, and `RUST_LOG=kabekami=debug` output.
 

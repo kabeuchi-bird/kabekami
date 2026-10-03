@@ -24,7 +24,7 @@ const HISTORY_LIMIT: usize = 50;
 pub struct Scheduler {
     /// ソース画像リスト（shuffle / refill の原本）
     images: Vec<PathBuf>,
-    /// `images` の重複チェック用セット（O(1) ルックアップ）
+    /// `images` の重複チェック用セット。大量コピー時の `add_image` を O(1) に保つ。
     image_set: HashSet<PathBuf>,
     order: Order,
     /// 未表示の画像インデックスキュー。空になったら `refill()` する。
@@ -290,15 +290,8 @@ impl Scheduler {
 fn order_indices(indices: &mut [usize], order: Order) {
     match order {
         Order::Sequential => indices.sort_unstable(),
-        Order::Random => fisher_yates(indices),
-    }
-}
-
-/// Fisher-Yates シャッフル（設計書 §5a "全画像一巡"）。
-fn fisher_yates<T>(slice: &mut [T]) {
-    for i in (1..slice.len()).rev() {
-        let j = fastrand::usize(0..=i);
-        slice.swap(i, j);
+        // Fisher-Yates シャッフル（設計書 §5a "全画像一巡"）
+        Order::Random => fastrand::shuffle(indices),
     }
 }
 

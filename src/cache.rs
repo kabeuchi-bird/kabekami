@@ -1,18 +1,20 @@
 //! 加工済み画像のキャッシュ管理。
 //!
 //! ## キャッシュキー
-//! FNV-1a(元画像の絶対パス | 画面幅 | 画面高 | DisplayMode | blur_sigma | bg_darken)
+//! `DefaultHasher`(元画像の絶対パス | 画面幅 | 画面高 | DisplayMode | blur_sigma | bg_darken)
 //! → 16 進数文字列 + `.webp` がキャッシュファイル名となる。
 //!
 //! ## LRU 退避
-//! `store()` の後に `evict_if_needed()` を呼び、総容量が `max_size_bytes` を
+//! `store()` の中で `evict_if_needed()` を呼び、総容量が `max_size_bytes` を
 //! 超えていれば更新日時の古いファイルから削除する。
+//! ヒット時にも mtime を更新するので、順序は最終使用順になる。
+//! 直近 `EVICT_GRACE` 以内に使われたファイルは消さない（適用中・先読み中の
+//! 画像を消して存在しないパスを Plasma に渡すのを防ぐ）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::Semaphore;
 
@@ -20,19 +22,15 @@ use anyhow::{Context, Result};
 
 use crate::config::{Display, DisplayMode};
 
+// ponytail: 時間ベースの保護。上限が極端に小さいと一時的に超過する。厳密にするなら使用中パスを明示的に pin する
+const EVICT_GRACE: Duration = Duration::from_secs(60);
+
 /// 加工済み画像のキャッシュ。`Arc<Cache>` で共有して使う。
 pub struct Cache {
     /// キャッシュディレクトリ（`~/.cache/kabekami/`）
     pub directory: PathBuf,
     /// LRU 退避の容量上限（バイト）。0 なら無制限。
     max_size_bytes: u64,
-    /// キャッシュの推定合計サイズ（バイト）。u64::MAX は未初期化（フルスキャン要）。
-    tracked_size: AtomicU64,
-    /// ディスク上に存在するキャッシュファイルのパス集合。
-    /// ホットパスで `path.exists()` syscall を省略するために使う。
-    known: Mutex<HashSet<PathBuf>>,
-    /// バックグラウンド退避タスクが走行中。重複起動を防ぐ。
-    eviction_running: AtomicBool,
     /// 加工中の出力パスと、その完了を知らせる門。
     ///
     /// 前景の適用と先読みは同じ `Arc<Cache>` を共有するので、ここに置けば
@@ -102,9 +100,6 @@ impl Cache {
         Self {
             directory,
             max_size_bytes: max_size_mb.saturating_mul(1024 * 1024),
-            tracked_size: AtomicU64::new(u64::MAX), // u64::MAX = 未初期化
-            known: Mutex::new(HashSet::new()),
-            eviction_running: AtomicBool::new(false),
             inflight: Mutex::new(HashMap::new()),
         }
     }
@@ -132,24 +127,11 @@ impl Cache {
 
     /// キャッシュヒットなら該当ファイルのパスを返す。
     ///
-    /// `known` セットにあればメモリのみで判定（syscall なし）。
-    /// デーモン起動直後など `known` が空の場合のみ `path.exists()` にフォールバックし、
-    /// 結果を `known` に登録する。
-    ///
-    /// TOCTOU 注意: `known` への登録後に LRU 退避でファイルが消えることがある。
+    /// TOCTOU 注意: 返した直後に LRU 退避でファイルが消えることがある。
     /// 呼び出し元は IO エラー時にキャッシュミスとして再処理すること。
     pub fn get(&self, key: &CacheKey) -> Option<PathBuf> {
         let path = self.path_for(key);
-        if self.known.lock().expect("known set lock").contains(&path) {
-            return Some(path);
-        }
-        // コールドパス: デーモン起動後の初回アクセス時のみ syscall が発生する。
-        if path.exists() {
-            self.known.lock().expect("known set lock").insert(path.clone());
-            Some(path)
-        } else {
-            None
-        }
+        touch(&path).then_some(path)
     }
 
     /// 加工済み画像をキャッシュに保存し、そのパスを返す。
@@ -157,19 +139,14 @@ impl Cache {
     /// すでに同じキーのファイルが存在する場合は書き込みをスキップして
     /// 既存のパスを返す（並列で先読みが書いた場合などの重複書き込み防止）。
     ///
-    /// 容量超過時の LRU 退避は呼び出しスレッドではなくバックグラウンドで実行する
-    /// （`tokio::task::spawn_blocking`）。これにより大容量キャッシュの `read_dir`
-    /// が壁紙適用パスをブロックしない。
-    pub fn store(self: &Arc<Self>, key: &CacheKey, img: &image::RgbaImage) -> Result<PathBuf> {
+    /// 保存後に容量超過なら LRU 退避まで行う。ブロッキング処理なので
+    /// `spawn_blocking` から呼ぶこと。
+    pub fn store(&self, key: &CacheKey, img: &image::RgbaImage) -> Result<PathBuf> {
         std::fs::create_dir_all(&self.directory)
             .with_context(|| format!("failed to create cache dir: {}", self.directory.display()))?;
 
         let path = self.path_for(key);
-        if self.known.lock().unwrap().contains(&path) {
-            return Ok(path);
-        }
-        if path.exists() {
-            self.known.lock().unwrap().insert(path.clone());
+        if touch(&path) {
             return Ok(path);
         }
 
@@ -178,85 +155,38 @@ impl Cache {
             .with_context(|| format!("WebP encode failed: {}", path.display()))?;
 
         tracing::debug!("cached: {}", path.display());
-        self.known.lock().unwrap().insert(path.clone());
-
-        if self.max_size_bytes > 0 {
-            let file_size = std::fs::metadata(&path)
-            .inspect_err(|e| tracing::debug!("cache: metadata failed for {}: {}", path.display(), e))
-            .map(|m| m.len())
-            .unwrap_or(0);
-            let current = self.tracked_size.load(Ordering::Relaxed);
-            // 未初期化 or 上限超過の場合のみフルスキャン（通常はインクリメントのみ）
-            if current == u64::MAX || current.saturating_add(file_size) > self.max_size_bytes {
-                self.spawn_eviction();
-            } else {
-                self.tracked_size.fetch_add(file_size, Ordering::Relaxed);
-            }
+        if let Err(e) = self.evict_if_needed() {
+            tracing::warn!("eviction failed: {}", e);
         }
         Ok(path)
     }
 
-    /// バックグラウンドで `evict_if_needed()` を発火する。
-    ///
-    /// すでに退避タスクが走行中ならスキップする（`eviction_running` フラグ）。
-    /// tokio ランタイムが利用できない場合（テストなど）は同期実行にフォールバック。
-    ///
-    /// `EvictionGuard` 経由でフラグをリセットするため、`evict_if_needed()` が
-    /// パニックしても `eviction_running` が `true` のまま固定されず、
-    /// 以降の退避がブロックされない。
-    fn spawn_eviction(self: &Arc<Self>) {
-        if self.eviction_running.swap(true, Ordering::AcqRel) {
-            return; // 既に走行中
-        }
-        let cache = Arc::clone(self);
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                handle.spawn_blocking(move || {
-                    let _guard = EvictionGuard(&cache);
-                    if let Err(e) = cache.evict_if_needed() {
-                        tracing::warn!("background eviction failed: {}", e);
-                    }
-                });
-            }
-            Err(_) => {
-                // ランタイム外（テスト等）。同期で実行。
-                let _guard = EvictionGuard(self);
-                if let Err(e) = self.evict_if_needed() {
-                    tracing::warn!("eviction failed: {}", e);
-                }
-            }
-        }
-    }
-
     /// `max_size_bytes` を超えていたら古いキャッシュファイルを LRU 順に削除する。
-    pub fn evict_if_needed(&self) -> Result<()> {
+    fn evict_if_needed(&self) -> Result<()> {
         if self.max_size_bytes == 0 {
             return Ok(());
         }
         let entries = cache_entries_by_mtime(&self.directory)?;
         let total: u64 = entries.iter().map(|(_, size, _)| size).sum();
-        if total <= self.max_size_bytes {
-            self.tracked_size.store(total, Ordering::Relaxed);
-            return Ok(());
-        }
+
+        let cutoff = SystemTime::now() - EVICT_GRACE;
 
         let mut remaining = total;
-        for (path, size, _) in &entries {
-            if remaining <= self.max_size_bytes {
+        for (path, size, mtime) in &entries {
+            // mtime 昇順なので、猶予内のファイルに達したら以降もすべて猶予内
+            if remaining <= self.max_size_bytes || *mtime > cutoff {
                 break;
             }
             match std::fs::remove_file(path) {
                 Ok(()) => {
                     tracing::debug!("evicted from cache: {}", path.display());
                     remaining -= size;
-                    self.known.lock().unwrap().remove(path);
                 }
                 Err(e) => {
                     tracing::warn!("eviction failed for {}: {}", path.display(), e);
                 }
             }
         }
-        self.tracked_size.store(remaining, Ordering::Relaxed);
         Ok(())
     }
 
@@ -266,36 +196,31 @@ impl Cache {
         self.directory.join(format!("{hash}.webp"))
     }
 
-    /// キャッシュキーのハッシュ値（FNV-1a 64 bit → 16 進 16 文字）を計算する。
+    /// キャッシュキーのハッシュ値（16 進 16 文字）を計算する。
+    ///
+    /// `DefaultHasher` のアルゴリズムは Rust のリリース間で変わりうるが、
+    /// 変わってもキャッシュが作り直されるだけなので問題ない。
     fn compute_hash(key: &CacheKey) -> String {
-        let mut h = Fnv1a::new();
-        h.write(key.src.to_string_lossy().as_bytes());
-        h.write(b"\x00");
-        h.write(&key.screen_w.to_le_bytes());
-        h.write(&key.screen_h.to_le_bytes());
-        let mode_tag: u8 = match key.mode {
-            DisplayMode::Fill => 0,
-            DisplayMode::Fit => 1,
-            DisplayMode::Stretch => 2,
-            DisplayMode::BlurPad => 3,
-            DisplayMode::Smart => 4,
-        };
-        h.write(&[mode_tag]);
-        // f32 は bit-exact 比較のため整数化して保存（±0 や NaN の問題を回避）
-        h.write(&key.blur_sigma.to_bits().to_le_bytes());
-        h.write(&key.bg_darken.to_bits().to_le_bytes());
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        key.src.hash(&mut h);
+        (key.screen_w, key.screen_h, key.mode).hash(&mut h);
+        // f32 は Hash を持たないのでビット列で（±0 や NaN も bit-exact に区別）
+        (key.blur_sigma.to_bits(), key.bg_darken.to_bits()).hash(&mut h);
         format!("{:016x}", h.finish())
     }
 }
 
-/// `Cache::eviction_running` フラグを `Drop` で `false` に戻す RAII ガード。
-/// 退避タスクがパニックしてもスタック巻き戻し時にフラグが解放され、
-/// 以降の退避がブロックされ続けることを防ぐ。
-struct EvictionGuard<'a>(&'a Cache);
-impl Drop for EvictionGuard<'_> {
-    fn drop(&mut self) {
-        self.0.eviction_running.store(false, Ordering::Release);
-    }
+/// 既存ファイルの mtime を現在時刻にする（LRU の「使用」扱い）。読めなければ false。
+///
+/// mtime の更新失敗（読み取り専用ファイル・FS など）はヒットのまま扱う。
+/// miss にすると同じパスへの再保存も失敗し、壁紙の適用自体が止まる。
+fn touch(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let _ = file.set_modified(SystemTime::now());
+    true
 }
 
 /// kabekami がこれまでに書き出したことがある拡張子をすべて列挙する。
@@ -324,35 +249,15 @@ fn cache_entries_by_mtime(dir: &Path) -> Result<Vec<(PathBuf, u64, SystemTime)>>
     Ok(entries)
 }
 
-/// FNV-1a 64-bit ハッシュ。sha2+hex の代替として stdlib のみで実装。
-struct Fnv1a(u64);
-
-impl Fnv1a {
-    fn new() -> Self {
-        Self(0xcbf29ce484222325)
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 ^= b as u64;
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
 
-    fn tmp_cache(name: &str) -> Arc<Cache> {
+    fn tmp_cache(name: &str) -> Cache {
         let dir = std::env::temp_dir().join(format!("kabekami-cache-test-{}", name));
         let _ = std::fs::remove_dir_all(&dir);
-        Arc::new(Cache::new(dir, 10))
+        Cache::new(dir, 10)
     }
 
     fn solid_rgba(w: u32, h: u32) -> RgbaImage {
@@ -407,26 +312,55 @@ mod tests {
     }
 
     #[test]
-    fn eviction_removes_oldest_files_first() {
-        // max 1 MB に設定し、2 MB 相当のファイルを書き込む
-        let dir = std::env::temp_dir().join("kabekami-cache-evict");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let cache = Cache::new(dir.clone(), 1);
+    fn eviction_removes_old_files_but_keeps_recent_ones() {
+        // max 1 MB。新しいファイル単体で上限を超えても、猶予内なので消さない
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 1);
 
-        // ダミーファイルを 2 つ作成（それぞれ ~600KB）
-        let data = vec![0u8; 600 * 1024];
-        let old_path = dir.join("0000old.jpg");
-        let new_path = dir.join("zzzznew.jpg");
-        std::fs::write(&old_path, &data).unwrap();
-        // 少し待ってから新しいファイルを書く（mtime が変わるように）
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        std::fs::write(&new_path, &data).unwrap();
+        let old_path = dir.path().join("0000old.jpg");
+        let new_path = dir.path().join("zzzznew.jpg");
+        std::fs::write(&new_path, vec![0u8; 1200 * 1024]).unwrap();
+        let old = std::fs::File::create(&old_path).unwrap();
+        old.set_len(600 * 1024).unwrap();
+        old.set_modified(SystemTime::now() - EVICT_GRACE * 2)
+            .unwrap();
 
         cache.evict_if_needed().unwrap();
 
-        // 古い方が削除されているはず
-        assert!(!old_path.exists(), "oldest file should be evicted");
-        assert!(new_path.exists(), "newest file should remain");
+        assert!(!old_path.exists(), "old file should be evicted");
+        assert!(
+            new_path.exists(),
+            "recent file must survive even over the limit"
+        );
+    }
+
+    #[test]
+    fn cache_hit_protects_file_from_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 1);
+        let k = key("/tmp/hit.jpg");
+        let path = cache.path_for(&k);
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(1200 * 1024).unwrap();
+        f.set_modified(SystemTime::now() - EVICT_GRACE * 2).unwrap();
+
+        assert!(cache.get(&k).is_some());
+        cache.evict_if_needed().unwrap();
+
+        assert!(path.exists(), "a cache hit must refresh mtime");
+    }
+
+    /// 書き込み用に開けないファイルでもヒット扱いにする。
+    #[test]
+    fn read_only_file_is_still_a_hit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 0);
+        let k = key("/tmp/ro.jpg");
+        let path = cache.path_for(&k);
+        std::fs::write(&path, b"x").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        assert_eq!(cache.get(&k), Some(path));
     }
 }

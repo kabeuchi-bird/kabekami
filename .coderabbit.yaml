@@ -5,7 +5,7 @@ reviews:
   request_changes_workflow: false
   high_level_summary: true
   high_level_summary_placeholder: "@coderabbitai summary"
-  poem: false
+  poem: true
   review_status: true
   collapse_walkthrough: false
 

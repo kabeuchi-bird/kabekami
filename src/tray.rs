@@ -36,8 +36,6 @@ pub enum TrayCmd {
     BlacklistCurrent,
     /// 現在の壁紙をお気に入りフォルダにコピーする
     CopyToFavorites,
-    /// 設定ファイルを再読み込みする（inotify 自動リロードからのみ発行される内部用）。
-    ReloadConfig,
     /// 設定 GUI を開く
     OpenSettings,
     /// アプリ終了

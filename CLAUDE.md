@@ -24,15 +24,15 @@ Runtime env overrides: `KABEKAMI_SCREEN=WxH`, `KABEKAMI_LANG=en|ja`, `KABEKAMI_I
 
 Cargo workspace with three crates:
 
-- **root `kabekami`** (`src/`) — the daemon. `main.rs` (~1.3k lines) owns the event loop (config hot-reload lives in `reload.rs`, which borrows the loop's state via `ReloadCtx`); it doubles as the CLI client: `--next/--prev/--quit/...` are parsed in `parse_cli()` and forwarded over D-Bus (`org.kabekami.Daemon`, see `daemon_iface.rs`) instead of starting a daemon.
-- **`crates/kabekami-common`** — code shared with the GUI: `config.rs` (TOML schema), `display_mode.rs`, `blur_pad.rs` (image compositing), `i18n.rs`, `atomic_write.rs`/`toml_file.rs` (safe config persistence). `src/config.rs` and `src/display_mode.rs` in the root crate are just `pub use` re-exports of these.
+- **root `kabekami`** (`src/`) — the daemon. `main.rs` (~1.2k lines) owns the event loop (config hot-reload lives in `reload.rs`, which borrows the loop's state via `ReloadCtx`); it doubles as the CLI client: `--next/--prev/--quit/...` are parsed in `parse_cli()` and forwarded over D-Bus (`org.kabekami.Daemon`, see `daemon_iface.rs`) instead of starting a daemon.
+- **`crates/kabekami-common`** — code shared with the GUI: `config.rs` (TOML schema), `display_mode.rs` (image compositing incl. BlurPad), `i18n.rs`, `atomic_write.rs`/`toml_file.rs` (safe config persistence). The root crate has no copies: `main.rs` does `use kabekami_common::{config, display_mode, i18n};`, so `crate::config::…` etc. resolve to the shared crate.
 - **`crates/kabekami-config`** — the settings GUI with live BlurPad preview.
 
 ### Daemon event loop
 
-Everything funnels into one `mpsc` channel of `TrayCmd` consumed by the main `select!` loop. Producers: tray menu (`tray.rs`, ksni), D-Bus CLI (`daemon_iface.rs`), KDE global shortcuts (`shortcuts.rs`), session/Plasma-restart watcher (`session.rs`), screen-change watcher (`screen_watcher.rs`, throttled 60s), plus file watchers for source dirs and `config.toml` (`watcher.rs`, hot-reload). Timers: rotation interval and a 30-minute online-provider check.
+User/system commands funnel into one `mpsc` channel of `TrayCmd` consumed by the main `select!` loop. Producers: tray menu (`tray.rs`, ksni), D-Bus CLI (`daemon_iface.rs`), KDE global shortcuts (`shortcuts.rs`), session/Plasma-restart watcher (`session.rs`), screen-change watcher (`screen_watcher.rs`, throttled 60s). The file watchers (`watcher.rs`) have their own `select!` arms: source-dir add/remove events go straight to the scheduler, and `config.toml` changes are debounced 100ms and then call `reload::reload_config` directly. Other arms: rotation timer, a 30-minute online-provider check (at most one fetch task in flight, tracked by its `JoinHandle`), online `FetchResult`s, and WARN-log notifications.
 
-Wallpaper pipeline: `scheduler.rs` picks the next image (index-based queue + 50-entry history, shuffle-per-cycle for random) → `prefetch.rs` processes ahead of time → `cache.rs` stores processed WebP files keyed by an FNV-1a hash of (path, screen size, mode, blur params) with LRU eviction → `plasma.rs` applies via `plasma-apply-wallpaperimage` / D-Bus. `screen.rs` resolves per-monitor resolution (`kscreen-doctor`, with fallback 1920x1080).
+Wallpaper pipeline: `scheduler.rs` picks the next image (index-based queue + 50-entry history, shuffle-per-cycle for random) → `prefetch.rs` processes ahead of time → `cache.rs` stores processed WebP files keyed by a `DefaultHasher` hash of (path, screen size, mode, blur params) (`Cache::store` runs mtime-based LRU eviction inline, so call it from `spawn_blocking`) → `plasma.rs` applies via one D-Bus `evaluateScript` covering all monitors (a single entry means "every screen"), falling back to `plasma-apply-wallpaperimage`. `screen.rs` resolves per-monitor resolution (`kscreen-doctor --json`, with fallback 1920x1080).
 
 Online sources live in `src/provider/` (bing, unsplash, wallhaven, reddit) sharing a client and `FetchResult` channel from `provider/mod.rs`; downloads land in a local dir and are picked up by the directory watcher.
 
@@ -47,3 +47,7 @@ UI strings are TOML files (`crates/kabekami-common/i18n/ja.toml`), layered at ru
 - Shared dependency versions/features are centralized in root `[workspace.dependencies]`; add shared deps there so feature sets don't diverge between crates.
 - Deliberate design rationale is documented in Japanese comments (e.g. why startup uses sync I/O, why `scanned_dirs` is tracked separately from `config`); read them before "fixing" such code.
 - `packaging/aur/` holds the AUR PKGBUILD; `.coderabbit.yaml` configures review (Japanese, one auto-review per PR).
+
+## Watch list
+
+- **`kscreen-doctor` → `kscreenctl` rename (unconfirmed rumor, noted 2026-10-03).** A future Plasma release may rename the screen-query CLI. Before touching screen detection, check whether it has actually happened. The only place the binary is executed is `screen::detect_all` (`src/screen.rs`); if the rename lands, try the new name first and keep `kscreen-doctor` as a fallback. Also verify that the `--json` output schema (`outputs[].enabled/currentModeId/modes[].size`) is still the same, and update the name in README.md / README.ja.md, the AUR `optdepends` (`packaging/aur/kabekami-git/PKGBUILD` + `.SRCINFO`), and the comments in `screen_watcher.rs` / `main.rs`.

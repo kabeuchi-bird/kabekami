@@ -276,15 +276,23 @@ fn leak_list(v: Option<Vec<String>>, fallback: &'static [&'static str]) -> &'sta
 
 // ── 言語 ──────────────────────────────────────────────────────────────────────
 
-/// 対応言語。`registry()` へのインデックスとして振る舞う。
+/// 対応言語。`registry()` 内の登録エントリを指す。
 ///
-/// 言語がファイルから動的に増えるため enum ではなく不透明なインデックス型。
-/// 添字はプロセス内でのみ意味を持ち、設定ファイルには言語コード
-/// （`ui.language`）が保存されるので、実行ごとに順序が変わっても問題ない。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Lang(usize);
+/// 言語がファイルから動的に増えるため enum ではなく不透明な参照型。
+/// 設定ファイルには言語コード（`ui.language`）が保存される。
+#[derive(Clone, Copy)]
+pub struct Lang(&'static LangEntry);
 
-/// ログに出るのが `Lang(0)` ではなく言語コードになるようにする。
+/// 同じ登録エントリを指しているかで比較する。
+impl PartialEq for Lang {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl Eq for Lang {}
+
+/// ログに出るのが構造体の中身ではなく言語コードになるようにする。
 /// （`tracing::info!("ui language: {:?}", lang)` の可読性のため）
 impl std::fmt::Debug for Lang {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -295,7 +303,7 @@ impl std::fmt::Debug for Lang {
 impl Default for Lang {
     /// 英語。`registry()` の先頭は常に英語であることが保証されている。
     fn default() -> Self {
-        Lang(0)
+        Lang(&registry()[0])
     }
 }
 
@@ -303,20 +311,12 @@ impl Lang {
     /// 言語コード文字列（`"en"`, `"ja"` 等）から `Lang` を解析する。
     /// 未知の値は英語にフォールバックする。
     pub fn from_code(s: &str) -> Self {
-        Lang(resolve_code(registry(), s))
+        lookup_code(s).map_or_else(Lang::default, Lang)
     }
 
     /// 対応する言語コードを返す。
     pub fn code(self) -> &'static str {
-        self.entry().id
-    }
-
-    /// 対応する登録エントリ。範囲外なら英語（`registry()` の先頭）に倒す。
-    fn entry(self) -> &'static LangEntry {
-        // インデックスは registry() から得たものしか存在しないが、
-        // 念のため範囲外は英語に倒す。
-        let reg = registry();
-        reg.get(self.0).unwrap_or(&reg[0])
+        self.0.id
     }
 }
 
@@ -326,27 +326,19 @@ pub struct LangEntry {
     pub id: &'static str,
     /// GUI の言語選択ドロップダウンに表示する名前
     pub display_name: &'static str,
-    /// `false` のエントリは GUI に表示されない
-    pub gui_visible: bool,
     /// デーモン（トレイ・通知）用の文字列テーブル
     pub strings: &'static UiStrings,
     /// 設定 GUI 用の文字列テーブル
     pub config: &'static ConfigStrings,
 }
 
-/// 言語コードからレジストリ内の位置を引く。未知の値は英語（先頭）に倒す。
+/// 言語コードの照合規則。前後の空白を無視し、大文字小文字を区別しない。
 ///
 /// `registry()` ではなくスライスを受け取るのは、テストがプロセス共有の
 /// グローバル（＝ホスト上の言語ファイルに左右される）を経由せずに
 /// 解決ロジックを検証できるようにするため。
-fn resolve_code(reg: &[LangEntry], code: &str) -> usize {
-    reg.iter().position(|e| code_matches(e, code)).unwrap_or(0)
-}
-
-/// 言語コードの照合規則。前後の空白を無視し、大文字小文字を区別しない。
-/// `Lang::from_code` と `lookup_code` で同じ規則を使うため 1 箇所に置く。
-fn code_matches(entry: &LangEntry, code: &str) -> bool {
-    entry.id.eq_ignore_ascii_case(code.trim())
+fn find_code<'a>(reg: &'a [LangEntry], code: &str) -> Option<&'a LangEntry> {
+    reg.iter().find(|e| e.id.eq_ignore_ascii_case(code.trim()))
 }
 
 /// 言語コードから登録エントリを引く。`Lang::from_code` と同じ照合規則だが、
@@ -355,7 +347,7 @@ fn code_matches(entry: &LangEntry, code: &str) -> bool {
 /// `Lang::from_code` は未知のコードを英語として扱うため、設定画面で
 /// 「設定値が認識されているか」を区別するにはこちらを使う。
 pub fn lookup_code(code: &str) -> Option<&'static LangEntry> {
-    registry().iter().find(|e| code_matches(e, code))
+    find_code(registry(), code)
 }
 
 /// 登録済み言語の一覧。先頭は必ず英語。
@@ -364,17 +356,17 @@ pub fn lookup_code(code: &str) -> Option<&'static LangEntry> {
 /// キャッシュされた参照を返すだけなので、毎フレーム呼んでも問題ない。
 pub fn registry() -> &'static [LangEntry] {
     static REG: OnceLock<&'static [LangEntry]> = OnceLock::new();
-    REG.get_or_init(|| Box::leak(build_registry().into_boxed_slice()))
+    REG.get_or_init(|| Box::leak(build_registry_from(&search_dirs()).into_boxed_slice()))
 }
 
 /// `Lang` から対応する `UiStrings` 参照を返す（デーモン用）。
 pub fn strings(lang: Lang) -> &'static UiStrings {
-    lang.entry().strings
+    lang.0.strings
 }
 
 /// `Lang` から対応する `ConfigStrings` 参照を返す（設定 GUI 用）。
 pub fn config_strings(lang: Lang) -> &'static ConfigStrings {
-    lang.entry().config
+    lang.0.config
 }
 
 // ── 言語ファイルの読み込み ────────────────────────────────────────────────────
@@ -388,8 +380,6 @@ struct LangFile {
     #[serde(default)]
     display_name: Option<String>,
     #[serde(default)]
-    gui_visible: Option<bool>,
-    #[serde(default)]
     tray: RawUiStrings,
     #[serde(default)]
     config: RawConfigStrings,
@@ -400,9 +390,6 @@ impl LangFile {
     fn overlay(&mut self, other: Self) {
         if other.display_name.is_some() {
             self.display_name = other.display_name;
-        }
-        if other.gui_visible.is_some() {
-            self.gui_visible = other.gui_visible;
         }
         self.tray.overlay(other.tray);
         self.config.overlay(other.config);
@@ -425,15 +412,10 @@ fn search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// 既定の探索パスでレジストリを構築する。`registry()` から一度だけ呼ばれる。
-fn build_registry() -> Vec<LangEntry> {
-    build_registry_from(&search_dirs())
-}
-
-/// 探索パスを指定してレジストリを構築する（`build_registry` の本体）。
+/// 探索パスを指定してレジストリを構築する。
 ///
 /// `registry()` はプロセスに 1 つしか作れないため、優先順位の検証が
-/// できるようディレクトリを引数に取る形へ分離してある。
+/// できるようディレクトリを引数に取る。
 fn build_registry_from(dirs: &[PathBuf]) -> Vec<LangEntry> {
     // id → 内容。後から挿入したものが前のものを置き換える。
     let mut files: BTreeMap<String, LangFile> = BTreeMap::new();
@@ -455,10 +437,10 @@ fn build_registry_from(dirs: &[PathBuf]) -> Vec<LangEntry> {
     // 英語は常に先頭。ディスク上に en.toml があればその内容を上書き適用する。
     let mut en_file = files.remove("en").unwrap_or_default();
     en_file.display_name.get_or_insert_with(|| "English".to_string());
-    let mut entries = vec![make_entry("en", en_file, &EN, &EN_CONFIG)];
+    let mut entries = vec![make_entry("en", en_file)];
 
     for (id, file) in files {
-        entries.push(make_entry(&id, file, &EN, &EN_CONFIG));
+        entries.push(make_entry(&id, file));
     }
     entries
 }
@@ -488,40 +470,34 @@ fn load_dir(dir: &std::path::Path, out: &mut BTreeMap<String, LangFile>) {
 
 /// 読み込んだ言語ファイルを 1 つの登録エントリに変換する。
 ///
-/// 書かれていないキーは `base_ui` / `base_cfg` から埋める（部分翻訳を許すため）。
+/// 書かれていないキーは英語で埋める（部分翻訳を許すため）。
 /// `interval_labels` は件数が `tray::INTERVAL_PRESETS` と一致しないと
 /// メニュー描画で添字が溢れるため、ここで検証して英語に倒す。
-fn make_entry(
-    id: &str,
-    file: LangFile,
-    base_ui: &'static UiStrings,
-    base_cfg: &'static ConfigStrings,
-) -> LangEntry {
+fn make_entry(id: &str, file: LangFile) -> LangEntry {
     let id: &'static str = Box::leak(id.to_string().into_boxed_str());
-    let mut ui = file.tray.merge(base_ui);
+    let mut ui = file.tray.merge(&EN);
 
     // `interval_labels` はトレイの切り替え間隔メニューに 1:1 で対応し、
     // 選択された添字がそのまま `tray::INTERVAL_PRESETS` の添字として使われる。
     // 件数がずれた翻訳を受け入れると、余分な項目を選んだ瞬間に範囲外アクセスに
     // なる（少なすぎる場合はプリセットが黙って消える）。件数違いは翻訳ミスと
     // みなし、このキーだけ英語に戻す。
-    if ui.interval_labels.len() != base_ui.interval_labels.len() {
+    if ui.interval_labels.len() != EN.interval_labels.len() {
         tracing::warn!(
             "i18n: {}: interval_labels must have exactly {} entries (got {}), using English",
             id,
-            base_ui.interval_labels.len(),
+            EN.interval_labels.len(),
             ui.interval_labels.len()
         );
-        ui.interval_labels = base_ui.interval_labels;
+        ui.interval_labels = EN.interval_labels;
     }
 
     LangEntry {
         id,
         // display_name 未指定なら言語コードをそのまま表示名にする
         display_name: leak_str(file.display_name, id),
-        gui_visible: file.gui_visible.unwrap_or(true),
         strings: Box::leak(Box::new(ui)),
-        config: Box::leak(Box::new(file.config.merge(base_cfg))),
+        config: Box::leak(Box::new(file.config.merge(&EN_CONFIG))),
     }
 }
 
@@ -591,29 +567,13 @@ mod tests {
         assert_eq!(bundled_only()[0].id, "en");
         assert_eq!(bundled_only()[0].strings.quit, "Quit");
         // Lang::default() はレジストリの中身に依らず先頭を指す
-        assert_eq!(Lang::default(), Lang(0));
-    }
-
-    /// 全ての登録言語が言語ドロップダウンに出ること。
-    ///
-    /// en.toml が無い場合の英語エントリは `LangFile::default()` から作られる。
-    /// derive した `Default` だと `gui_visible` が `false` になり、英語だけが
-    /// 選択肢から消えるという不具合が実際に起きたのでテストで固定する。
-    #[test]
-    fn all_languages_are_gui_visible_by_default() {
-        for entry in bundled_only() {
-            assert!(
-                entry.gui_visible,
-                "{}: gui_visible should default to true",
-                entry.id
-            );
-        }
+        assert_eq!(Lang::default(), Lang(&registry()[0]));
     }
 
     #[test]
     fn from_code_resolves_and_falls_back() {
         let reg = bundled_only();
-        let code = |s: &str| reg[resolve_code(&reg, s)].id;
+        let code = |s: &str| find_code(&reg, s).map_or("en", |e| e.id);
         assert_eq!(code("en"), "en");
         assert_eq!(code("EN"), "en");
         assert_eq!(code(" ja "), "ja");
@@ -644,8 +604,8 @@ mod tests {
     #[test]
     fn lookup_code_has_no_match_for_unregistered_code() {
         let reg = bundled_only();
-        assert!(reg.iter().all(|e| !code_matches(e, "xx")));
-        assert_eq!(reg[resolve_code(&reg, "xx")].id, "en");
+        assert!(find_code(&reg, "xx").is_none());
+        assert_eq!(Lang::from_code("xx"), Lang::default());
     }
 
     #[test]
@@ -677,9 +637,8 @@ mod tests {
     #[test]
     fn display_name_defaults_to_id() {
         let f: LangFile = toml::from_str("[tray]\nquit = \"x\"").unwrap();
-        let e = make_entry("de", f, &EN, &EN_CONFIG);
+        let e = make_entry("de", f);
         assert_eq!(e.display_name, "de");
-        assert!(e.gui_visible, "gui_visible の既定は true");
     }
 
     /// 同梱分だけのレジストリ（ホスト上の言語ファイルを見ない）。
@@ -790,12 +749,12 @@ mod tests {
         assert!(reg.iter().any(|e| e.id == "ja"), "同梱の日本語は残る");
     }
 
-    /// `resolve_code` が各エントリを自分自身の位置に解決すること。
+    /// `find_code` が各エントリを自分自身に解決すること。
     #[test]
     fn lookup_by_code_returns_that_entry() {
         let reg = bundled_only();
-        for (i, entry) in reg.iter().enumerate() {
-            assert_eq!(resolve_code(&reg, entry.id), i, "{}", entry.id);
+        for entry in &reg {
+            assert!(std::ptr::eq(find_code(&reg, entry.id).unwrap(), entry), "{}", entry.id);
         }
     }
 

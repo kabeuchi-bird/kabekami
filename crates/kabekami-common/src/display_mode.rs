@@ -22,16 +22,14 @@ pub fn process(
         DisplayMode::Fill => fill(src, screen_w, screen_h),
         DisplayMode::Fit => fit(src, screen_w, screen_h),
         DisplayMode::Stretch => stretch(src, screen_w, screen_h),
-        DisplayMode::BlurPad => {
-            crate::blur_pad::generate_blur_pad(src, screen_w, screen_h, blur_sigma, bg_darken)
-        }
+        DisplayMode::BlurPad => blur_pad(src, screen_w, screen_h, blur_sigma, bg_darken),
         DisplayMode::Smart => {
             let src_ratio = src.width() as f32 / src.height() as f32;
             let scr_ratio = screen_w as f32 / screen_h as f32;
             if (src_ratio - scr_ratio).abs() <= SMART_THRESHOLD {
                 fill(src, screen_w, screen_h)
             } else {
-                crate::blur_pad::generate_blur_pad(
+                blur_pad(
                     src, screen_w, screen_h, blur_sigma, bg_darken,
                 )
             }
@@ -45,21 +43,67 @@ fn fill(src: &DynamicImage, screen_w: u32, screen_h: u32) -> RgbaImage {
 }
 
 fn fit(src: &DynamicImage, screen_w: u32, screen_h: u32) -> RgbaImage {
-    let resized = src
-        .resize(screen_w, screen_h, FilterType::Lanczos3)
-        .to_rgba8();
-    let (rw, rh) = resized.dimensions();
+    let canvas = RgbaImage::from_pixel(screen_w, screen_h, Rgba([0, 0, 0, 255]));
+    center_on(canvas, src)
+}
 
-    let mut canvas = RgbaImage::from_pixel(screen_w, screen_h, Rgba([0, 0, 0, 255]));
-    let offset_x = ((screen_w.saturating_sub(rw)) / 2) as i64;
-    let offset_y = ((screen_h.saturating_sub(rh)) / 2) as i64;
-    imageops::overlay(&mut canvas, &resized, offset_x, offset_y);
+/// `src` を `canvas` に収まる大きさへ縮小し、中央に重ねる（Fit と BlurPad の前景）。
+fn center_on(mut canvas: RgbaImage, src: &DynamicImage) -> RgbaImage {
+    let (w, h) = canvas.dimensions();
+    let fg = src.resize(w, h, FilterType::Lanczos3).to_rgba8();
+    let offset_x = (w.saturating_sub(fg.width()) / 2) as i64;
+    let offset_y = (h.saturating_sub(fg.height()) / 2) as i64;
+    imageops::overlay(&mut canvas, &fg, offset_x, offset_y);
     canvas
 }
 
 fn stretch(src: &DynamicImage, screen_w: u32, screen_h: u32) -> RgbaImage {
     src.resize_exact(screen_w, screen_h, FilterType::Lanczos3)
         .to_rgba8()
+}
+
+// ── BlurPad ────────────────────────────────────────────────────────────
+
+const DOWNSCALE: u32 = 4;
+
+/// BlurPad 画像を生成する。
+fn blur_pad(
+    src: &DynamicImage,
+    screen_w: u32,
+    screen_h: u32,
+    blur_sigma: f32,
+    bg_darken: f32,
+) -> RgbaImage {
+    assert!(screen_w > 0 && screen_h > 0, "invalid screen dimensions");
+
+    let small_w = (screen_w / DOWNSCALE).max(1);
+    let small_h = (screen_h / DOWNSCALE).max(1);
+
+    let bg_small_rgba: RgbaImage = src
+        .resize_to_fill(small_w, small_h, FilterType::Triangle)
+        .to_rgba8();
+
+    let scaled_sigma = (blur_sigma / DOWNSCALE as f32).max(0.1);
+    let mut bg_blurred: RgbaImage = imageops::blur(&bg_small_rgba, scaled_sigma);
+
+    if bg_darken > 0.0 {
+        darken(&mut bg_blurred, bg_darken);
+    }
+
+    let canvas: RgbaImage = DynamicImage::ImageRgba8(bg_blurred)
+        .resize_exact(screen_w, screen_h, FilterType::Triangle)
+        .to_rgba8();
+
+    center_on(canvas, src)
+}
+
+fn darken(img: &mut RgbaImage, amount: f32) {
+    let factor = 1.0 - amount.clamp(0.0, 1.0);
+    for pixel in img.pixels_mut() {
+        for c in &mut pixel.0[..3] {
+            *c = (*c as f32 * factor) as u8;
+        }
+    }
 }
 
 /// 画像を読み込み、EXIF Orientation を適用して返す。
@@ -141,7 +185,7 @@ mod tests {
         // 寸法はどのモードでも同じになるため、出力そのものを突き合わせる
         assert!(out == fill(&src, 384, 216), "比が近いときは fill と一致すべき");
         assert!(
-            out != crate::blur_pad::generate_blur_pad(&src, 384, 216, 25.0, 0.1),
+            out != blur_pad(&src, 384, 216, 25.0, 0.1),
             "BlurPad と一致してしまうと、この判定を検証できていない"
         );
     }
@@ -152,7 +196,7 @@ mod tests {
         let src = two_tone(200, 200);
         let out = process(&src, 384, 216, DisplayMode::Smart, 25.0, 0.1);
         assert!(
-            out == crate::blur_pad::generate_blur_pad(&src, 384, 216, 25.0, 0.1),
+            out == blur_pad(&src, 384, 216, 25.0, 0.1),
             "比が離れているときは BlurPad と一致すべき"
         );
         assert!(out != fill(&src, 384, 216), "fill と一致してしまうと判定を検証できていない");
@@ -182,5 +226,27 @@ mod tests {
                 mode
             );
         }
+    }
+
+    /// 元画像と画面の縦横の組み合わせによらず、出力は画面サイズちょうど。
+    #[test]
+    fn blur_pad_output_matches_screen() {
+        for ((sw, sh), (w, h)) in [
+            ((800, 600), (1920, 1080)),
+            ((600, 1200), (1920, 1080)),
+            ((1200, 600), (1080, 1920)),
+        ] {
+            let out = blur_pad(&solid(sw, sh), w, h, 10.0, 0.1);
+            assert_eq!(out.dimensions(), (w, h), "src {sw}x{sh}");
+        }
+    }
+
+    #[test]
+    fn darken_reduces_rgb_values() {
+        let mut img = RgbaImage::from_pixel(2, 2, Rgba([100, 100, 100, 255]));
+        darken(&mut img, 0.5);
+        let px = img.get_pixel(0, 0);
+        assert_eq!(px[0], 50);
+        assert_eq!(px[3], 255, "alpha must be preserved");
     }
 }

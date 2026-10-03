@@ -17,7 +17,7 @@ KDE Plasma 向け壁紙ローテーションデーモン。Rust 製。
 |---|---|
 | OS | Linux |
 | DE | KDE Plasma 5.7 以降 または Plasma 6 |
-| Rust | 1.75 以降（edition 2021） |
+| Rust | 1.88 以降（edition 2021。ロック済みの `image` クレートの要件） |
 | 外部コマンド | `plasma-apply-wallpaperimage`（`plasma-workspace` 同梱） |
 | D-Bus | セッションバスへのアクセス（トレイ表示に必要） |
 | `kscreen-doctor` | 任意 — マルチモニター自動検出に必要（`kscreen` パッケージ） |
@@ -220,7 +220,7 @@ EXIF Orientation タグは自動的に読み取り・適用されるため、縦
 
 **マルチモニターで全画面に同じ画像が表示される** — `kscreen` をインストールしてください。
 
-**壁紙がぼやける／ネイティブ解像度で表示されない** — kabekami はまず `kscreen-doctor --json`（Plasma 6 で安定）を試し、失敗時は従来のテキスト出力を解析します。両方失敗した場合は 1920×1080 にフォールバックし、その後の壁紙更新を契機に再検出します（最低 60 秒間隔でスロットル）。起動時に KScreen デーモンが間に合わなかった場合でも、次回の壁紙更新で正しい解像度に切り替わります。原因切り分けには `RUST_LOG=kabekami=debug kabekami` を実行して `kscreen-doctor output` 行を確認してください。即時の回避策は `KABEKAMI_SCREEN=2560x1440`（実際の解像度）の指定です。
+**壁紙がぼやける／ネイティブ解像度で表示されない** — kabekami は `kscreen-doctor --json` で画面を検出します。失敗した場合は 1920×1080 にフォールバックし、その後の壁紙更新を契機に再検出します（最低 60 秒間隔でスロットル）。起動時に KScreen デーモンが間に合わなかった場合でも、次回の壁紙更新で正しい解像度に切り替わります。原因切り分けには `RUST_LOG=kabekami=debug kabekami` を実行して `monitor detected` 行を確認してください。即時の回避策は `KABEKAMI_SCREEN=2560x1440`（実際の解像度）の指定です。
 
 **オンラインソースが 0 枚しかダウンロードされない** — API キー・ネットワーク・`RUST_LOG=kabekami=debug` の出力を確認してください。
 
