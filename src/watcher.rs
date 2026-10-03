@@ -64,23 +64,6 @@ impl DirWatcher {
 /// なるが、受信端は常に返す。その場合は送信端が落ちた「閉じたチャンネル」なので、
 /// `Some(ev) = rx.recv()` パターンが一致せず `select!` の該当 arm が無害に
 /// 無効化される。呼び出し側は縮退時の受信端を自分で用意しなくてよい。
-/// 監視なしの縮退状態。送信端を落とした受信端を返す。
-///
-/// 送信端が無いので `Some(ev) = rx.recv()` は一致せず、`select!` の該当 arm が
-/// 無害に無効化される。この作り方を 1 箇所に置き、呼び出し側で組み立てさせない。
-pub fn degraded() -> Receiver<WatchEvent> {
-    let (tx, rx) = mpsc::channel::<WatchEvent>(1);
-    drop(tx);
-    rx
-}
-
-/// `degraded()` の設定ファイル監視版。
-pub fn degraded_config() -> UnboundedReceiver<()> {
-    let (tx, rx) = mpsc::unbounded_channel::<()>();
-    drop(tx);
-    rx
-}
-
 pub fn spawn(
     dirs: &[PathBuf],
     recursive: bool,
@@ -166,7 +149,7 @@ pub fn spawn(
 ///
 /// イベントは内容なし `()` のチャンネルで通知する。バーストはメインループ側の
 /// 100ms スロットルおよびリロード処理の冪等性で吸収する。
-pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<DirWatcher>) {
+pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<notify::RecommendedWatcher>) {
     // `spawn` と同じく、失敗時も閉じた受信端を返す。
     let (tx, rx) = mpsc::unbounded_channel::<()>();
 
@@ -216,7 +199,6 @@ pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<DirWat
         "watching {} for config changes",
         config_path.display()
     );
-    // 対象は 1 ディレクトリだけなので部分失敗はない
-    (rx, Some(DirWatcher { _inner: watcher, complete: true }))
+    (rx, Some(watcher))
 }
 

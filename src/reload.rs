@@ -6,7 +6,6 @@
 //! `ReloadCtx` にまとめて受け取る。
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -213,15 +212,6 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
             if new_lang != *lang {
                 *lang = new_lang;
                 *notifier = Notifier::new(*lang).await;
-            }
-
-            if new_cfg.ui.warn_notify != config.ui.warn_notify {
-                crate::WARN_NOTIFY_ENABLED.store(new_cfg.ui.warn_notify, Ordering::Relaxed);
-                tracing::info!(
-                    "warn_notify toggled: {} → {}",
-                    config.ui.warn_notify,
-                    new_cfg.ui.warn_notify
-                );
             }
 
             *config = new_cfg;

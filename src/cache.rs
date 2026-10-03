@@ -1,7 +1,7 @@
 //! 加工済み画像のキャッシュ管理。
 //!
 //! ## キャッシュキー
-//! FNV-1a(元画像の絶対パス | 画面幅 | 画面高 | DisplayMode | blur_sigma | bg_darken)
+//! `DefaultHasher`(元画像の絶対パス | 画面幅 | 画面高 | DisplayMode | blur_sigma | bg_darken)
 //! → 16 進数文字列 + `.webp` がキャッシュファイル名となる。
 //!
 //! ## LRU 退避
@@ -139,24 +139,17 @@ impl Cache {
         self.directory.join(format!("{hash}.webp"))
     }
 
-    /// キャッシュキーのハッシュ値（FNV-1a 64 bit → 16 進 16 文字）を計算する。
+    /// キャッシュキーのハッシュ値（16 進 16 文字）を計算する。
+    ///
+    /// `DefaultHasher` のアルゴリズムは Rust のリリース間で変わりうるが、
+    /// 変わってもキャッシュが作り直されるだけなので問題ない。
     fn compute_hash(key: &CacheKey) -> String {
-        let mut h = Fnv1a::new();
-        h.write(key.src.to_string_lossy().as_bytes());
-        h.write(b"\x00");
-        h.write(&key.screen_w.to_le_bytes());
-        h.write(&key.screen_h.to_le_bytes());
-        let mode_tag: u8 = match key.mode {
-            DisplayMode::Fill => 0,
-            DisplayMode::Fit => 1,
-            DisplayMode::Stretch => 2,
-            DisplayMode::BlurPad => 3,
-            DisplayMode::Smart => 4,
-        };
-        h.write(&[mode_tag]);
-        // f32 は bit-exact 比較のため整数化して保存（±0 や NaN の問題を回避）
-        h.write(&key.blur_sigma.to_bits().to_le_bytes());
-        h.write(&key.bg_darken.to_bits().to_le_bytes());
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        key.src.hash(&mut h);
+        (key.screen_w, key.screen_h, key.mode).hash(&mut h);
+        // f32 は Hash を持たないのでビット列で（±0 や NaN も bit-exact に区別）
+        (key.blur_sigma.to_bits(), key.bg_darken.to_bits()).hash(&mut h);
         format!("{:016x}", h.finish())
     }
 }
@@ -194,26 +187,6 @@ fn cache_entries_by_mtime(dir: &Path) -> Result<Vec<(PathBuf, u64, SystemTime)>>
     }
     entries.sort_by_key(|(_, _, t)| *t);
     Ok(entries)
-}
-
-/// FNV-1a 64-bit ハッシュ。sha2+hex の代替として stdlib のみで実装。
-struct Fnv1a(u64);
-
-impl Fnv1a {
-    fn new() -> Self {
-        Self(0xcbf29ce484222325)
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.0 ^= b as u64;
-            self.0 = self.0.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
-    }
 }
 
 #[cfg(test)]

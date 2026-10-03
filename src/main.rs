@@ -20,7 +20,6 @@ mod tray;
 mod watcher;
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,11 +44,11 @@ async fn main() -> Result<()> {
         return send_to_daemon(method).await;
     }
 
-    // Config を先にロード（tracing の warn_notify 初期値を取得するため）
     let mut config = Config::load().context("failed to load config")?;
 
-    // tracing subscriber を初期化（warn_notify は実行時に動的切り替え可能）
-    let mut warn_rx = init_tracing(config.ui.warn_notify);
+    // tracing subscriber を初期化。WARN は常に warn_rx へ流れ、通知するかは
+    // ループ側で `config.ui.warn_notify` を見て決める（再起動なしで ON/OFF できる）
+    let mut warn_rx = init_tracing();
 
     tracing::info!(?config, "loaded config");
 
@@ -156,13 +155,13 @@ async fn main() -> Result<()> {
     // KDE グローバルショートカットを登録・監視する
     shortcuts::spawn_shortcut_watcher(cmd_tx).await;
 
-    // 設定ファイル監視を起動。パスが取れない場合も含め、失敗時は
-    // `watcher::spawn_config` 側が閉じた受信端を返す。
+    // 設定ファイル監視を起動。失敗時は閉じた受信端になる。
     let (mut config_change_rx, _config_watcher_handle) = match Config::config_path() {
         Ok(path) => watcher::spawn_config(&path),
         Err(e) => {
             tracing::warn!("config path unavailable, not watching config: {}", e);
-            (watcher::degraded_config(), None)
+            // 送信端を即 drop した閉じた受信端。select! の該当 arm は無効化される
+            (tokio::sync::mpsc::unbounded_channel().1, None)
         }
     };
 
@@ -253,7 +252,11 @@ async fn main() -> Result<()> {
                     update_tray_count(&tray_handle, &scheduler).await;
                 }
                 None => {
-                    clear_current_wallpaper(&tray_handle, &mut state_writer, &scheduler).await;
+                    // 最後の 1 枚が無くなった。トレイの壁紙名と state も消さないと、
+                    // 再起動後に画面に出ていない画像を指し続ける（`remove_image` が
+                    // `current` を落としているので名前は空になる）
+                    sync_tray_current(&tray_handle, &scheduler).await;
+                    state_writer.persist(scheduler.is_paused(), None).await;
                 }
             }
             ticker = make_ticker(config.rotation.interval_secs);
@@ -518,7 +521,7 @@ async fn main() -> Result<()> {
             }
 
             msg = warn_rx.recv() => {
-                if let Some(msg) = msg {
+                if let Some(msg) = msg.filter(|_| config.ui.warn_notify) {
                     notifier.warn(&msg).await;
                 }
             }
@@ -570,21 +573,17 @@ async fn spawn_dir_watcher_offloaded(
         Err(e) => {
             // 監視の起動に失敗したのと同じ縮退状態にする。
             tracing::warn!("watcher task panicked, running without file watcher: {}", e);
-            (watcher::degraded(), None)
+            (tokio::sync::mpsc::channel(1).1, None)
         }
     }
 }
 
-/// tracing subscriber を初期化する。
-///
-/// `WarnNotifyLayer` は常時インストールし、実行時の有効・無効は
-/// `WARN_NOTIFY_ENABLED` フラグで切り替える（`config.toml` 編集で動的反映）。
-fn init_tracing(warn_notify: bool) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+/// tracing subscriber を初期化する。`WarnNotifyLayer` は常時インストールする。
+fn init_tracing() -> tokio::sync::mpsc::UnboundedReceiver<String> {
     use tracing_subscriber::{fmt, EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("kabekami=info,warn"));
 
-    WARN_NOTIFY_ENABLED.store(warn_notify, Ordering::Relaxed);
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tracing_subscriber::registry()
         .with(filter)
@@ -679,11 +678,6 @@ struct WarnNotifyLayer {
     tx: tokio::sync::mpsc::UnboundedSender<String>,
 }
 
-/// `warn_notify` の現在状態。`config.toml` 編集で動的に切り替えられる。
-/// 起動時に一度だけ `WarnNotifyLayer` をインストールし、`on_event` で
-/// このフラグを参照することで再起動なしの ON/OFF を実現する。
-static WARN_NOTIFY_ENABLED: AtomicBool = AtomicBool::new(false);
-
 struct MessageVisitor(String);
 
 /// `message` は `format_args!` として `record_debug` 経由で届く。
@@ -701,9 +695,6 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnNotifyLayer {
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        if !WARN_NOTIFY_ENABLED.load(Ordering::Relaxed) {
-            return;
-        }
         if *event.metadata().level() == tracing::Level::WARN
             && event.metadata().target().starts_with("kabekami")
         {
@@ -729,7 +720,7 @@ fn resolve_lang(config: &Config) -> i18n::Lang {
 /// モニター一覧を解決する。優先順位:
 ///
 /// 1. `KABEKAMI_SCREEN=WxH` 環境変数（単一モニターとして扱う）
-/// 2. `kscreen-doctor --outputs` による自動検出（最大4回、指数バックオフ）
+/// 2. `kscreen-doctor --json` による自動検出（最大4回、指数バックオフ）
 /// 3. フォールバック（1920×1080 の単一モニター）
 async fn resolve_screens() -> Vec<screen::Monitor> {
     // 1. 環境変数による手動指定
@@ -746,8 +737,7 @@ async fn resolve_screens() -> Vec<screen::Monitor> {
     }
 
     // 2. kscreen-doctor による自動検出（起動競合に備えてリトライ）
-    let mut delay_secs = 0u64;
-    for attempt in 1..=4u32 {
+    for (attempt, delay_secs) in (1..).zip([0u64, 1, 2, 4]) {
         if delay_secs > 0 {
             tracing::info!(
                 "screen detection: retrying in {}s (attempt {}/4)...",
@@ -762,7 +752,6 @@ async fn resolve_screens() -> Vec<screen::Monitor> {
             }
             return monitors;
         }
-        if delay_secs == 0 { delay_secs = 1; } else { delay_secs *= 2; }
     }
 
     tracing::warn!(
@@ -799,17 +788,14 @@ fn primary_size(screens: &[screen::Monitor]) -> (u32, u32) {
 /// `screens` に現れる解像度を重複なしで列挙する（元の並び順を保つ）。
 ///
 /// `CacheKey` は解像度を含むので同解像度のモニターは同じキー。加工も先読みも
-/// 解像度の数だけで足りる。
+/// 解像度の数だけで足りる。`screens` は空にならない（`resolve_screens` は
+/// フォールバックを返し、screen watcher は空の検出結果を捨てる）。
 fn distinct_sizes(screens: &[screen::Monitor]) -> Vec<(u32, u32)> {
     let mut sizes: Vec<(u32, u32)> = Vec::with_capacity(screens.len());
     for m in screens {
         if !sizes.contains(&(m.width, m.height)) {
             sizes.push((m.width, m.height));
         }
-    }
-    if sizes.is_empty() {
-        // `primary_size` と同じフォールバック（実際には空スライスは来ない）
-        sizes.push(primary_size(screens));
     }
     sizes
 }
@@ -959,21 +945,6 @@ fn apply_watch_event(
             scheduler.remove_image(&path);
         }
     }
-}
-
-/// 最後の 1 枚が無くなったときのトレイと state の後始末。
-///
-/// 枚数だけ更新すると、トレイの壁紙名が消えた画像のまま残り、state も
-/// その画像を「現在の壁紙」として指し続ける。再起動後にトレイやゴミ箱操作が
-/// 画面に出ていない画像を指すことになる。
-async fn clear_current_wallpaper(
-    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
-    state_writer: &mut state::StateWriter,
-    scheduler: &Scheduler,
-) {
-    // `remove_image` が `current` を落としているので名前は空になる
-    sync_tray_current(tray_handle, scheduler).await;
-    state_writer.persist(scheduler.is_paused(), None).await;
 }
 
 /// トレイの壁紙名と枚数を 1 回の `update` で更新する（分けると往復が 2 回になる）。
@@ -1149,16 +1120,6 @@ mod tests {
             distinct_sizes(&screens),
             vec![(3840, 2160), (1920, 1080)],
             "重複を除き、最初に現れた順を保つ"
-        );
-    }
-
-    /// `primary_size` と同じフォールバックに揃える。空でも 0 件を返すと
-    /// 先読みも加工も走らなくなる。
-    #[test]
-    fn distinct_sizes_falls_back_when_no_screens() {
-        assert_eq!(
-            distinct_sizes(&[]),
-            vec![(FALLBACK_SCREEN_W, FALLBACK_SCREEN_H)]
         );
     }
 

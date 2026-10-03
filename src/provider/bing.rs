@@ -73,11 +73,6 @@ pub async fn fetch(
         let filename = format!("bing_{}.jpg", safe_date);
         let dest = dir.join(&filename);
 
-        if dest.exists() {
-            available.push(dest);
-            continue;
-        }
-
         // `urlbase + res_suffix` を `base` 相対で resolve し、ホストが Bing 以外なら拒否する。
         // 単純な文字列連結だと `urlbase = "//attacker/foo"` で別ホストへ誘導されうるため。
         let relative = format!("{}{}", img.urlbase, res_suffix);

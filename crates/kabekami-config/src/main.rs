@@ -202,15 +202,10 @@ fn render_preview(req: &PreviewRequest) -> anyhow::Result<egui::ColorImage> {
         req.bg_darken,
     );
 
-    let pixels: Vec<egui::Color32> = rgba
-        .pixels()
-        .map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
-        .collect();
-
-    Ok(egui::ColorImage {
-        size: [PREV_W as usize, PREV_H as usize],
-        pixels,
-    })
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        [PREV_W as usize, PREV_H as usize],
+        rgba.as_raw(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
