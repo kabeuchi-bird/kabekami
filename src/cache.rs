@@ -154,13 +154,16 @@ impl Cache {
     }
 }
 
-/// 既存ファイルの mtime を現在時刻にする（LRU の「使用」扱い）。ファイルが無ければ false。
+/// 既存ファイルの mtime を現在時刻にする（LRU の「使用」扱い）。読めなければ false。
+///
+/// mtime の更新失敗（読み取り専用ファイル・FS など）はヒットのまま扱う。
+/// miss にすると同じパスへの再保存も失敗し、壁紙の適用自体が止まる。
 fn touch(path: &Path) -> bool {
-    std::fs::File::options()
-        .write(true)
-        .open(path)
-        .and_then(|f| f.set_modified(SystemTime::now()))
-        .is_ok()
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let _ = file.set_modified(SystemTime::now());
+    true
 }
 
 /// kabekami がこれまでに書き出したことがある拡張子をすべて列挙する。
@@ -288,5 +291,19 @@ mod tests {
         cache.evict_if_needed().unwrap();
 
         assert!(path.exists(), "a cache hit must refresh mtime");
+    }
+
+    /// 書き込み用に開けないファイルでもヒット扱いにする。
+    #[test]
+    fn read_only_file_is_still_a_hit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 0);
+        let k = key("/tmp/ro.jpg");
+        let path = cache.path_for(&k);
+        std::fs::write(&path, b"x").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        assert_eq!(cache.get(&k), Some(path));
     }
 }
