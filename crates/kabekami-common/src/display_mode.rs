@@ -98,11 +98,11 @@ fn blur_pad(
 }
 
 fn darken(img: &mut RgbaImage, amount: f32) {
-    let factor = (1.0 - amount.clamp(0.0, 1.0)).max(0.0);
+    let factor = 1.0 - amount.clamp(0.0, 1.0);
     for pixel in img.pixels_mut() {
-        pixel[0] = (pixel[0] as f32 * factor) as u8;
-        pixel[1] = (pixel[1] as f32 * factor) as u8;
-        pixel[2] = (pixel[2] as f32 * factor) as u8;
+        for c in &mut pixel.0[..3] {
+            *c = (*c as f32 * factor) as u8;
+        }
     }
 }
 
@@ -228,25 +228,17 @@ mod tests {
         }
     }
 
+    /// 元画像と画面の縦横の組み合わせによらず、出力は画面サイズちょうど。
     #[test]
-    fn output_dimensions_match_screen() {
-        let src = solid(800, 600);
-        let out = blur_pad(&src, 1920, 1080, 10.0, 0.0);
-        assert_eq!(out.dimensions(), (1920, 1080));
-    }
-
-    #[test]
-    fn handles_portrait_source_on_landscape_screen() {
-        let src = solid(600, 1200);
-        let out = blur_pad(&src, 1920, 1080, 10.0, 0.1);
-        assert_eq!(out.dimensions(), (1920, 1080));
-    }
-
-    #[test]
-    fn handles_landscape_source_on_portrait_screen() {
-        let src = solid(1200, 600);
-        let out = blur_pad(&src, 1080, 1920, 10.0, 0.0);
-        assert_eq!(out.dimensions(), (1080, 1920));
+    fn blur_pad_output_matches_screen() {
+        for ((sw, sh), (w, h)) in [
+            ((800, 600), (1920, 1080)),
+            ((600, 1200), (1920, 1080)),
+            ((1200, 600), (1080, 1920)),
+        ] {
+            let out = blur_pad(&solid(sw, sh), w, h, 10.0, 0.1);
+            assert_eq!(out.dimensions(), (w, h), "src {sw}x{sh}");
+        }
     }
 
     #[test]

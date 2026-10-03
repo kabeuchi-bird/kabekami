@@ -249,7 +249,7 @@ async fn main() -> Result<()> {
             match scheduler.next() {
                 Some(next) => {
                     apply_and_notify(apply_ctx!(), &next, $apply_err).await;
-                    update_tray_count(&tray_handle, &scheduler).await;
+                    sync_tray_current(&tray_handle, &scheduler).await;
                 }
                 None => {
                     // 最後の 1 枚が無くなった。トレイの壁紙名と state も消さないと、
@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
                         provider,
                         added
                     );
-                    update_tray_count(&tray_handle, &scheduler).await;
+                    sync_tray_current(&tray_handle, &scheduler).await;
                     if added > 0 && config.ui.notify_fetch {
                         let strings = i18n::strings(lang);
                         let body = strings.notify_fetch_body
@@ -486,7 +486,7 @@ async fn main() -> Result<()> {
                 }
                 // 枚数が動いていなければ往復も要らない
                 if scheduler.image_count() != count_before {
-                    update_tray_count(&tray_handle, &scheduler).await;
+                    sync_tray_current(&tray_handle, &scheduler).await;
                 }
             }
 
@@ -959,15 +959,6 @@ async fn sync_tray_current(
         t.image_count = count;
     })
     .await;
-}
-
-/// トレイの画像枚数表示を更新する。
-async fn update_tray_count(
-    tray_handle: &Option<ksni::Handle<tray::KabekamiTray>>,
-    scheduler: &Scheduler,
-) {
-    let count = scheduler.image_count();
-    update_tray(tray_handle, move |t| t.image_count = count).await;
 }
 
 /// トレイに表示する壁紙名（拡張子付きファイル名）。

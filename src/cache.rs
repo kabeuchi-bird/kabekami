@@ -110,9 +110,7 @@ impl Cache {
         let entries = cache_entries_by_mtime(&self.directory)?;
         let total: u64 = entries.iter().map(|(_, size, _)| size).sum();
 
-        let cutoff = SystemTime::now()
-            .checked_sub(EVICT_GRACE)
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+        let cutoff = SystemTime::now() - EVICT_GRACE;
 
         let mut remaining = total;
         for (path, size, mtime) in &entries {
