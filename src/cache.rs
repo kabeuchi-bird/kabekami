@@ -228,10 +228,13 @@ fn mb_to_bytes(mb: u64) -> u64 {
 ///
 /// 一時ファイル名の拡張子を `.webp` にしておくのは、書いている途中でプロセスが
 /// 落ちて残った場合に LRU 退避で回収されるようにするため（`path_for` が返す
-/// 名前とは衝突しないので `get` にはヒットしない）。プロセス内では single-flight で
-/// 同じパスの書き手は 1 人なので、区別は pid だけでよい。
+/// 名前とは衝突しないので `get` にはヒットしない）。連番も付けるのは、設定で
+/// キャッシュの置き場所を往復させると受付の違う新旧の `Cache` が同じパスに
+/// 同時に書きうるため（single-flight が効くのは 1 つの `Cache` の中だけ）。
 fn write_atomically(path: &Path, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
-    let tmp = path.with_extension(format!("{}.tmp.webp", std::process::id()));
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}-{n}.tmp.webp", std::process::id()));
     let result = write(&tmp).and_then(|()| {
         std::fs::rename(&tmp, path)
             .with_context(|| format!("failed to move cache file into place: {}", path.display()))
@@ -472,6 +475,27 @@ mod tests {
         assert!(!target.exists(), "最終パスへ直接書いている（リンク先に書けた）");
         let meta = std::fs::symlink_metadata(&final_path).unwrap();
         assert!(meta.is_file(), "rename で通常ファイルに置き換わるべき");
+    }
+
+
+    /// 同じ最終パスへの書き込みが重なっても一時ファイルは別々になる
+    /// （置き場所の往復で新旧の `Cache` が同じパスに同時に書く場合に備える）。
+    #[test]
+    fn concurrent_writes_to_the_same_path_use_distinct_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("x.webp");
+
+        write_atomically(&final_path, |outer| {
+            std::fs::write(outer, b"outer")?;
+            write_atomically(&final_path, |inner| {
+                assert_ne!(outer, inner, "一時ファイルが衝突している");
+                std::fs::write(inner, b"inner")?;
+                Ok(())
+            })
+        })
+        .unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"outer", "後から rename した方が残る");
     }
 
 }
