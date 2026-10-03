@@ -200,10 +200,16 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                 prefetcher.abort();
             }
             if cache_changed {
-                *cache = Arc::new(Cache::new(
-                    new_cfg.cache.directory.clone(),
-                    new_cfg.cache.max_size_mb,
-                ));
+                if new_cfg.cache.directory == config.cache.directory {
+                    // 容量だけの変更。作り直すと加工受付が空の別物になり、走行中の
+                    // 加工と同じキーを新旧の `Cache` が別々に加工してしまう。
+                    cache.set_max_size_mb(new_cfg.cache.max_size_mb);
+                } else {
+                    *cache = Arc::new(Cache::new(
+                        new_cfg.cache.directory.clone(),
+                        new_cfg.cache.max_size_mb,
+                    ));
+                }
             }
 
             *ticker = make_ticker(new_cfg.rotation.interval_secs);

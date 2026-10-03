@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
@@ -30,7 +31,11 @@ pub struct Cache {
     /// キャッシュディレクトリ（`~/.cache/kabekami/`）
     pub directory: PathBuf,
     /// LRU 退避の容量上限（バイト）。0 なら無制限。
-    max_size_bytes: u64,
+    ///
+    /// 設定リロードで容量だけが変わったときは `Cache` を作り直さずにここだけ
+    /// 書き換える。作り直すと加工受付（`inflight`）が空の別物になり、走行中の
+    /// 加工と同じキーを新旧の `Cache` が別々に加工してしまう。
+    max_size_bytes: AtomicU64,
     /// 加工中の出力パスと、その完了を知らせる門。
     ///
     /// 前景の適用と先読みは同じ `Arc<Cache>` を共有するので、ここに置けば
@@ -99,9 +104,15 @@ impl Cache {
     pub fn new(directory: PathBuf, max_size_mb: u64) -> Self {
         Self {
             directory,
-            max_size_bytes: max_size_mb.saturating_mul(1024 * 1024),
+            max_size_bytes: AtomicU64::new(mb_to_bytes(max_size_mb)),
             inflight: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 容量上限だけを差し替える（ディレクトリが同じ設定リロード用）。
+    pub fn set_max_size_mb(&self, max_size_mb: u64) {
+        self.max_size_bytes
+            .store(mb_to_bytes(max_size_mb), Ordering::Relaxed);
     }
 
     /// 出力パスごとの加工権を取る。すでに誰かが加工中なら待つ側になる。
@@ -150,9 +161,14 @@ impl Cache {
             return Ok(path);
         }
 
-        // WebP 可逆圧縮（アルファ保持・品質劣化なし）。clone 不要で直接書き出す。
-        img.save_with_format(&path, image::ImageFormat::WebP)
-            .with_context(|| format!("WebP encode failed: {}", path.display()))?;
+        // WebP 可逆圧縮（アルファ保持・品質劣化なし）。最終パスへ直接書くと、
+        // エンコード中に別の要求の `get` が書きかけのファイルをヒットとして
+        // 受け取ってしまう（`get` は開けるかしか見ない）。一時ファイルに書いて
+        // から rename し、最終パスには完成したファイルしか現れないようにする。
+        write_atomically(&path, |tmp| {
+            img.save_with_format(tmp, image::ImageFormat::WebP)
+                .with_context(|| format!("WebP encode failed: {}", path.display()))
+        })?;
 
         tracing::debug!("cached: {}", path.display());
         if let Err(e) = self.evict_if_needed() {
@@ -163,7 +179,8 @@ impl Cache {
 
     /// `max_size_bytes` を超えていたら古いキャッシュファイルを LRU 順に削除する。
     fn evict_if_needed(&self) -> Result<()> {
-        if self.max_size_bytes == 0 {
+        let max_size_bytes = self.max_size_bytes.load(Ordering::Relaxed);
+        if max_size_bytes == 0 {
             return Ok(());
         }
         let entries = cache_entries_by_mtime(&self.directory)?;
@@ -174,7 +191,7 @@ impl Cache {
         let mut remaining = total;
         for (path, size, mtime) in &entries {
             // mtime 昇順なので、猶予内のファイルに達したら以降もすべて猶予内
-            if remaining <= self.max_size_bytes || *mtime > cutoff {
+            if remaining <= max_size_bytes || *mtime > cutoff {
                 break;
             }
             match std::fs::remove_file(path) {
@@ -209,6 +226,34 @@ impl Cache {
         (key.blur_sigma.to_bits(), key.bg_darken.to_bits()).hash(&mut h);
         format!("{:016x}", h.finish())
     }
+}
+
+fn mb_to_bytes(mb: u64) -> u64 {
+    mb.saturating_mul(1024 * 1024)
+}
+
+/// `write` に同じディレクトリの一時パスを渡して書かせ、成功したら `path` へ
+/// rename する。同一 FS 内の rename は置き換えが一度に起きるので、`path` には
+/// 完成したファイルしか現れない。失敗時は一時ファイルを消す。
+///
+/// 書いている途中でプロセスが落ちた場合は一時ファイルが残るが、最終パスに
+/// 書きかけが残って以後ずっとヒットし続けるよりはよい。
+fn write_atomically(path: &Path, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!(
+        ".{name}.{}-{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
+    ));
+    let result = write(&tmp).and_then(|()| {
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("failed to move cache file into place: {}", path.display()))
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// 既存ファイルの mtime を現在時刻にする（LRU の「使用」扱い）。読めなければ false。
@@ -363,4 +408,64 @@ mod tests {
 
         assert_eq!(cache.get(&k), Some(path));
     }
+
+    /// 書いている最中の最終パスは存在してはいけない。存在すると、別の要求の
+    /// `get` が書きかけのファイルをヒットとして受け取る（`get` は開けるかしか見ない）。
+    #[test]
+    fn store_never_exposes_a_partial_file_at_the_final_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 0);
+        let k = key("/tmp/foo.jpg");
+        let final_path = cache.path_for(&k);
+
+        write_atomically(&final_path, |tmp| {
+            std::fs::write(tmp, b"half")?;
+            assert!(!final_path.exists(), "書き込み中に最終パスが見えている");
+            assert!(cache.get(&k).is_none(), "書き込み中にヒットしてはいけない");
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(cache.get(&k).is_some(), "rename 後はヒットする");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path() != final_path)
+            .collect();
+        assert!(leftovers.is_empty(), "一時ファイルが残っている: {leftovers:?}");
+    }
+
+    /// 書き込みに失敗したら、最終パスにも一時ファイルにも何も残さない。
+    #[test]
+    fn a_failed_write_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("x.webp");
+
+        let result = write_atomically(&final_path, |tmp| {
+            std::fs::write(tmp, b"half")?;
+            anyhow::bail!("encode failed")
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "何も残さない");
+    }
+
+    /// 容量だけの設定変更は `Cache` を作り直さずに反映される（加工受付を保つため）。
+    #[test]
+    fn set_max_size_mb_takes_effect_on_the_next_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 0);
+        let old = dir.path().join("old.webp");
+        let f = std::fs::File::create(&old).unwrap();
+        f.set_len(2 * 1024 * 1024).unwrap();
+        f.set_modified(SystemTime::now() - EVICT_GRACE * 2).unwrap();
+
+        cache.evict_if_needed().unwrap();
+        assert!(old.exists(), "前提: 上限 0（無制限）では消えない");
+
+        cache.set_max_size_mb(1);
+        cache.evict_if_needed().unwrap();
+        assert!(!old.exists(), "新しい上限で退避される");
+    }
+
 }
