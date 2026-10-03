@@ -172,10 +172,8 @@ struct PreviewRequest {
     bg_darken: f32,
 }
 
-enum PreviewResult {
-    Ready(egui::ColorImage),
-    Error(String),
-}
+/// ワーカーからの結果。エラーはスレッドを越えるので文字列にしておく。
+type PreviewResult = Result<egui::ColorImage, String>;
 
 fn spawn_preview_worker(
     req_rx: mpsc::Receiver<PreviewRequest>,
@@ -183,13 +181,8 @@ fn spawn_preview_worker(
 ) {
     std::thread::spawn(move || {
         for req in req_rx {
-            let result = render_preview(&req);
-            let msg = match result {
-                Ok(img) => PreviewResult::Ready(img),
-                Err(e) => PreviewResult::Error(e.to_string()),
-            };
             // ignore send error (UI closed)
-            let _ = res_tx.try_send(msg);
+            let _ = res_tx.try_send(render_preview(&req).map_err(|e| e.to_string()));
         }
     });
 }
@@ -209,15 +202,10 @@ fn render_preview(req: &PreviewRequest) -> anyhow::Result<egui::ColorImage> {
         req.bg_darken,
     );
 
-    let pixels: Vec<egui::Color32> = rgba
-        .pixels()
-        .map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
-        .collect();
-
-    Ok(egui::ColorImage {
-        size: [PREV_W as usize, PREV_H as usize],
-        pixels,
-    })
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        [PREV_W as usize, PREV_H as usize],
+        rgba.as_raw(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -354,14 +342,14 @@ impl KabekamiApp {
         if let Ok(result) = self.preview_res_rx.try_recv() {
             self.preview_rendering = false;
             match result {
-                PreviewResult::Ready(img) => {
+                Ok(img) => {
                     self.preview_texture = Some(ctx.load_texture(
                         "preview",
                         img,
                         egui::TextureOptions::LINEAR,
                     ));
                 }
-                PreviewResult::Error(e) => {
+                Err(e) => {
                     self.set_status(format!("{}: {e}", self.s().preview_error), true);
                     self.preview_texture = None;
                 }
@@ -802,7 +790,7 @@ impl KabekamiApp {
             .selected_text(selected_label)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.config.ui.language, String::new(), s.default_option);
-                for entry in kabekami_common::i18n::registry().iter().filter(|e| e.gui_visible) {
+                for entry in kabekami_common::i18n::registry() {
                     ui.selectable_value(
                         &mut self.config.ui.language,
                         entry.id.to_string(),

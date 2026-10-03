@@ -6,7 +6,6 @@
 //! `ReloadCtx` にまとめて受け取る。
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -21,7 +20,7 @@ use crate::notify::Notifier;
 use crate::prefetch::Prefetcher;
 use crate::scheduler::Scheduler;
 use crate::{
-    apply_and_notify, make_ticker, plasma, screen, state, tray, update_tray_error, watcher, ApplyCtx,
+    apply_and_notify, make_ticker, plasma, screen, state, tray, update_tray, watcher, ApplyCtx,
 };
 
 /// リロードが読み書きするメインループの状態。
@@ -110,7 +109,7 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
             tracing::error!(error = %e, "config reload failed");
             let msg = e.to_string();
             notifier.error(&msg, None).await;
-            update_tray_error(tray_handle, msg).await;
+            update_tray(tray_handle, move |t| t.last_error = Some(msg)).await;
         }
         // 内容が同一で、かつ前回の走査と監視登録がどちらも完遂して
         // いるときだけ何もしない。トレイからのモード／間隔変更で
@@ -215,15 +214,6 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                 *notifier = Notifier::new(*lang).await;
             }
 
-            if new_cfg.ui.warn_notify != config.ui.warn_notify {
-                crate::WARN_NOTIFY_ENABLED.store(new_cfg.ui.warn_notify, Ordering::Relaxed);
-                tracing::info!(
-                    "warn_notify toggled: {} → {}",
-                    config.ui.warn_notify,
-                    new_cfg.ui.warn_notify
-                );
-            }
-
             *config = new_cfg;
 
             // rebuild を通れば新しい一覧に残っていた画像、通らなければ
@@ -243,24 +233,23 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                 }
             }
 
-            if let Some(h) = tray_handle {
-                let mode = config.display.mode;
-                let secs = config.rotation.interval_secs;
-                let strings = crate::i18n::strings(*lang);
-                let count = scheduler.image_count();
-                let has_fav = config.sources.favorites_dir.is_some();
-                let bl_enabled = config.ui.enable_blacklist;
-                let name = crate::tray_display_name(scheduler.current().map(|p| p.as_path()));
-                h.update(|t| {
-                    t.mode = mode;
-                    t.interval_secs = secs;
-                    t.strings = strings;
-                    t.image_count = count;
-                    t.has_favorites_dir = has_fav;
-                    t.blacklist_enabled = bl_enabled;
-                    t.current_name = name;
-                }).await;
-            }
+            let mode = config.display.mode;
+            let secs = config.rotation.interval_secs;
+            let strings = crate::i18n::strings(*lang);
+            let count = scheduler.image_count();
+            let has_fav = config.sources.favorites_dir.is_some();
+            let bl_enabled = config.ui.enable_blacklist;
+            let name = crate::tray_display_name(scheduler.current().map(|p| p.as_path()));
+            update_tray(tray_handle, move |t| {
+                t.mode = mode;
+                t.interval_secs = secs;
+                t.strings = strings;
+                t.image_count = count;
+                t.has_favorites_dir = has_fav;
+                t.blacklist_enabled = bl_enabled;
+                t.current_name = name;
+            })
+            .await;
 
             tracing::info!("config reload complete");
         }

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use url::Url;
+use reqwest::Url;
 
 use kabekami_common::config::OnlineSourceConfig;
 
@@ -73,11 +73,6 @@ pub async fn fetch(
         let filename = format!("bing_{}.jpg", safe_date);
         let dest = dir.join(&filename);
 
-        if dest.exists() {
-            available.push(dest);
-            continue;
-        }
-
         // `urlbase + res_suffix` を `base` 相対で resolve し、ホストが Bing 以外なら拒否する。
         // 単純な文字列連結だと `urlbase = "//attacker/foo"` で別ホストへ誘導されうるため。
         let relative = format!("{}{}", img.urlbase, res_suffix);
@@ -131,18 +126,5 @@ mod tests {
     fn resolution_suffix_uhd_by_height() {
         // 幅が 4K 未満でも高さが 2160 以上なら UHD（縦長 4K モニタなど）
         assert_eq!(resolution_suffix(2560, 2160), "_UHD.jpg");
-    }
-
-    #[test]
-    fn startdate_sanitization() {
-        let safe: String = "20240115".chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-        assert_eq!(safe, "20240115");
-
-        // パス区切り文字が含まれていても除去される
-        let safe: String = "2024/01/15".chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-        assert_eq!(safe, "20240115");
-
-        let safe: String = "../etc/passwd".chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-        assert_eq!(safe, "etcpasswd");
     }
 }

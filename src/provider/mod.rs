@@ -230,7 +230,7 @@ const MAX_BYTES: u64 = 50 * 1024 * 1024;
 async fn try_download(client: &reqwest::Client, url: &str, dest: &Path) -> Result<()> {
     // pre-request: 接続を確立する前に URL のホストを検証する。
     // 内部ネットワーク向け URL がプロバイダー応答に紛れ込んでも、TCP コネクション自体を張らない。
-    let parsed = url::Url::parse(url).with_context(|| format!("invalid URL: {}", url))?;
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("invalid URL: {}", url))?;
     if let Some(host) = parsed.host_str() {
         if is_private_host(host) {
             anyhow::bail!("refusing to connect to private host {}", host);
@@ -444,7 +444,7 @@ fn is_private_ipv4(ip: Ipv4Addr) -> bool {
 /// IPv6 が「内部ネットワーク向け」かを判定する。
 /// IPv4-mapped IPv6 (`::ffff:a.b.c.d`) は埋め込み IPv4 で再判定する。
 fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
-    if let Some(v4) = ipv4_mapped(ip) {
+    if let Some(v4) = ip.to_ipv4_mapped() {
         return is_private_ipv4(v4);
     }
     if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
@@ -460,22 +460,6 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
         return true;
     }
     false
-}
-
-/// IPv6 が IPv4-mapped 形式 (`::ffff:a.b.c.d`) なら埋め込み IPv4 を返す。
-/// `Ipv6Addr::to_ipv4_mapped()` は Rust 1.80 で安定化されたため、MSRV 1.75 互換で手書き。
-fn ipv4_mapped(ip: &Ipv6Addr) -> Option<Ipv4Addr> {
-    let s = ip.segments();
-    if s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0xffff {
-        Some(Ipv4Addr::new(
-            (s[6] >> 8) as u8,
-            (s[6] & 0xff) as u8,
-            (s[7] >> 8) as u8,
-            (s[7] & 0xff) as u8,
-        ))
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
