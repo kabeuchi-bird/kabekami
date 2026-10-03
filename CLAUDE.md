@@ -47,3 +47,7 @@ UI strings are TOML files (`crates/kabekami-common/i18n/ja.toml`), layered at ru
 - Shared dependency versions/features are centralized in root `[workspace.dependencies]`; add shared deps there so feature sets don't diverge between crates.
 - Deliberate design rationale is documented in Japanese comments (e.g. why startup uses sync I/O, why `scanned_dirs` is tracked separately from `config`); read them before "fixing" such code.
 - `packaging/aur/` holds the AUR PKGBUILD; `.coderabbit.yaml` configures review (Japanese, one auto-review per PR).
+
+## Watch list
+
+- **`kscreen-doctor` → `kscreenctl` rename (unconfirmed rumor, noted 2026-10-03).** A future Plasma release may rename the screen-query CLI. Before touching screen detection, check whether it has actually happened. The only place the binary is executed is `screen::detect_all` (`src/screen.rs`); if the rename lands, try the new name first and keep `kscreen-doctor` as a fallback. Also verify that the `--json` output schema (`outputs[].enabled/currentModeId/modes[].size`) is still the same, and update the name in README.md / README.ja.md, the AUR `optdepends` (`packaging/aur/kabekami-git/PKGBUILD` + `.SRCINFO`), and the comments in `screen_watcher.rs` / `main.rs`.
