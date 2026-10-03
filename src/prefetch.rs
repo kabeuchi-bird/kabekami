@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
-use crate::cache::{Cache, CacheKey, Claim, ClaimGuard};
+use crate::cache::{Cache, CacheKey, Claim};
 
 /// 先読みタスクの管理。
 ///
@@ -71,53 +71,31 @@ impl Prefetcher {
 }
 
 /// 1 つのキャッシュキーを加工してキャッシュパスを返す。同じキーの加工は
-/// 同時に 1 回しか走らない（shared single-flight）。
+/// 前景と先読みをまたいで同時に 1 回しか走らない（shared single-flight）。
 ///
-/// 前景の壁紙適用と先読みは同じ `Arc<Cache>` を共有するので、受付を `Cache` に
-/// 置くことで両方が同じ門を見る。`Prefetcher` 側だけで重複排除しても、
-/// 前景が `abort()` 直後に同じキーを投げる経路（Next 連打）は防げない。
-///
-/// 後から来た側は先行の完了を待ってキャッシュを引き直す。先行が失敗・panic・
-/// キャンセルされた場合は待ちが解放されてキャッシュミスになるので、そのときだけ
-/// 自分で加工し直す。ループが回るのは「加工するか、加工している誰かを待つか」の
-/// どちらかなので、同時に居る要求者の数で止まる。
+/// 加工権を取ってから `spawn_blocking` の中でキャッシュを確認する。キャッシュ
+/// 確認はファイル I/O なので単一ワーカーの上では行わない。後から来た側は先行の
+/// 完了を待ってから加工権を取り直し、ヒットすればそのまま返る。
 pub async fn process_single_flight(key: &CacheKey, cache: &Arc<Cache>) -> anyhow::Result<PathBuf> {
+    use anyhow::Context;
     let out = cache.path_for(key);
     loop {
-        if let Some(cached) = cache.get(key) {
-            tracing::debug!("cache hit: {}", key.src.display());
-            return Ok(cached);
-        }
         match cache.claim(out.clone()) {
             Claim::Owned(guard) => {
-                return run_blocking(key.clone(), Arc::clone(cache), guard).await;
+                let (key, cache) = (key.clone(), Arc::clone(cache));
+                // 加工権はクロージャに持たせる（外側のキャンセルで早く外れないように）
+                return tokio::task::spawn_blocking(move || {
+                    let _guard = guard;
+                    process_for_cache(&key, &cache)
+                })
+                .await
+                .context("image processing task panicked")?;
             }
             Claim::Waiting(gate) => {
-                // 門が閉じるまで待つ。閉じた `Semaphore` では即戻るので、
-                // 待ち始めが完了より後でも取りこぼさない。
                 let _ = gate.acquire().await;
             }
         }
     }
-}
-
-/// 加工を `spawn_blocking` に投げる。加工権はクロージャに持たせる。
-///
-/// 外側の future がキャンセルされてもクロージャは走り切るので、加工が終わるまで
-/// 加工権が解放されない（待ち側が二重に走り出さない）。走り出す前に捨てられた
-/// 場合はクロージャごと落ちるので、やはり取り残されない。
-async fn run_blocking(
-    key: CacheKey,
-    cache: Arc<Cache>,
-    guard: ClaimGuard,
-) -> anyhow::Result<PathBuf> {
-    use anyhow::Context;
-    tokio::task::spawn_blocking(move || {
-        let _guard = guard;
-        process_for_cache(&key, &cache)
-    })
-    .await
-    .context("image processing task panicked")?
 }
 
 /// `CacheKey` で指定された画像を読み込み・加工してキャッシュに保存する（ブロッキング処理）。
@@ -127,8 +105,9 @@ async fn run_blocking(
 pub fn process_for_cache(key: &CacheKey, cache: &Cache) -> anyhow::Result<PathBuf> {
     let src = key.src.as_path();
 
-    // 二重チェック（並列 prefetch が先に書いた可能性）
+    // 加工権を取る前に先行が完了していればここでヒットする
     if let Some(cached) = cache.get(key) {
+        tracing::debug!("cache hit: {}", src.display());
         return Ok(cached);
     }
 
@@ -151,6 +130,7 @@ pub fn process_for_cache(key: &CacheKey, cache: &Cache) -> anyhow::Result<PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::ClaimGuard;
     use crate::config::DisplayMode;
     use image::{Rgba, RgbaImage};
 

@@ -30,18 +30,12 @@ const EVICT_GRACE: Duration = Duration::from_secs(60);
 pub struct Cache {
     /// キャッシュディレクトリ（`~/.cache/kabekami/`）
     pub directory: PathBuf,
-    /// LRU 退避の容量上限（バイト）。0 なら無制限。
-    ///
-    /// 設定リロードで容量だけが変わったときは `Cache` を作り直さずにここだけ
-    /// 書き換える。作り直すと加工受付（`inflight`）が空の別物になり、走行中の
-    /// 加工と同じキーを新旧の `Cache` が別々に加工してしまう。
+    /// LRU 退避の容量上限（バイト）。0 なら無制限。設定リロードで書き換わる。
     max_size_bytes: AtomicU64,
-    /// 加工中の出力パスと、その完了を知らせる門。
+    /// 加工中の出力パスと、その完了を知らせる門。前景と先読みが共有する。
     ///
-    /// 前景の適用と先読みは同じ `Arc<Cache>` を共有するので、ここに置けば
-    /// 両方が同じ受付を見る。`Semaphore` を「完了したら閉じる門」として使う
-    /// のは取りこぼしを避けるため。閉じた `Semaphore` の `acquire()` は即
-    /// エラーで返るので、待ち始めが完了より後でも待ちっぱなしにならない
+    /// `Semaphore` を「完了したら閉じる門」として使う。閉じた `Semaphore` の
+    /// `acquire()` は即戻るので、待ち始めが完了より後でも取りこぼさない
     /// （`Notify` は通知前に待ち始めていないと取りこぼす）。
     inflight: Mutex<HashMap<PathBuf, Arc<Semaphore>>>,
 }
@@ -109,7 +103,7 @@ impl Cache {
         }
     }
 
-    /// 容量上限だけを差し替える（ディレクトリが同じ設定リロード用）。
+    /// 容量上限を差し替える（設定リロード用）。
     pub fn set_max_size_mb(&self, max_size_mb: u64) {
         self.max_size_bytes
             .store(mb_to_bytes(max_size_mb), Ordering::Relaxed);
@@ -147,8 +141,7 @@ impl Cache {
 
     /// 加工済み画像をキャッシュに保存し、そのパスを返す。
     ///
-    /// すでに同じキーのファイルが存在する場合は書き込みをスキップして
-    /// 既存のパスを返す（並列で先読みが書いた場合などの重複書き込み防止）。
+    /// すでに同じキーのファイルが存在する場合は書き込みをスキップする。
     ///
     /// 保存後に容量超過なら LRU 退避まで行う。ブロッキング処理なので
     /// `spawn_blocking` から呼ぶこと。
@@ -161,10 +154,7 @@ impl Cache {
             return Ok(path);
         }
 
-        // WebP 可逆圧縮（アルファ保持・品質劣化なし）。最終パスへ直接書くと、
-        // エンコード中に別の要求の `get` が書きかけのファイルをヒットとして
-        // 受け取ってしまう（`get` は開けるかしか見ない）。一時ファイルに書いて
-        // から rename し、最終パスには完成したファイルしか現れないようにする。
+        // WebP 可逆圧縮。書きかけを `get` にヒットさせないため一時ファイル経由
         write_atomically(&path, |tmp| {
             img.save_with_format(tmp, image::ImageFormat::WebP)
                 .with_context(|| format!("WebP encode failed: {}", path.display()))
@@ -236,16 +226,12 @@ fn mb_to_bytes(mb: u64) -> u64 {
 /// rename する。同一 FS 内の rename は置き換えが一度に起きるので、`path` には
 /// 完成したファイルしか現れない。失敗時は一時ファイルを消す。
 ///
-/// 書いている途中でプロセスが落ちた場合は一時ファイルが残るが、最終パスに
-/// 書きかけが残って以後ずっとヒットし続けるよりはよい。
+/// 一時ファイル名の拡張子を `.webp` にしておくのは、書いている途中でプロセスが
+/// 落ちて残った場合に LRU 退避で回収されるようにするため（`path_for` が返す
+/// 名前とは衝突しないので `get` にはヒットしない）。プロセス内では single-flight で
+/// 同じパスの書き手は 1 人なので、区別は pid だけでよい。
 fn write_atomically(path: &Path, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let tmp = path.with_file_name(format!(
-        ".{name}.{}-{}.tmp",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed),
-    ));
+    let tmp = path.with_extension(format!("{}.tmp.webp", std::process::id()));
     let result = write(&tmp).and_then(|()| {
         std::fs::rename(&tmp, path)
             .with_context(|| format!("failed to move cache file into place: {}", path.display()))
@@ -467,7 +453,6 @@ mod tests {
         cache.evict_if_needed().unwrap();
         assert!(!old.exists(), "新しい上限で退避される");
     }
-
 
     /// `store` が `write_atomically` を通っていることの確認。最終パスに「存在しない
     /// 先を指すシンボリックリンク」を置くと、直接書き込みはリンクをたどって先に
