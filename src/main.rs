@@ -761,7 +761,10 @@ async fn resolve_screens() -> Vec<screen::Monitor> {
             );
             tokio::time::sleep(Duration::from_secs(delay_secs)).await;
         }
-        let monitors = screen::detect_all();
+        // kscreen-doctor の終了待ち。D-Bus は既に登録済みなので単一ワーカーを止めない
+        let monitors = tokio::task::spawn_blocking(screen::detect_all)
+            .await
+            .unwrap_or_default();
         if !monitors.is_empty() {
             for m in &monitors {
                 tracing::info!("monitor detected: {} {}x{}", m.name, m.width, m.height);
