@@ -51,7 +51,10 @@ trait KGlobalAccelComponent {
 ///
 /// 表示名はトレイと同じ文字列を使う。KDE は登録時の名前を覚えるので、
 /// 言語の切り替えが反映されるのは次回のデーモン起動時。
-const ACTIONS: &[(&str, fn(&UiStrings) -> &'static str)] = &[
+/// トレイの文字列表から表示名を引く関数。
+type Label = fn(&UiStrings) -> &'static str;
+
+const ACTIONS: &[(&str, Label)] = &[
     ("next_wallpaper",    |s| s.next_wallpaper),
     ("prev_wallpaper",    |s| s.prev_wallpaper),
     ("toggle_pause",      |s| s.toggle_pause),
