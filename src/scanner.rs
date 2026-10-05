@@ -89,13 +89,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn tmp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kabekami-scanner-test-{}", name));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     fn touch(p: &Path) {
         if let Some(parent) = p.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -105,7 +98,8 @@ mod tests {
 
     #[test]
     fn picks_up_images_by_extension() {
-        let root = tmp_dir("ext");
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
         touch(&root.join("a.jpg"));
         touch(&root.join("b.PNG"));
         touch(&root.join("ignore.txt"));
@@ -118,7 +112,8 @@ mod tests {
 
     #[test]
     fn recursive_vs_flat() {
-        let root = tmp_dir("recursive");
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
         touch(&root.join("top.jpg"));
         touch(&root.join("sub/nested.jpg"));
 

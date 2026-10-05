@@ -288,10 +288,11 @@ mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
 
-    fn tmp_cache(name: &str) -> Cache {
-        let dir = std::env::temp_dir().join(format!("kabekami-cache-test-{}", name));
-        let _ = std::fs::remove_dir_all(&dir);
-        Cache::new(dir, 10)
+    /// `TempDir` は保持している間だけ残るので、キャッシュと一緒に返す。
+    fn tmp_cache() -> (tempfile::TempDir, Cache) {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 10);
+        (dir, cache)
     }
 
     fn solid_rgba(w: u32, h: u32) -> RgbaImage {
@@ -311,7 +312,7 @@ mod tests {
 
     #[test]
     fn store_and_get_roundtrip() {
-        let cache = tmp_cache("roundtrip");
+        let (_dir, cache) = tmp_cache();
         let k = key("/tmp/foo.jpg");
         assert!(cache.get(&k).is_none(), "cache should be empty initially");
 
@@ -325,7 +326,7 @@ mod tests {
 
     #[test]
     fn different_keys_produce_different_paths() {
-        let cache = tmp_cache("keys");
+        let (_dir, cache) = tmp_cache();
         let k1 = key("/tmp/a.jpg");
         let k2 = key("/tmp/b.jpg");
         assert_ne!(cache.path_for(&k1), cache.path_for(&k2));
@@ -333,7 +334,7 @@ mod tests {
 
     #[test]
     fn mode_and_sigma_affect_hash() {
-        let cache = tmp_cache("hash");
+        let (_dir, cache) = tmp_cache();
         let mut k1 = key("/tmp/x.jpg");
         let mut k2 = k1.clone();
         k2.mode = DisplayMode::Fill;
