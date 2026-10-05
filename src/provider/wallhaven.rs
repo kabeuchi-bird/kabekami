@@ -52,6 +52,10 @@ pub async fn fetch(
         .query(&params)
         .send()
         .await?
+        .error_for_status()
+        // 失敗時のエラー表示に apikey 付きの URL を載せない
+        .map_err(|e| e.without_url())
+        .context("wallhaven API HTTP error")?
         .json()
         .await
         .context("failed to parse Wallhaven API response")?;

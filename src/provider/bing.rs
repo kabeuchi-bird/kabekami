@@ -58,6 +58,8 @@ pub async fn fetch(
         .get(&api_url)
         .send()
         .await?
+        .error_for_status()
+        .context("bing API HTTP error")?
         .json()
         .await
         .context("failed to parse Bing API response")?;

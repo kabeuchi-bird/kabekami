@@ -77,6 +77,8 @@ pub async fn fetch(
         .header("Accept", "application/json")
         .send()
         .await?
+        .error_for_status()
+        .context("reddit API HTTP error")?
         .json()
         .await
         .context("failed to parse Reddit API response")?;
