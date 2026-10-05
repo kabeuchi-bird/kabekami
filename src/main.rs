@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
     let mut scanned_dirs = source_dirs;
     let mut scanned_recursive = config.sources.recursive;
 
-    // 言語設定を解決する（環境変数 → config → デフォルト ja）
+    // 言語設定を解決する（環境変数 → config → デフォルト英語）
     // 初回呼び出しで言語ファイルの探索（同期 I/O）が走るが、この時点では
     // トレイも D-Bus もまだ起動しておらず待たせる相手が居ないため、
     // spawn_blocking へ逃がす意味は無い（直前の画像スキャンや Config::load も
