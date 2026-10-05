@@ -52,6 +52,13 @@ async fn main() -> Result<()> {
 
     tracing::info!(?config, "loaded config");
 
+    // D-Bus インターフェースは最初に登録する。バス名が取れなければ別の
+    // デーモンが動いているので、走査やトレイ表示の前に終了する（2 つ動くと
+    // 互いに壁紙を切り替え合う）。ここで届いたコマンドはメインループに入るまで
+    // チャンネルに溜まる。
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TrayCmd>();
+    let _dbus_conn = spawn_dbus_iface(cmd_tx.clone()).await?;
+
     // ブラックリストを起動時に読み込む
     let kabekami_config_dir = Config::config_path()
         .ok()
@@ -121,9 +128,9 @@ async fn main() -> Result<()> {
 
     // 言語設定を解決する（環境変数 → config → デフォルト英語）
     // 初回呼び出しで言語ファイルの探索（同期 I/O）が走るが、この時点では
-    // トレイも D-Bus もまだ起動しておらず待たせる相手が居ないため、
-    // spawn_blocking へ逃がす意味は無い（直前の画像スキャンや Config::load も
-    // 同様に同期のままである）。
+    // トレイはまだ無く、待たせうるのは起動直後に来た CLI の呼び出しだけで、
+    // 小さなファイルを数個読むだけなので spawn_blocking へ逃がす意味は無い
+    // （Config::load も同様に同期のままである）。
     let mut lang = resolve_lang(&config);
     tracing::info!("ui language: {:?}", lang);
 
@@ -131,7 +138,6 @@ async fn main() -> Result<()> {
     let mut notifier = notify::Notifier::new(lang).await;
 
     // トレイを非同期に起動（D-Bus が使えない環境では None になる）
-    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TrayCmd>();
     let tray_handle = tray::spawn_tray(
         cmd_tx.clone(),
         config.display.mode,
@@ -142,9 +148,6 @@ async fn main() -> Result<()> {
         scheduler.is_paused(),
     )
     .await;
-
-    // D-Bus デーモンインターフェースを登録（CLI からのリモート操作を受け付ける）
-    let _dbus_conn = spawn_dbus_iface(cmd_tx.clone()).await;
 
     // セッション管理ウォッチャーを起動（ログアウト検知・Plasma 再起動検知）
     session::spawn_session_watcher(cmd_tx.clone()).await;
@@ -648,29 +651,40 @@ async fn send_to_daemon(method: &str) -> Result<()> {
     Ok(())
 }
 
-/// D-Bus デーモンインターフェースを起動する。
+/// D-Bus デーモンインターフェースを起動する（CLI からのリモート操作を受け付ける）。
+///
+/// バス名が既に取られていれば別のデーモンが動いているので `Err` を返す。
+/// zbus の `Builder::name` は既定で待ち行列に並ぶだけで失敗しないため、
+/// `DoNotQueue` を付けて自分で要求する。セッションバス自体が使えない場合は
+/// CLI 操作なしで動き続ける（`None`）。
 async fn spawn_dbus_iface(
     tx: tokio::sync::mpsc::UnboundedSender<TrayCmd>,
-) -> Option<zbus::Connection> {
+) -> Result<Option<zbus::Connection>> {
     use daemon_iface::{BUS_NAME, OBJECT_PATH, DaemonIface};
+    use zbus::fdo::RequestNameFlags;
 
     let result = async {
-        zbus::conn::Builder::session()?
-            .name(BUS_NAME)?
+        let conn = zbus::conn::Builder::session()?
             .serve_at(OBJECT_PATH, DaemonIface { tx })?
             .build()
-            .await
+            .await?;
+        conn.request_name_with_flags(BUS_NAME, RequestNameFlags::DoNotQueue.into())
+            .await?;
+        Ok::<_, zbus::Error>(conn)
     }
     .await;
 
     match result {
         Ok(conn) => {
             tracing::info!("D-Bus daemon interface active ({})", BUS_NAME);
-            Some(conn)
+            Ok(Some(conn))
+        }
+        Err(zbus::Error::NameTaken) => {
+            anyhow::bail!("kabekami is already running (D-Bus name {BUS_NAME} is taken)")
         }
         Err(e) => {
             tracing::warn!("D-Bus daemon interface unavailable: {}", e);
-            None
+            Ok(None)
         }
     }
 }
