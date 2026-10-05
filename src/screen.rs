@@ -52,6 +52,13 @@ struct JsonOutput {
     name: String,
     #[serde(default)]
     enabled: bool,
+    /// 画面の優先度（1 がプライマリ）。Plasma 5.27 以降、Plasma の画面番号
+    /// （スクリプトの `desktop.screen`）はこの順に振られる。
+    #[serde(default)]
+    priority: Option<u32>,
+    /// 優先度が無い古い kscreen の場合のプライマリ指定。
+    #[serde(default)]
+    primary: bool,
     #[serde(default, rename = "currentModeId")]
     current_mode_id: Option<String>,
     #[serde(default)]
@@ -74,10 +81,17 @@ struct JsonSize {
     height: u32,
 }
 
+/// 有効なモニターを Plasma の画面番号順に返す。
+///
+/// 返り値の添字はそのまま `plasma::set_wallpaper_multi` の画面番号になるので、
+/// kscreen の出力順ではなく優先度順に並べる（プライマリが先頭でないと、
+/// 解像度の違うモニターに別の解像度向けの画像を貼ってしまう）。
 fn parse_json_monitors(cfg: &KScreenJson) -> Vec<Monitor> {
-    cfg.outputs
-        .iter()
-        .filter(|o| o.enabled)
+    let mut outputs: Vec<&JsonOutput> = cfg.outputs.iter().filter(|o| o.enabled).collect();
+    // 安定ソートなので、優先度が同じ・無いものは kscreen の順を保つ
+    outputs.sort_by_key(|o| (o.priority.filter(|&p| p > 0).unwrap_or(u32::MAX), !o.primary));
+    outputs
+        .into_iter()
         .filter_map(|o| {
             let Some(current_id) = o.current_mode_id.as_deref() else {
                 tracing::warn!(
@@ -159,6 +173,39 @@ mod tests {
             }]
         }"#;
         assert_eq!(json_first(text), None);
+    }
+
+    /// Plasma の画面番号は優先度順。kscreen の出力順のまま返すと、
+    /// 画面ごとの壁紙が別のモニターに貼られる。
+    #[test]
+    fn json_orders_monitors_by_priority() {
+        let text = r#"{
+            "outputs": [
+                {"name": "HDMI-1", "enabled": true, "priority": 2, "currentModeId": "a",
+                 "modes": [{"id": "a", "size": {"width": 1920, "height": 1080}}]},
+                {"name": "DP-1", "enabled": true, "priority": 1, "currentModeId": "b",
+                 "modes": [{"id": "b", "size": {"width": 3840, "height": 2160}}]}
+            ]
+        }"#;
+        let parsed: KScreenJson = serde_json::from_str(text).unwrap();
+        let names: Vec<_> = parse_json_monitors(&parsed).into_iter().map(|m| m.name).collect();
+        assert_eq!(names, ["DP-1", "HDMI-1"]);
+    }
+
+    /// 優先度が無い古い kscreen では `primary` を先頭にする。
+    #[test]
+    fn json_puts_primary_first_without_priority() {
+        let text = r#"{
+            "outputs": [
+                {"name": "HDMI-1", "enabled": true, "currentModeId": "a",
+                 "modes": [{"id": "a", "size": {"width": 1920, "height": 1080}}]},
+                {"name": "DP-1", "enabled": true, "primary": true, "currentModeId": "b",
+                 "modes": [{"id": "b", "size": {"width": 3840, "height": 2160}}]}
+            ]
+        }"#;
+        let parsed: KScreenJson = serde_json::from_str(text).unwrap();
+        let names: Vec<_> = parse_json_monitors(&parsed).into_iter().map(|m| m.name).collect();
+        assert_eq!(names, ["DP-1", "HDMI-1"]);
     }
 
     #[test]
