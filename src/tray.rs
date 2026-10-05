@@ -9,6 +9,10 @@
 //!   メニュー項目のコールバックからチャンネルに送信する。
 //! - メインループ → トレイ: `ksni::Handle::update()` で状態を更新する。
 //!   壁紙切り替えのたびに `current_name` 等を反映する。
+//!
+//! 表示状態を書き換えるのはメインループだけ。メニューのコールバックは送るだけで
+//! 自分の状態を先に変えない（コマンドが連打抑止で捨てられると、表示だけが
+//! 切り替わって実際の状態とずれるため）。
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -170,7 +174,6 @@ impl ksni::Tray for KabekamiTray {
                     "media-playback-pause".into()
                 },
                 activate: Box::new(|this: &mut Self| {
-                    this.paused = !this.paused;
                     let _ = this.notifier.send(TrayCmd::TogglePause);
                 }),
                 ..Default::default()
@@ -183,9 +186,7 @@ impl ksni::Tray for KabekamiTray {
                 submenu: vec![RadioGroup {
                     selected: mode_selected,
                     select: Box::new(|this: &mut Self, idx| {
-                        let mode = MODES[idx].0;
-                        this.mode = mode;
-                        let _ = this.notifier.send(TrayCmd::SetMode(mode));
+                        let _ = this.notifier.send(TrayCmd::SetMode(MODES[idx].0));
                     }),
                     options: MODES
                         .iter()
@@ -212,7 +213,6 @@ impl ksni::Tray for KabekamiTray {
                             tracing::warn!("tray: interval index {} out of range, ignored", idx);
                             return;
                         };
-                        this.interval_secs = secs;
                         let _ = this.notifier.send(TrayCmd::SetInterval(secs));
                     }),
                     options: self.strings.interval_labels

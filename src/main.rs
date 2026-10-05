@@ -357,6 +357,7 @@ async fn main() -> Result<()> {
                         // トレイでの変更を再起動後も保つ。保存で発生する監視イベントは
                         // リロード側の同値スキップで吸収される。
                         persist_config(&config, "display mode").await;
+                        update_tray(&tray_handle, move |t| t.mode = mode).await;
                         // 画像は同じだがモードが変わるとキャッシュキーも変わるので作り直す。
                         // 適用後の通知・トレイ・先読みは apply_and_notify に任せる
                         // （ここで手書きすると再適用経路が 2 系統に分かれる）。
