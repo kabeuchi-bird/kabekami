@@ -148,6 +148,7 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
             // 走行中の先読みが温めている画像。あとで変わっていれば、
             // その先読みはもう「次の画像」を指していない。
             let warming = scheduler.peek_next().cloned();
+            let shown = scheduler.current().cloned();
             if needs_rescan {
                 match crate::scan_images(&source_dirs, new_cfg.sources.recursive, blacklist).await {
                     Ok(images) if !images.is_empty() => {
@@ -193,10 +194,10 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
             // 先読みの指す先が変わったときだけ捨てる（据え置きなら
             // ほぼ終わったデコードを捨てる理由がない）。表示・キャッシュ
             // 設定はパスが同じでもキーが変わるので別に見る。
-            if scheduler.peek_next() != warming.as_ref()
+            let prefetch_stale = scheduler.peek_next() != warming.as_ref()
                 || cache_changed
-                || display_changed
-            {
+                || display_changed;
+            if prefetch_stale {
                 prefetcher.abort();
             }
             // 同じ置き場所なら作り直さない。作り直すと加工受付が空の別物になり、
@@ -210,7 +211,10 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                 cache.set_max_size_mb(new_cfg.cache.max_size_mb);
             }
 
-            *ticker = make_ticker(new_cfg.rotation.interval_secs);
+            // 間隔が変わったときだけ仕切り直す（無関係な項目の保存で切り替えを先送りしない）
+            if new_cfg.rotation.interval_secs != config.rotation.interval_secs {
+                *ticker = make_ticker(new_cfg.rotation.interval_secs);
+            }
 
             let new_lang = crate::resolve_lang(&new_cfg);
             if new_lang != *lang {
@@ -220,9 +224,21 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
 
             *config = new_cfg;
 
+            // 見た目が変わりうるときだけ貼り直す（通知設定などの保存で
+            // Plasma へ同じ壁紙を送り直さない）
+            let reapply =
+                display_changed || cache_changed || scheduler.current() != shown.as_ref();
+
             // rebuild を通れば新しい一覧に残っていた画像、通らなければ
             // 据え置きの current。どちらも「いま表示しているべき画像」。
             match scheduler.current().cloned() {
+                // 貼り直さないなら、捨てた先読みはここで掛け直す
+                // （貼り直す場合は `apply_and_notify` が掛け直す）
+                Some(_) if !reapply => {
+                    if prefetch_stale {
+                        crate::start_prefetch(prefetcher, scheduler, screens, config, cache);
+                    }
+                }
                 // 記録は `apply_and_notify` 内、成功時のみ。先に persist
                 // すると、適用に失敗した壁紙を「現在」として保存し、
                 // 再起動後のトレイやゴミ箱操作が画面に無い画像を指す
