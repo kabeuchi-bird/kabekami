@@ -436,12 +436,23 @@ fn is_private_host(host: &str) -> bool {
 }
 
 fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
     ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
         || ip.is_unspecified()
         || ip.is_broadcast()
         || ip.is_multicast()
+        // 0.0.0.0/8 (this network)
+        || a == 0
+        // 100.64.0.0/10 (CGNAT。Tailscale などの VPN もここ)
+        || (a == 100 && (b & 0xc0) == 64)
+        // 192.0.0.0/24 (IETF protocol assignments)
+        || (a == 192 && b == 0 && c == 0)
+        // 198.18.0.0/15 (benchmarking)
+        || (a == 198 && (b & 0xfe) == 18)
+        // 240.0.0.0/4 (reserved)
+        || a >= 240
 }
 
 /// IPv6 が「内部ネットワーク向け」かを判定する。
@@ -458,11 +469,24 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
     if (s[0] & 0xfe00) == 0xfc00 {
         return true;
     }
-    // Link-local fe80::/10
-    if (s[0] & 0xffc0) == 0xfe80 {
+    // Link-local fe80::/10 と、廃止済みの site-local fec0::/10
+    if (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xffc0) == 0xfec0 {
         return true;
     }
+    // IPv4 を埋め込む形式は、中の IPv4 で判定する
+    // NAT64 64:ff9b::/96（末尾 32bit）
+    if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+        return is_private_ipv4(embedded_v4(s[6], s[7]));
+    }
+    // 6to4 2002::/16（続く 32bit）
+    if s[0] == 0x2002 {
+        return is_private_ipv4(embedded_v4(s[1], s[2]));
+    }
     false
+}
+
+fn embedded_v4(hi: u16, lo: u16) -> Ipv4Addr {
+    Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo))
 }
 
 #[cfg(test)]
@@ -509,6 +533,31 @@ mod download_tests {
         assert!(is_private_host("fe80::1")); // link-local
         assert!(is_private_host("::")); // unspecified
         assert!(is_private_host("ff02::1")); // multicast
+    }
+
+    #[test]
+    fn rejects_special_purpose_ipv4() {
+        assert!(is_private_host("0.1.2.3")); // this network
+        assert!(is_private_host("100.64.0.1")); // CGNAT 下端
+        assert!(is_private_host("100.127.255.255")); // CGNAT 上端
+        assert!(is_private_host("192.0.0.8"));
+        assert!(is_private_host("198.18.0.1"));
+        assert!(is_private_host("198.19.255.255"));
+        assert!(is_private_host("240.0.0.1"));
+        // 範囲の外側は通す
+        assert!(!is_private_host("100.63.255.255"));
+        assert!(!is_private_host("100.128.0.0"));
+        assert!(!is_private_host("198.20.0.1"));
+    }
+
+    #[test]
+    fn rejects_ipv6_that_embeds_a_private_ipv4() {
+        assert!(is_private_host("fec0::1")); // site-local
+        assert!(is_private_host("64:ff9b::7f00:1")); // NAT64 → 127.0.0.1
+        assert!(is_private_host("64:ff9b::a9fe:a9fe")); // NAT64 → 169.254.169.254
+        assert!(is_private_host("2002:c0a8:0101::1")); // 6to4 → 192.168.1.1
+        assert!(!is_private_host("64:ff9b::808:808")); // NAT64 → 8.8.8.8
+        assert!(!is_private_host("2002:0808:0808::1")); // 6to4 → 8.8.8.8
     }
 
     #[test]
