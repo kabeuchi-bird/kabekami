@@ -12,7 +12,7 @@ use futures_util::StreamExt as _;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::tray::TrayCmd;
-use kabekami_common::i18n::{Lang, UiStrings};
+use kabekami_common::i18n::Lang;
 
 const COMPONENT: &str = "kabekami";
 
@@ -47,21 +47,6 @@ trait KGlobalAccelComponent {
     ) -> zbus::Result<()>;
 }
 
-/// 登録するアクション: (アクション ID, 表示名)
-///
-/// 表示名はトレイと同じ文字列を使う。KDE は登録時の名前を覚えるので、
-/// 言語の切り替えが反映されるのは次回のデーモン起動時。
-/// トレイの文字列表から表示名を引く関数。
-type Label = fn(&UiStrings) -> &'static str;
-
-const ACTIONS: &[(&str, Label)] = &[
-    ("next_wallpaper",    |s| s.next_wallpaper),
-    ("prev_wallpaper",    |s| s.prev_wallpaper),
-    ("toggle_pause",      |s| s.toggle_pause),
-    ("trash_current",     |s| s.delete_current),
-    ("blacklist_current", |s| s.blacklist_current),
-];
-
 /// グローバルショートカット監視をバックグラウンドタスクとして起動する。
 ///
 /// kglobalaccel が利用できない環境では警告を出してサイレントに無効化される。
@@ -83,13 +68,22 @@ pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>, lang: Lang) {
         }
     };
 
-    let strings = kabekami_common::i18n::strings(lang);
-    for (action_id, display_name) in ACTIONS {
+    // 登録するアクション: (アクション ID, 表示名)。表示名はトレイと同じ文字列。
+    // KDE は登録時の名前を覚えるので、言語の変更は次回のデーモン起動時に反映される。
+    let s = kabekami_common::i18n::strings(lang);
+    let actions = [
+        ("next_wallpaper",    s.next_wallpaper),
+        ("prev_wallpaper",    s.prev_wallpaper),
+        ("toggle_pause",      s.toggle_pause),
+        ("trash_current",     s.delete_current),
+        ("blacklist_current", s.blacklist_current),
+    ];
+    for (action_id, display_name) in actions {
         let id = vec![
             COMPONENT.to_string(),
             action_id.to_string(),
             COMPONENT.to_string(),
-            display_name(strings).to_string(),
+            display_name.to_string(),
         ];
         if let Err(e) = accel.do_register(id).await {
             tracing::warn!("shortcuts: failed to register {}: {}", action_id, e);
