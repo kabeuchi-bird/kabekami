@@ -76,11 +76,11 @@ fn kdialog_available() -> bool {
         .is_ok()
 }
 
-/// 開始位置を解決する（`start` が存在すればそれ、無ければ `$HOME`、最後は `.`）。
-fn pick_start_dir(start: Option<&std::path::Path>) -> PathBuf {
-    start
-        .filter(|p| p.exists())
-        .map(PathBuf::from)
+/// 開始位置を解決する（`candidates` のうち最初に存在するもの、無ければ `$HOME`、最後は `.`）。
+fn pick_start_dir(candidates: Vec<PathBuf>) -> PathBuf {
+    candidates
+        .into_iter()
+        .find(|p| !p.as_os_str().is_empty() && p.exists())
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("."))
 }
@@ -97,23 +97,23 @@ fn kdialog_run(args: &[OsString]) -> Option<PathBuf> {
 }
 
 /// kdialog `--getexistingdirectory`（フォルダ選択）の引数。
-fn folder_dialog(s: &'static ConfigStrings, start: Option<&std::path::Path>) -> Vec<OsString> {
+fn folder_dialog(s: &'static ConfigStrings, start: PathBuf) -> Vec<OsString> {
     vec![
         "--title".into(),
         s.dialog_select_folder.into(),
         "--getexistingdirectory".into(),
-        pick_start_dir(start).into(),
+        start.into(),
     ]
 }
 
 /// kdialog `--getopenfilename`（画像ファイル選択）の引数。
-fn image_dialog(s: &'static ConfigStrings, start: Option<&std::path::Path>) -> Vec<OsString> {
+fn image_dialog(s: &'static ConfigStrings, start: PathBuf) -> Vec<OsString> {
     let image_filter = format!("{} (*.jpg *.jpeg *.png *.webp *.avif)", s.image_filter_label);
     vec![
         "--title".into(),
         s.dialog_select_image.into(),
         "--getopenfilename".into(),
-        pick_start_dir(start).into(),
+        start.into(),
         // 拡張子リストは kdialog の構文なので訳さず、名前だけ差し替える
         image_filter.into(),
     ]
@@ -137,16 +137,6 @@ struct PendingPick {
     rx: mpsc::Receiver<Option<PathBuf>>,
 }
 
-fn spawn_pick(ctx: &egui::Context, target: PickTarget, args: Vec<OsString>) -> PendingPick {
-    let (tx, rx) = mpsc::channel();
-    let ctx = ctx.clone();
-    std::thread::spawn(move || {
-        let _ = tx.send(kdialog_run(&args));
-        // 入力が無くても結果を拾えるよう、UI を起こす
-        ctx.request_repaint();
-    });
-    PendingPick { target, rx }
-}
 
 fn compute_dir_size(dir: &std::path::Path) -> u64 {
     std::fs::read_dir(dir)
@@ -372,6 +362,25 @@ impl KabekamiApp {
         });
     }
 
+    /// ファイル選択ダイアログを開く。画像を選ぶのはプレビューだけで、
+    /// 他はフォルダ。開始位置の存在確認（ネットワークマウントでは遅い）も
+    /// 別スレッドで行う。
+    fn start_pick(&mut self, ctx: &egui::Context, target: PickTarget, start: Vec<PathBuf>) {
+        let (tx, rx) = mpsc::channel();
+        let (ctx, s) = (ctx.clone(), self.s());
+        std::thread::spawn(move || {
+            let start = pick_start_dir(start);
+            let args = match target {
+                PickTarget::PreviewImage => image_dialog(s, start),
+                _ => folder_dialog(s, start),
+            };
+            let _ = tx.send(kdialog_run(&args));
+            // 入力が無くても結果を拾えるよう、UI を起こす
+            ctx.request_repaint();
+        });
+        self.pending_pick = Some(PendingPick { target, rx });
+    }
+
     /// ダイアログの結果が届いていれば書き込み先に反映する。
     fn poll_pick(&mut self) {
         let Some(pending) = &self.pending_pick else { return };
@@ -528,8 +537,7 @@ impl KabekamiApp {
                 }
             }
             if self.browse_button(ui) {
-                self.pending_pick =
-                    Some(spawn_pick(ui.ctx(), PickTarget::SourceDir, folder_dialog(s, None)));
+                self.start_pick(ui.ctx(), PickTarget::SourceDir, Vec::new());
             }
         });
     }
@@ -629,16 +637,11 @@ impl KabekamiApp {
                 let cur_path = std::path::Path::new(self.preview_image_path.trim());
                 let start = cur_path
                     .parent()
-                    .filter(|p| !p.as_os_str().is_empty() && p.exists())
-                    .or_else(|| {
-                        self.config
-                            .sources
-                            .directories
-                            .first()
-                            .map(|p| p.as_path())
-                    });
-                let args = image_dialog(s, start);
-                self.pending_pick = Some(spawn_pick(ui.ctx(), PickTarget::PreviewImage, args));
+                    .map(PathBuf::from)
+                    .into_iter()
+                    .chain(self.config.sources.directories.first().cloned())
+                    .collect();
+                self.start_pick(ui.ctx(), PickTarget::PreviewImage, start);
             }
             if should_preview {
                 self.request_preview();
@@ -672,8 +675,8 @@ impl KabekamiApp {
                 self.cache_size_bytes = None; // ディレクトリ変更時はリセット
             }
             if self.browse_button(ui) {
-                let args = folder_dialog(s, Some(&self.config.cache.directory));
-                self.pending_pick = Some(spawn_pick(ui.ctx(), PickTarget::CacheDir, args));
+                let start = vec![self.config.cache.directory.clone()];
+                self.start_pick(ui.ctx(), PickTarget::CacheDir, start);
             }
         });
 
@@ -788,8 +791,7 @@ impl KabekamiApp {
                         opt_path_field(ui, &hint, 260.0, &mut oc.download_dir);
                         if self.browse_button(ui) {
                             let target = PickTarget::DownloadDir(i, oc.provider);
-                            let args = folder_dialog(s, oc.download_dir.as_deref());
-                            self.pending_pick = Some(spawn_pick(ui.ctx(), target, args));
+                            self.start_pick(ui.ctx(), target, oc.download_dir.iter().cloned().collect());
                         }
                     });
                 });
