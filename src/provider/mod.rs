@@ -194,16 +194,19 @@ async fn ensure_downloaded(
     }
 }
 
-/// URL 末尾の拡張子を取り出す。英数字だけ残し、空なら `jpg`。
+/// 保存名に使う拡張子。URL のパスの最後の要素から取り、画像の拡張子で
+/// なければ `jpg` にする（`i.redd.it/abc` のような拡張子なしの URL で
+/// `it` などを拾うと、走査・監視の対象外のファイルになる）。デコードは
+/// 中身から形式を判定するので、`jpg` に寄せても読める。
 fn safe_ext(url: &str) -> String {
-    let ext: String = url
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric())
-        .collect();
-    if ext.is_empty() { "jpg".to_owned() } else { ext }
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| {
+            let name = u.path_segments()?.next_back()?.to_owned();
+            let ext = Path::new(&name).extension()?.to_str()?.to_ascii_lowercase();
+            crate::scanner::IMAGE_EXTENSIONS.contains(&ext.as_str()).then_some(ext)
+        })
+        .unwrap_or_else(|| "jpg".to_owned())
 }
 
 /// HTTP GET で画像をダウンロードして `dest` に書き出す。
@@ -464,7 +467,18 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
 
 #[cfg(test)]
 mod download_tests {
-    use super::is_private_host;
+    use super::{is_private_host, safe_ext};
+
+    /// 画像の拡張子でない名前で保存すると、走査にも監視にも拾われない。
+    #[test]
+    fn safe_ext_keeps_image_extensions_and_falls_back_to_jpg() {
+        assert_eq!(safe_ext("https://i.redd.it/abc.png"), "png");
+        assert_eq!(safe_ext("https://w.wallhaven.cc/full/x/y.JPG"), "jpg");
+        assert_eq!(safe_ext("https://example.com/a.webp?width=640&format=pjpg"), "webp");
+        assert_eq!(safe_ext("https://i.redd.it/someid"), "jpg", "拡張子なし");
+        assert_eq!(safe_ext("https://example.com/page.html"), "jpg", "画像以外");
+        assert_eq!(safe_ext("not a url"), "jpg");
+    }
 
     #[test]
     fn rejects_loopback_and_localhost() {
