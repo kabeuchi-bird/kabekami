@@ -120,6 +120,8 @@ string_table! {
         prev_wallpaper = "Previous Wallpaper",
         pause = "Pause",
         resume = "Resume",
+        /// グローバルショートカットの表示名（KDE のショートカット設定に出る）
+        toggle_pause = "Pause / Resume",
         display_mode = "Display Mode",
         interval = "Rotation Interval",
         open_current = "Open Current Wallpaper",

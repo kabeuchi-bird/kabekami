@@ -153,7 +153,7 @@ async fn main() -> Result<()> {
     let screen_check_tx = screen_watcher::spawn(screens.clone(), cmd_tx.clone());
 
     // KDE グローバルショートカットを登録・監視する
-    shortcuts::spawn_shortcut_watcher(cmd_tx).await;
+    shortcuts::spawn_shortcut_watcher(cmd_tx, lang).await;
 
     // 設定ファイル監視を起動。失敗時は閉じた受信端になる。
     let (mut config_change_rx, _config_watcher_handle) = match Config::config_path() {
