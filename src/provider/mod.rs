@@ -194,19 +194,33 @@ async fn ensure_downloaded(
     }
 }
 
-/// 保存名に使う拡張子。URL のパスの最後の要素から取り、画像の拡張子で
-/// なければ `jpg` にする（`i.redd.it/abc` のような拡張子なしの URL で
-/// `it` などを拾うと、走査・監視の対象外のファイルになる）。デコードは
-/// 中身から形式を判定するので、`jpg` に寄せても読める。
+/// URL パス末尾の画像拡張子（小文字）。該当しなければ `jpg`。
 fn safe_ext(url: &str) -> String {
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| {
-            let name = u.path_segments()?.next_back()?.to_owned();
-            let ext = Path::new(&name).extension()?.to_str()?.to_ascii_lowercase();
-            crate::scanner::IMAGE_EXTENSIONS.contains(&ext.as_str()).then_some(ext)
+            let name = Path::new(u.path_segments()?.next_back()?);
+            crate::scanner::is_image(name)
+                .then(|| name.extension()?.to_str().map(str::to_ascii_lowercase))?
         })
         .unwrap_or_else(|| "jpg".to_owned())
+}
+
+/// プロバイダー API を呼んで JSON を受け取る。HTTP エラーはパース失敗と
+/// 取り違えないよう先に弾き、エラー表示から URL を外す（クエリに API キーが
+/// 載るプロバイダーがあるため）。
+async fn get_json<T: serde::de::DeserializeOwned>(
+    req: reqwest::RequestBuilder,
+    provider: &str,
+) -> Result<T> {
+    req.send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(reqwest::Error::without_url)
+        .with_context(|| format!("{provider} API request failed"))?
+        .json()
+        .await
+        .with_context(|| format!("failed to parse {provider} API response"))
 }
 
 /// HTTP GET で画像をダウンロードして `dest` に書き出す。

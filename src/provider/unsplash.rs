@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::ensure_downloaded;
+use super::{ensure_downloaded, get_json};
 
 const API_URL: &str = "https://api.unsplash.com/photos/random";
 
@@ -49,24 +49,21 @@ pub async fn fetch(
     // API キーは URL クエリ (`client_id`) ではなく Authorization ヘッダで送る。
     // クエリだと `RUST_LOG=reqwest=debug` 等で URL がログ出力された際に
     // キーが平文で漏洩しうるため、Unsplash 公式が推奨するヘッダ送信を採用。
-    let photos: Vec<UnsplashPhoto> = client
-        .get(API_URL)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Client-ID {}", api_key),
-        )
-        .query(&[
-            ("count", count.to_string()),
-            ("query", query.to_string()),
-            ("orientation", "landscape".to_string()),
-        ])
-        .send()
-        .await?
-        .error_for_status()
-        .context("unsplash API HTTP error (401/429/5xx?)")?
-        .json()
-        .await
-        .context("failed to parse Unsplash API response")?;
+    let photos: Vec<UnsplashPhoto> = get_json(
+        client
+            .get(API_URL)
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Client-ID {}", api_key),
+            )
+            .query(&[
+                ("count", count.to_string()),
+                ("query", query.to_string()),
+                ("orientation", "landscape".to_string()),
+            ]),
+        "unsplash",
+    )
+    .await?;
 
     // quality = "full" のみフルサイズ。デフォルトは regular（1080p 相当、容量が 1/10 程度）。
     let use_full = cfg.quality.as_deref() == Some("full");
