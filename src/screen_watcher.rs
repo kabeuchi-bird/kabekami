@@ -56,12 +56,7 @@ pub fn spawn(
                 continue;
             }
 
-            let detected = tokio::task::spawn_blocking(screen::detect_all)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("screen detection task panicked: {}", e);
-                    Vec::new()
-                });
+            let detected = screen::detect_all_offloaded().await;
             last_detect = Some(Instant::now());
 
             // 0 件は「kscreen-doctor が一時的に応答していない」ケースとして無視

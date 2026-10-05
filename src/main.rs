@@ -52,10 +52,9 @@ async fn main() -> Result<()> {
 
     tracing::info!(?config, "loaded config");
 
-    // D-Bus インターフェースは最初に登録する。バス名が取れなければ別の
-    // デーモンが動いているので、走査やトレイ表示の前に終了する（2 つ動くと
-    // 互いに壁紙を切り替え合う）。ここで届いたコマンドはメインループに入るまで
-    // チャンネルに溜まる。
+    // 二重起動を走査やトレイ表示より前に弾くため、D-Bus は最初に登録する。
+    // 以降の起動処理で単一ワーカーを止めると CLI の呼び出しが待たされる。
+    // ここで届いたコマンドはメインループに入るまでチャンネルに溜まる。
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TrayCmd>();
     let _dbus_conn = spawn_dbus_iface(cmd_tx.clone()).await?;
 
@@ -68,10 +67,15 @@ async fn main() -> Result<()> {
         .context("failed to load blacklist")?;
 
     // スキャン対象と監視対象は同一。1 つの一覧を両方で使う。
+    // 走査とモニター検出（kscreen-doctor の再試行で数秒かかりうる）は独立なので並行に。
+    // プライマリ解像度は `primary_size()` で都度導出する（`screens` と二重に
+    // 持つと ScreensChanged で同期を取り違える余地が残るため）。
     let source_dirs = collect_source_dirs(&config);
-    let images = scan_images(&source_dirs, config.sources.recursive, &blacklist)
-        .await
-        .context("failed to scan source directories")?;
+    let (images, mut screens) = tokio::join!(
+        scan_images(&source_dirs, config.sources.recursive, &blacklist),
+        resolve_screens(),
+    );
+    let images = images.context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
     if images.is_empty() {
         if has_online {
@@ -85,11 +89,6 @@ async fn main() -> Result<()> {
     } else {
         tracing::info!("discovered {} image(s)", images.len());
     }
-
-    // モニター検出（マルチモニター対応）
-    // プライマリ解像度は `primary_size()` で都度導出する（`screens` と二重に
-    // 持つと ScreensChanged で同期を取り違える余地が残るため）。
-    let mut screens = resolve_screens().await;
 
     // キャッシュ・スケジューラ・先読みを初期化
     let mut cache = Arc::new(Cache::new(
@@ -117,20 +116,17 @@ async fn main() -> Result<()> {
     let mut prefetcher = Prefetcher::default();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
-    // 起動時はトレイも D-Bus もまだ立っていないので、登録の同期待ちは問題ない。
     let (mut watch_rx, mut watcher_handle) =
-        watcher::spawn(&source_dirs, config.sources.recursive);
+        spawn_dir_watcher_offloaded(&source_dirs, config.sources.recursive).await;
     // 最後に「成功して」スキャンした対象。リロード時の再スキャン要否をこれと比べる。
     // `config` と比べないのは、スキャンが空／失敗して旧一覧を保った場合に
     // 次のリロードで再試行できるようにするため。
     let mut scanned_dirs = source_dirs;
     let mut scanned_recursive = config.sources.recursive;
 
-    // 言語設定を解決する（環境変数 → config → デフォルト英語）
-    // 初回呼び出しで言語ファイルの探索（同期 I/O）が走るが、この時点では
-    // トレイはまだ無く、待たせうるのは起動直後に来た CLI の呼び出しだけで、
-    // 小さなファイルを数個読むだけなので spawn_blocking へ逃がす意味は無い
-    // （Config::load も同様に同期のままである）。
+    // 言語設定を解決する（環境変数 → config → デフォルト英語）。
+    // 言語ファイルの探索は小さなファイルを数個読むだけなので同期のまま
+    // （ブラックリストや state の読み込みも同様）。
     let mut lang = resolve_lang(&config);
     tracing::info!("ui language: {:?}", lang);
 
@@ -359,7 +355,7 @@ async fn main() -> Result<()> {
                         persist_config(&config, "display mode").await;
                         update_tray(&tray_handle, move |t| t.mode = mode).await;
                         // 画像は同じだがモードが変わるとキャッシュキーも変わるので作り直す。
-                        // 適用後の通知・トレイ・先読みは apply_and_notify に任せる
+                        // 適用後の通知・壁紙名・先読みは apply_and_notify に任せる
                         // （ここで手書きすると再適用経路が 2 系統に分かれる）。
                         if let Some(cur) = scheduler.current().cloned() {
                             apply_and_notify(apply_ctx!(), &cur, "reapply after mode change failed").await;
@@ -761,10 +757,7 @@ async fn resolve_screens() -> Vec<screen::Monitor> {
             );
             tokio::time::sleep(Duration::from_secs(delay_secs)).await;
         }
-        // kscreen-doctor の終了待ち。D-Bus は既に登録済みなので単一ワーカーを止めない
-        let monitors = tokio::task::spawn_blocking(screen::detect_all)
-            .await
-            .unwrap_or_default();
+        let monitors = screen::detect_all_offloaded().await;
         if !monitors.is_empty() {
             for m in &monitors {
                 tracing::info!("monitor detected: {} {}x{}", m.name, m.width, m.height);
@@ -827,6 +820,8 @@ fn distinct_sizes(screens: &[screen::Monitor]) -> Vec<(u32, u32)> {
 ///
 /// システムイベント系（Quit / PlasmaRestarted / ScreensChanged）は
 /// ユーザー操作ではなく、取りこぼすと内部状態が画面と食い違うため除外する。
+/// 値を設定するだけの SetMode / SetInterval も除外する。二重に届いても結果は
+/// 同じで、抑止すると直前の「次へ」から 500ms 以内の選択が黙って捨てられる。
 fn should_throttle(
     cmd: &TrayCmd,
     last_cmd_at: Option<std::time::Instant>,
@@ -835,7 +830,11 @@ fn should_throttle(
     const THROTTLE: Duration = Duration::from_millis(500);
     let exempt = matches!(
         cmd,
-        TrayCmd::Quit | TrayCmd::PlasmaRestarted | TrayCmd::ScreensChanged(_)
+        TrayCmd::Quit
+            | TrayCmd::PlasmaRestarted
+            | TrayCmd::ScreensChanged(_)
+            | TrayCmd::SetMode(_)
+            | TrayCmd::SetInterval(_)
     );
     !exempt && last_cmd_at.is_some_and(|t| now.duration_since(t) < THROTTLE)
 }
@@ -1150,8 +1149,6 @@ mod tests {
             TrayCmd::Next,
             TrayCmd::Prev,
             TrayCmd::TogglePause,
-            TrayCmd::SetMode(DisplayMode::Fill),
-            TrayCmd::SetInterval(30),
             TrayCmd::OpenCurrent,
             TrayCmd::DeleteCurrent,
             TrayCmd::BlacklistCurrent,
@@ -1162,8 +1159,8 @@ mod tests {
         }
     }
 
-    /// 取りこぼすと内部状態が実際のデスクトップとずれるコマンドは、
-    /// 直前に別のコマンドを処理していても必ず通す。
+    /// 取りこぼすと内部状態が実際のデスクトップとずれるコマンドと、
+    /// 何度届いても結果が同じ設定変更は、直前に別のコマンドを処理していても必ず通す。
     #[test]
     fn system_commands_bypass_the_throttle() {
         let first = std::time::Instant::now();
@@ -1176,6 +1173,8 @@ mod tests {
                 width: 1920,
                 height: 1080,
             }]),
+            TrayCmd::SetMode(DisplayMode::Fill),
+            TrayCmd::SetInterval(30),
         ] {
             assert!(
                 !should_throttle(&cmd, Some(first), immediately_after),

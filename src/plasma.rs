@@ -66,7 +66,7 @@ impl PlasmaShell {
         if entries.is_empty() {
             return Ok(());
         }
-        let mut canonical: Vec<(usize, PathBuf)> = entries
+        let canonical: Vec<(usize, PathBuf)> = entries
             .iter()
             .map(|(idx, p)| {
                 let c = if p.is_absolute() {
@@ -93,7 +93,7 @@ impl PlasmaShell {
 
         // 外部コマンドの終了待ちは単一ワーカーを止めるので逃がす
         // （D-Bus が失敗している状況でトレイまで固まらないように）
-        let path = canonical.swap_remove(0).1;
+        let path = canonical[0].1.clone();
         tokio::task::spawn_blocking(move || set_wallpaper_cli(&path))
             .await
             .context("plasma-apply-wallpaperimage task panicked")?

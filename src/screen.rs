@@ -38,6 +38,15 @@ pub fn detect_all() -> Vec<Monitor> {
     }
 }
 
+/// `detect_all` を `spawn_blocking` で実行する。kscreen-doctor の終了待ちで
+/// 単一ワーカー（D-Bus・トレイ）を止めないため、非同期側からはこちらを呼ぶ。
+pub async fn detect_all_offloaded() -> Vec<Monitor> {
+    tokio::task::spawn_blocking(detect_all).await.unwrap_or_else(|e| {
+        tracing::error!("screen detection task panicked: {}", e);
+        Vec::new()
+    })
+}
+
 // ── JSON パース ──────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -127,6 +136,11 @@ fn parse_json_monitors(cfg: &KScreenJson) -> Vec<Monitor> {
 mod tests {
     use super::*;
 
+    fn json_names(text: &str) -> Vec<String> {
+        let parsed: KScreenJson = serde_json::from_str(text).unwrap();
+        parse_json_monitors(&parsed).into_iter().map(|m| m.name).collect()
+    }
+
     fn json_first(text: &str) -> Option<(u32, u32)> {
         let parsed: KScreenJson = serde_json::from_str(text).ok()?;
         parse_json_monitors(&parsed)
@@ -187,9 +201,7 @@ mod tests {
                  "modes": [{"id": "b", "size": {"width": 3840, "height": 2160}}]}
             ]
         }"#;
-        let parsed: KScreenJson = serde_json::from_str(text).unwrap();
-        let names: Vec<_> = parse_json_monitors(&parsed).into_iter().map(|m| m.name).collect();
-        assert_eq!(names, ["DP-1", "HDMI-1"]);
+        assert_eq!(json_names(text), ["DP-1", "HDMI-1"]);
     }
 
     /// 優先度が無い古い kscreen では `primary` を先頭にする。
@@ -203,9 +215,7 @@ mod tests {
                  "modes": [{"id": "b", "size": {"width": 3840, "height": 2160}}]}
             ]
         }"#;
-        let parsed: KScreenJson = serde_json::from_str(text).unwrap();
-        let names: Vec<_> = parse_json_monitors(&parsed).into_iter().map(|m| m.name).collect();
-        assert_eq!(names, ["DP-1", "HDMI-1"]);
+        assert_eq!(json_names(text), ["DP-1", "HDMI-1"]);
     }
 
     #[test]
