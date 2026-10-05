@@ -185,9 +185,9 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
             // （通っていれば同値なので何もしない）。
             scheduler.set_order(new_cfg.rotation.order);
 
-            // キャッシュキーに効く設定が変わったか。変わっていなければ
-            // 温まったキャッシュも走行中の先読みもそのまま活かす。
-            let cache_changed = new_cfg.cache != config.cache;
+            // キャッシュの置き場所が変わったか。容量はキーに効かないので見ない。
+            // 変わっていなければ温まったキャッシュも走行中の先読みもそのまま活かす。
+            let cache_changed = new_cfg.cache.directory != config.cache.directory;
             let display_changed = new_cfg.display != config.display;
 
             // 先読みの指す先が変わったときだけ捨てる（据え置きなら
@@ -199,11 +199,15 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
             {
                 prefetcher.abort();
             }
+            // 同じ置き場所なら作り直さない。作り直すと加工受付が空の別物になり、
+            // 走行中の加工と同じキーを新旧の `Cache` が別々に加工してしまう。
             if cache_changed {
                 *cache = Arc::new(Cache::new(
                     new_cfg.cache.directory.clone(),
                     new_cfg.cache.max_size_mb,
                 ));
+            } else {
+                cache.set_max_size_mb(new_cfg.cache.max_size_mb);
             }
 
             *ticker = make_ticker(new_cfg.rotation.interval_secs);

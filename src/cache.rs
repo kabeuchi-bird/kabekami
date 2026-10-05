@@ -11,8 +11,13 @@
 //! 直近 `EVICT_GRACE` 以内に使われたファイルは消さない（適用中・先読み中の
 //! 画像を消して存在しないパスを Plasma に渡すのを防ぐ）。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
+
+use tokio::sync::Semaphore;
 
 use anyhow::{Context, Result};
 
@@ -25,8 +30,39 @@ const EVICT_GRACE: Duration = Duration::from_secs(60);
 pub struct Cache {
     /// キャッシュディレクトリ（`~/.cache/kabekami/`）
     pub directory: PathBuf,
-    /// LRU 退避の容量上限（バイト）。0 なら無制限。
-    max_size_bytes: u64,
+    /// LRU 退避の容量上限（バイト）。0 なら無制限。設定リロードで書き換わる。
+    max_size_bytes: AtomicU64,
+    /// 加工中の出力パスと、その完了を知らせる門。前景と先読みが共有する。
+    ///
+    /// `Semaphore` を「完了したら閉じる門」として使う。閉じた `Semaphore` の
+    /// `acquire()` は即戻るので、待ち始めが完了より後でも取りこぼさない
+    /// （`Notify` は通知前に待ち始めていないと取りこぼす）。
+    inflight: Mutex<HashMap<PathBuf, Arc<Semaphore>>>,
+}
+
+/// `Cache::claim` の結果。
+pub enum Claim {
+    /// 加工権を取れた。`ClaimGuard` を落とすと待っている側が解放される。
+    Owned(ClaimGuard),
+    /// 他の誰かが加工中。この門が閉じるまで待ってからキャッシュを引き直す。
+    Waiting(Arc<Semaphore>),
+}
+
+/// 加工権。`Drop` で受付から外し、待っている側を解放する。
+///
+/// 正常終了・エラー・panic の巻き戻し・future の破棄（タスクのキャンセル）の
+/// いずれでも走るので、待ち側が取り残されない。
+pub struct ClaimGuard {
+    cache: Arc<Cache>,
+    out: PathBuf,
+    gate: Arc<Semaphore>,
+}
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        self.cache.lock_inflight().remove(&self.out);
+        self.gate.close();
+    }
 }
 
 /// キャッシュのルックアップ・格納に使うキー。
@@ -62,8 +98,36 @@ impl Cache {
     pub fn new(directory: PathBuf, max_size_mb: u64) -> Self {
         Self {
             directory,
-            max_size_bytes: max_size_mb.saturating_mul(1024 * 1024),
+            max_size_bytes: AtomicU64::new(mb_to_bytes(max_size_mb)),
+            inflight: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 容量上限を差し替える（設定リロード用）。
+    pub fn set_max_size_mb(&self, max_size_mb: u64) {
+        self.max_size_bytes
+            .store(mb_to_bytes(max_size_mb), Ordering::Relaxed);
+    }
+
+    /// 出力パスごとの加工権を取る。すでに誰かが加工中なら待つ側になる。
+    pub fn claim(self: &Arc<Self>, out: PathBuf) -> Claim {
+        let mut inflight = self.lock_inflight();
+        if let Some(gate) = inflight.get(&out) {
+            return Claim::Waiting(Arc::clone(gate));
+        }
+        let gate = Arc::new(Semaphore::new(0));
+        inflight.insert(out.clone(), Arc::clone(&gate));
+        Claim::Owned(ClaimGuard {
+            cache: Arc::clone(self),
+            out,
+            gate,
+        })
+    }
+
+    /// 毒された Mutex から中身を回収する。臨界区間は挿入と削除だけなので
+    /// 毒されていても表は壊れていない。先読みの調整でデーモンを落とさない。
+    fn lock_inflight(&self) -> MutexGuard<'_, HashMap<PathBuf, Arc<Semaphore>>> {
+        self.inflight.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// キャッシュヒットなら該当ファイルのパスを返す。
@@ -77,8 +141,7 @@ impl Cache {
 
     /// 加工済み画像をキャッシュに保存し、そのパスを返す。
     ///
-    /// すでに同じキーのファイルが存在する場合は書き込みをスキップして
-    /// 既存のパスを返す（並列で先読みが書いた場合などの重複書き込み防止）。
+    /// すでに同じキーのファイルが存在する場合は書き込みをスキップする。
     ///
     /// 保存後に容量超過なら LRU 退避まで行う。ブロッキング処理なので
     /// `spawn_blocking` から呼ぶこと。
@@ -91,9 +154,11 @@ impl Cache {
             return Ok(path);
         }
 
-        // WebP 可逆圧縮（アルファ保持・品質劣化なし）。clone 不要で直接書き出す。
-        img.save_with_format(&path, image::ImageFormat::WebP)
-            .with_context(|| format!("WebP encode failed: {}", path.display()))?;
+        // WebP 可逆圧縮。書きかけを `get` にヒットさせないため一時ファイル経由
+        write_atomically(&path, |tmp| {
+            img.save_with_format(tmp, image::ImageFormat::WebP)
+                .with_context(|| format!("WebP encode failed: {}", path.display()))
+        })?;
 
         tracing::debug!("cached: {}", path.display());
         if let Err(e) = self.evict_if_needed() {
@@ -104,7 +169,8 @@ impl Cache {
 
     /// `max_size_bytes` を超えていたら古いキャッシュファイルを LRU 順に削除する。
     fn evict_if_needed(&self) -> Result<()> {
-        if self.max_size_bytes == 0 {
+        let max_size_bytes = self.max_size_bytes.load(Ordering::Relaxed);
+        if max_size_bytes == 0 {
             return Ok(());
         }
         let entries = cache_entries_by_mtime(&self.directory)?;
@@ -115,7 +181,7 @@ impl Cache {
         let mut remaining = total;
         for (path, size, mtime) in &entries {
             // mtime 昇順なので、猶予内のファイルに達したら以降もすべて猶予内
-            if remaining <= self.max_size_bytes || *mtime > cutoff {
+            if remaining <= max_size_bytes || *mtime > cutoff {
                 break;
             }
             match std::fs::remove_file(path) {
@@ -150,6 +216,33 @@ impl Cache {
         (key.blur_sigma.to_bits(), key.bg_darken.to_bits()).hash(&mut h);
         format!("{:016x}", h.finish())
     }
+}
+
+fn mb_to_bytes(mb: u64) -> u64 {
+    mb.saturating_mul(1024 * 1024)
+}
+
+/// `write` に同じディレクトリの一時パスを渡して書かせ、成功したら `path` へ
+/// rename する。同一 FS 内の rename は置き換えが一度に起きるので、`path` には
+/// 完成したファイルしか現れない。失敗時は一時ファイルを消す。
+///
+/// 一時ファイル名の拡張子を `.webp` にしておくのは、書いている途中でプロセスが
+/// 落ちて残った場合に LRU 退避で回収されるようにするため（`path_for` が返す
+/// 名前とは衝突しないので `get` にはヒットしない）。連番も付けるのは、設定で
+/// キャッシュの置き場所を往復させると受付の違う新旧の `Cache` が同じパスに
+/// 同時に書きうるため（single-flight が効くのは 1 つの `Cache` の中だけ）。
+fn write_atomically(path: &Path, write: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}-{n}.tmp.webp", std::process::id()));
+    let result = write(&tmp).and_then(|()| {
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("failed to move cache file into place: {}", path.display()))
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// 既存ファイルの mtime を現在時刻にする（LRU の「使用」扱い）。読めなければ false。
@@ -304,4 +397,105 @@ mod tests {
 
         assert_eq!(cache.get(&k), Some(path));
     }
+
+    /// 書いている最中の最終パスは存在してはいけない。存在すると、別の要求の
+    /// `get` が書きかけのファイルをヒットとして受け取る（`get` は開けるかしか見ない）。
+    #[test]
+    fn store_never_exposes_a_partial_file_at_the_final_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 0);
+        let k = key("/tmp/foo.jpg");
+        let final_path = cache.path_for(&k);
+
+        write_atomically(&final_path, |tmp| {
+            std::fs::write(tmp, b"half")?;
+            assert!(!final_path.exists(), "書き込み中に最終パスが見えている");
+            assert!(cache.get(&k).is_none(), "書き込み中にヒットしてはいけない");
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(cache.get(&k).is_some(), "rename 後はヒットする");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path() != final_path)
+            .collect();
+        assert!(leftovers.is_empty(), "一時ファイルが残っている: {leftovers:?}");
+    }
+
+    /// 書き込みに失敗したら、最終パスにも一時ファイルにも何も残さない。
+    #[test]
+    fn a_failed_write_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("x.webp");
+
+        let result = write_atomically(&final_path, |tmp| {
+            std::fs::write(tmp, b"half")?;
+            anyhow::bail!("encode failed")
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "何も残さない");
+    }
+
+    /// 容量だけの設定変更は `Cache` を作り直さずに反映される（加工受付を保つため）。
+    #[test]
+    fn set_max_size_mb_takes_effect_on_the_next_eviction() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 0);
+        let old = dir.path().join("old.webp");
+        let f = std::fs::File::create(&old).unwrap();
+        f.set_len(2 * 1024 * 1024).unwrap();
+        f.set_modified(SystemTime::now() - EVICT_GRACE * 2).unwrap();
+
+        cache.evict_if_needed().unwrap();
+        assert!(old.exists(), "前提: 上限 0（無制限）では消えない");
+
+        cache.set_max_size_mb(1);
+        cache.evict_if_needed().unwrap();
+        assert!(!old.exists(), "新しい上限で退避される");
+    }
+
+    /// `store` が `write_atomically` を通っていることの確認。最終パスに「存在しない
+    /// 先を指すシンボリックリンク」を置くと、直接書き込みはリンクをたどって先に
+    /// ファイルを作り、rename はリンク自体を置き換える。この差で書き方を判別する。
+    #[cfg(unix)]
+    #[test]
+    fn store_replaces_the_final_path_instead_of_writing_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 0);
+        let k = key("/tmp/foo.jpg");
+        let final_path = cache.path_for(&k);
+        let target = dir.path().join("target.webp");
+        std::os::unix::fs::symlink(&target, &final_path).unwrap();
+
+        cache.store(&k, &solid_rgba(4, 4)).unwrap();
+
+        assert!(!target.exists(), "最終パスへ直接書いている（リンク先に書けた）");
+        let meta = std::fs::symlink_metadata(&final_path).unwrap();
+        assert!(meta.is_file(), "rename で通常ファイルに置き換わるべき");
+    }
+
+
+    /// 同じ最終パスへの書き込みが重なっても一時ファイルは別々になる
+    /// （置き場所の往復で新旧の `Cache` が同じパスに同時に書く場合に備える）。
+    #[test]
+    fn concurrent_writes_to_the_same_path_use_distinct_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("x.webp");
+
+        write_atomically(&final_path, |outer| {
+            std::fs::write(outer, b"outer")?;
+            write_atomically(&final_path, |inner| {
+                assert_ne!(outer, inner, "一時ファイルが衝突している");
+                std::fs::write(inner, b"inner")?;
+                Ok(())
+            })
+        })
+        .unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"outer", "後から rename した方が残る");
+    }
+
 }
