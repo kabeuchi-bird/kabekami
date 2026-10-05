@@ -6,6 +6,7 @@
 //! - 保存時に `~/.config/kabekami/config.toml` を上書きし、
 //!   デーモンが inotify 経由で自動リロードする
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -86,7 +87,7 @@ fn pick_start_dir(start: Option<&std::path::Path>) -> PathBuf {
 
 /// kdialog 出力（パス）を `Option<PathBuf>` に変換する。
 /// 失敗・キャンセル・空出力はすべて `None`。
-fn kdialog_run(args: &[&std::ffi::OsStr]) -> Option<PathBuf> {
+fn kdialog_run(args: &[OsString]) -> Option<PathBuf> {
     let out = std::process::Command::new("kdialog").args(args).output().ok()?;
     if !out.status.success() {
         return None;
@@ -95,29 +96,56 @@ fn kdialog_run(args: &[&std::ffi::OsStr]) -> Option<PathBuf> {
     if s.is_empty() { None } else { Some(PathBuf::from(s)) }
 }
 
-/// kdialog `--getexistingdirectory` でフォルダ選択ダイアログを開く。
-fn pick_folder(s: &'static ConfigStrings, start: Option<&std::path::Path>) -> Option<PathBuf> {
-    let start_dir = pick_start_dir(start);
-    kdialog_run(&[
-        "--title".as_ref(),
-        s.dialog_select_folder.as_ref(),
-        "--getexistingdirectory".as_ref(),
-        start_dir.as_os_str(),
-    ])
+/// kdialog `--getexistingdirectory`（フォルダ選択）の引数。
+fn folder_dialog(s: &'static ConfigStrings, start: Option<&std::path::Path>) -> Vec<OsString> {
+    vec![
+        "--title".into(),
+        s.dialog_select_folder.into(),
+        "--getexistingdirectory".into(),
+        pick_start_dir(start).into(),
+    ]
 }
 
-/// kdialog `--getopenfilename` で画像ファイル選択ダイアログを開く。
-fn pick_image_file(s: &'static ConfigStrings, start: Option<&std::path::Path>) -> Option<PathBuf> {
-    let start_dir = pick_start_dir(start);
+/// kdialog `--getopenfilename`（画像ファイル選択）の引数。
+fn image_dialog(s: &'static ConfigStrings, start: Option<&std::path::Path>) -> Vec<OsString> {
     let image_filter = format!("{} (*.jpg *.jpeg *.png *.webp *.avif)", s.image_filter_label);
-    kdialog_run(&[
-        "--title".as_ref(),
-        s.dialog_select_image.as_ref(),
-        "--getopenfilename".as_ref(),
-        start_dir.as_os_str(),
+    vec![
+        "--title".into(),
+        s.dialog_select_image.into(),
+        "--getopenfilename".into(),
+        pick_start_dir(start).into(),
         // 拡張子リストは kdialog の構文なので訳さず、名前だけ差し替える
-        image_filter.as_ref(),
-    ])
+        image_filter.into(),
+    ]
+}
+
+/// 選んだパスの書き込み先。
+#[derive(Clone, Copy)]
+enum PickTarget {
+    SourceDir,
+    PreviewImage,
+    CacheDir,
+    /// `online_sources` の添字。開いている間に削除されても取り違えないよう種別も持つ。
+    DownloadDir(usize, ProviderKind),
+}
+
+/// 開いているダイアログ。kdialog はユーザーが閉じるまで戻らないので
+/// 別スレッドで待ち、UI スレッドは結果をチャネルで受け取るだけにする
+/// （同期で呼ぶとその間 GUI の再描画が止まる）。
+struct PendingPick {
+    target: PickTarget,
+    rx: mpsc::Receiver<Option<PathBuf>>,
+}
+
+fn spawn_pick(ctx: &egui::Context, target: PickTarget, args: Vec<OsString>) -> PendingPick {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(kdialog_run(&args));
+        // 入力が無くても結果を拾えるよう、UI を起こす
+        ctx.request_repaint();
+    });
+    PendingPick { target, rx }
 }
 
 fn compute_dir_size(dir: &std::path::Path) -> u64 {
@@ -248,6 +276,8 @@ struct KabekamiApp {
 
     /// `kdialog` が利用可能か（起動時に 1 回判定し、参照ボタンの活性／非活性に使う）。
     has_kdialog: bool,
+    /// 開いているファイル選択ダイアログ（同時に 1 つまで）。
+    pending_pick: Option<PendingPick>,
 }
 
 impl KabekamiApp {
@@ -276,6 +306,7 @@ impl KabekamiApp {
             new_online_provider: ProviderKind::Bing,
             cache_size_bytes: None,
             has_kdialog: kdialog_available(),
+            pending_pick: None,
         }
     }
 
@@ -294,7 +325,10 @@ impl KabekamiApp {
     /// 翻訳漏れを構造的に防ぐ。
     fn browse_button(&self, ui: &mut egui::Ui) -> bool {
         let s = self.s();
-        let resp = ui.add_enabled(self.has_kdialog, egui::Button::new(s.browse));
+        let resp = ui.add_enabled(
+            self.has_kdialog && self.pending_pick.is_none(),
+            egui::Button::new(s.browse),
+        );
         let clicked = resp.clicked();
         if !self.has_kdialog {
             resp.on_hover_text(s.kdialog_missing);
@@ -338,6 +372,43 @@ impl KabekamiApp {
         });
     }
 
+    /// ダイアログの結果が届いていれば書き込み先に反映する。
+    fn poll_pick(&mut self) {
+        let Some(pending) = &self.pending_pick else { return };
+        let picked = match pending.rx.try_recv() {
+            Ok(picked) => picked,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => None,
+        };
+        let target = pending.target;
+        self.pending_pick = None;
+        let Some(path) = picked else { return };
+        match target {
+            PickTarget::SourceDir => {
+                self.config.sources.directories.push(path);
+                self.new_dir_input.clear();
+            }
+            PickTarget::PreviewImage => {
+                self.preview_image_path = path.to_string_lossy().into_owned();
+                self.request_preview();
+            }
+            PickTarget::CacheDir => {
+                self.config.cache.directory = path;
+                self.cache_size_bytes = None;
+            }
+            PickTarget::DownloadDir(i, provider) => {
+                if let Some(oc) = self
+                    .config
+                    .online_sources
+                    .get_mut(i)
+                    .filter(|oc| oc.provider == provider)
+                {
+                    oc.download_dir = Some(path);
+                }
+            }
+        }
+    }
+
     fn poll_preview(&mut self, ctx: &egui::Context) {
         if let Ok(result) = self.preview_res_rx.try_recv() {
             self.preview_rendering = false;
@@ -361,6 +432,7 @@ impl KabekamiApp {
 impl eframe::App for KabekamiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_preview(ctx);
+        self.poll_pick();
         let s = self.s();
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
@@ -456,10 +528,8 @@ impl KabekamiApp {
                 }
             }
             if self.browse_button(ui) {
-                if let Some(path) = pick_folder(s, None) {
-                    self.config.sources.directories.push(path);
-                    self.new_dir_input.clear();
-                }
+                self.pending_pick =
+                    Some(spawn_pick(ui.ctx(), PickTarget::SourceDir, folder_dialog(s, None)));
             }
         });
     }
@@ -551,7 +621,7 @@ impl KabekamiApp {
                     .hint_text("/path/to/image.jpg")
                     .desired_width(440.0),
             );
-            let mut should_preview =
+            let should_preview =
                 ui.button(s.preview_button).clicked()
                 || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                 || mode_changed;
@@ -567,10 +637,8 @@ impl KabekamiApp {
                             .first()
                             .map(|p| p.as_path())
                     });
-                if let Some(path) = pick_image_file(s, start) {
-                    self.preview_image_path = path.to_string_lossy().into_owned();
-                    should_preview = true;
-                }
+                let args = image_dialog(s, start);
+                self.pending_pick = Some(spawn_pick(ui.ctx(), PickTarget::PreviewImage, args));
             }
             if should_preview {
                 self.request_preview();
@@ -604,10 +672,8 @@ impl KabekamiApp {
                 self.cache_size_bytes = None; // ディレクトリ変更時はリセット
             }
             if self.browse_button(ui) {
-                if let Some(path) = pick_folder(s, Some(&self.config.cache.directory)) {
-                    self.config.cache.directory = path;
-                    self.cache_size_bytes = None;
-                }
+                let args = folder_dialog(s, Some(&self.config.cache.directory));
+                self.pending_pick = Some(spawn_pick(ui.ctx(), PickTarget::CacheDir, args));
             }
         });
 
@@ -721,9 +787,9 @@ impl KabekamiApp {
                         );
                         opt_path_field(ui, &hint, 260.0, &mut oc.download_dir);
                         if self.browse_button(ui) {
-                            if let Some(path) = pick_folder(s, oc.download_dir.as_deref()) {
-                                oc.download_dir = Some(path);
-                            }
+                            let target = PickTarget::DownloadDir(i, oc.provider);
+                            let args = folder_dialog(s, oc.download_dir.as_deref());
+                            self.pending_pick = Some(spawn_pick(ui.ctx(), target, args));
                         }
                     });
                 });
