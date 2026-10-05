@@ -278,12 +278,12 @@ async fn main() -> Result<()> {
                 let provider::FetchResult { provider, new_paths } = result;
                 if !new_paths.is_empty() {
                     let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
-                    let new_paths: Vec<_> = new_paths.into_iter()
-                        .filter(|p| !blacklist.contains(p))
-                        .collect();
-                    let added = new_paths.len();
+                    // 取得済みの画像も `new_paths` に入るので、実際に増えた分だけ数える
+                    let mut added = 0;
                     for path in new_paths {
-                        scheduler.add_image(path);
+                        if !blacklist.contains(&path) && scheduler.add_image(path) {
+                            added += 1;
+                        }
                     }
                     tracing::info!(
                         "provider {}: {} new image(s) added to rotation",

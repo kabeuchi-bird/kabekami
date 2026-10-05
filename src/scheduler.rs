@@ -202,16 +202,17 @@ impl Scheduler {
 
     /// 画像を動的に追加する（ディレクトリ監視で使用）。
     ///
-    /// すでにリストに存在する場合は何もしない。
+    /// すでにリストに存在する場合は何もせず `false` を返す。
     /// ランダムモードではキューにも追加する（一巡の途中でも拾われるように）。
-    pub fn add_image(&mut self, path: PathBuf) {
+    pub fn add_image(&mut self, path: PathBuf) -> bool {
         if !self.image_set.insert(path.clone()) {
-            return; // すでに存在する
+            return false; // すでに存在する
         }
         let idx = self.images.len();
         self.images.push(path);
         // キューの末尾にも追加して、現在の一巡に含める
         self.queue.push_back(idx);
+        true
     }
 
     /// 画像を動的に削除する（ディレクトリ監視で使用）。
@@ -558,5 +559,16 @@ mod tests {
         assert!(s.next().is_none());
         assert!(s.prev().is_none());
         assert!(s.peek_next().is_none());
+    }
+
+    /// 取得通知の件数はこの戻り値で数える。既知の画像を `true` にすると、
+    /// 新しい画像が無くても「N 枚追加」と通知される。
+    #[test]
+    fn add_image_reports_whether_the_image_was_new() {
+        let mut s = Scheduler::new(paths(2), Order::Sequential);
+        assert!(!s.add_image(PathBuf::from("/tmp/img000.jpg")), "既知の画像は false");
+        assert!(s.add_image(PathBuf::from("/tmp/new.jpg")), "新しい画像は true");
+        assert!(!s.add_image(PathBuf::from("/tmp/new.jpg")), "二度目は false");
+        assert_eq!(s.image_count(), 3);
     }
 }
