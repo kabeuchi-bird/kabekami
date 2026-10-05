@@ -232,25 +232,23 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
             // rebuild を通れば新しい一覧に残っていた画像、通らなければ
             // 据え置きの current。どちらも「いま表示しているべき画像」。
             match scheduler.current().cloned() {
-                // 貼り直さないなら、捨てた先読みはここで掛け直す
-                // （貼り直す場合は `apply_and_notify` が掛け直す）
-                Some(_) if !reapply => {
-                    if prefetch_stale {
-                        crate::start_prefetch(prefetcher, scheduler, screens, config, cache);
-                    }
-                }
                 // 記録は `apply_and_notify` 内、成功時のみ。先に persist
                 // すると、適用に失敗した壁紙を「現在」として保存し、
                 // 再起動後のトレイやゴミ箱操作が画面に無い画像を指す
                 // （分岐を畳まないこと）。
-                Some(cur) => {
+                Some(cur) if reapply => {
                     apply_and_notify(&mut apply_ctx!(), &cur, "reload: reapply failed").await;
                 }
+                Some(_) => {}
                 // current が落ちた場合は apply_and_notify を通らないので、
                 // state に残る旧画像を明示的に消す。
                 None => {
                     state_writer.persist(scheduler.is_paused(), None).await;
                 }
+            }
+            // 貼り直した場合は `apply_and_notify` が先読みを掛け直す
+            if !reapply && prefetch_stale {
+                crate::start_prefetch(prefetcher, scheduler, screens, config, cache);
             }
 
             let mode = config.display.mode;
