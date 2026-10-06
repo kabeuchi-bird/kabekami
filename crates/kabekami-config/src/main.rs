@@ -125,8 +125,8 @@ enum PickTarget {
     SourceDir,
     PreviewImage,
     CacheDir,
-    /// `online_sources` の添字。ダイアログを開いている間は行の削除を止めるので、
-    /// 添字はずれない（追加は末尾なので影響しない）。
+    /// `online_sources` の添字。ダイアログを開いている間は設定画面ごと操作を
+    /// 止めるので（`update` 参照）、添字はずれない。
     DownloadDir(usize),
 }
 
@@ -316,10 +316,7 @@ impl KabekamiApp {
     /// 翻訳漏れを構造的に防ぐ。
     fn browse_button(&self, ui: &mut egui::Ui) -> bool {
         let s = self.s();
-        let resp = ui.add_enabled(
-            self.has_kdialog && self.pending_pick.is_none(),
-            egui::Button::new(s.browse),
-        );
+        let resp = ui.add_enabled(self.has_kdialog, egui::Button::new(s.browse));
         let clicked = resp.clicked();
         if !self.has_kdialog {
             resp.on_hover_text(s.kdialog_missing);
@@ -470,15 +467,16 @@ impl eframe::App for KabekamiApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                match self.tab {
+            // ダイアログを開いている間は設定を触らせない（書き込み先を添字で持つため）
+            ui.add_enabled_ui(self.pending_pick.is_none(), |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| match self.tab {
                     Tab::Sources => self.ui_sources(ui),
                     Tab::Online => self.ui_online(ui),
                     Tab::Rotation => self.ui_rotation(ui),
                     Tab::Display => self.ui_display(ui, ctx),
                     Tab::Cache => self.ui_cache(ui),
                     Tab::Ui => self.ui_ui_tab(ui),
-                }
+                });
             });
         });
     }
@@ -722,8 +720,6 @@ impl KabekamiApp {
         ui.add_space(8.0);
 
         let mut remove_idx: Option<usize> = None;
-        // ダイアログの書き込み先は添字で持つので、開いている間は削除させない
-        let can_remove = self.pending_pick.is_none();
         // ループ中に self.browse_button()（&self 借用）を呼ぶため、Vec を take して
         // 所有権を手元に移す。deep clone と違い take/戻しは O(1)。
         let mut sources = std::mem::take(&mut self.config.online_sources);
@@ -731,7 +727,7 @@ impl KabekamiApp {
             ui.group(|ui| {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut oc.enabled, format!("**{}**", oc.provider));
-                    if ui.add_enabled(can_remove, egui::Button::new(s.remove).small()).clicked() {
+                    if ui.small_button(s.remove).clicked() {
                         remove_idx = Some(i);
                     }
                 });

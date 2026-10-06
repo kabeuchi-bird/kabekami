@@ -14,7 +14,7 @@ use tokio::time::Interval;
 use kabekami_common::i18n::Lang;
 
 use crate::blacklist::Blacklist;
-use crate::cache::Cache;
+use crate::cache::{Cache, CacheKey};
 use crate::config::Config;
 use crate::notify::Notifier;
 use crate::prefetch::Prefetcher;
@@ -43,6 +43,21 @@ pub struct ReloadCtx<'a> {
     pub scanned_recursive: &'a mut bool,
     pub watch_rx: &'a mut tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
     pub watcher_handle: &'a mut Option<watcher::DirWatcher>,
+}
+
+/// 先読みが温めるべきキー一式。先読みが OFF か次の画像が無ければ `None`。
+///
+/// `start_prefetch` と同じ材料（次の画像・画面・表示設定・ON/OFF）から求めるので、
+/// 新旧で比べれば先読みのやり直し要否が分かる（条件を手で並べると書き漏れる）。
+fn prefetch_target(
+    scheduler: &Scheduler,
+    screens: &[screen::Monitor],
+    cfg: &Config,
+) -> Option<Vec<CacheKey>> {
+    if !cfg.rotation.prefetch {
+        return None;
+    }
+    scheduler.peek_next().map(|next| crate::cache_keys(next, screens, cfg))
 }
 
 /// 設定リロードを丸ごと省いてよいか。
@@ -145,9 +160,8 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                 watcher_handle.as_ref().is_some_and(|w| w.is_complete());
             let needs_rescan = sources_changed || !watching_everything;
 
-            // 走行中の先読みが温めている画像。あとで変わっていれば、
-            // その先読みはもう「次の画像」を指していない。
-            let warming = scheduler.peek_next().cloned();
+            // 走行中の先読みが温めているキー一式（設定を差し替える前の値で求める）
+            let warming = prefetch_target(scheduler, screens, config);
             let shown = scheduler.current().cloned();
             if needs_rescan {
                 match crate::scan_images(&source_dirs, new_cfg.sources.recursive, blacklist).await {
@@ -191,14 +205,11 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
             let cache_changed = new_cfg.cache.directory != config.cache.directory;
             let display_changed = new_cfg.display != config.display;
 
-            // 先読みの指す先が変わったときだけ捨てる（据え置きなら
-            // ほぼ終わったデコードを捨てる理由がない）。表示・キャッシュ
-            // 設定はパスが同じでもキーが変わるので別に見る。先読みの ON/OFF も
-            // すぐ効かせる（OFF なら走行中を止め、ON なら下で掛け直す）。
-            let prefetch_stale = scheduler.peek_next() != warming.as_ref()
-                || cache_changed
-                || display_changed
-                || new_cfg.rotation.prefetch != config.rotation.prefetch;
+            // 温めるべきキー一式が変わったときだけ捨てる（据え置きなら
+            // ほぼ終わったデコードを捨てる理由がない）。キャッシュの置き場所は
+            // キーに入らないが、`Cache` ごと差し替えるので別に見る。
+            let prefetch_stale =
+                cache_changed || prefetch_target(scheduler, screens, &new_cfg) != warming;
             if prefetch_stale {
                 prefetcher.abort();
             }
@@ -313,5 +324,30 @@ mod tests {
             !reload_is_a_noop(&other, &config, &scanned, recursive, true),
             "内容が違えば当然省けない"
         );
+    }
+
+    /// 先読みのやり直し要否は新旧の `prefetch_target` の比較だけで決まる。
+    /// 先読みに効く設定（ON/OFF・表示設定）はキーを変え、効かない設定は変えないこと。
+    #[test]
+    fn prefetch_target_tracks_only_what_the_prefetch_uses() {
+        use crate::config::Order;
+        let scheduler = Scheduler::new(vec![PathBuf::from("/pics/a.jpg")], Order::Sequential);
+        let screens = [screen::Monitor { name: "DP-1".into(), width: 1920, height: 1080 }];
+        let config = Config::default();
+        let base = prefetch_target(&scheduler, &screens, &config);
+        assert!(base.is_some(), "既定では次の画像を温める");
+
+        let mut unrelated = config.clone();
+        unrelated.rotation.interval_secs += 1;
+        unrelated.ui.notify_fetch = !unrelated.ui.notify_fetch;
+        assert_eq!(prefetch_target(&scheduler, &screens, &unrelated), base, "無関係な設定では変わらない");
+
+        let mut off = config.clone();
+        off.rotation.prefetch = false;
+        assert_eq!(prefetch_target(&scheduler, &screens, &off), None, "OFF なら温めない");
+
+        let mut display = config.clone();
+        display.display.blur_sigma += 1.0;
+        assert_ne!(prefetch_target(&scheduler, &screens, &display), base, "表示設定でキーが変わる");
     }
 }

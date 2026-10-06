@@ -1199,8 +1199,7 @@ mod tests {
         }
     }
 
-    /// 除外したコマンドで抑止の起点を動かすと、`Next` の 400ms 後に
-    /// `SetMode`、さらに 200ms 後の `Next` が捨てられる。
+    /// Next → 400ms → SetMode → 200ms → Next の最後の Next が通ること。
     #[test]
     fn exempt_commands_do_not_restart_the_window() {
         let first = std::time::Instant::now();

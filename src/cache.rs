@@ -66,7 +66,7 @@ impl Drop for ClaimGuard {
 }
 
 /// キャッシュのルックアップ・格納に使うキー。
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CacheKey {
     pub src: PathBuf,
     pub screen_w: u32,
