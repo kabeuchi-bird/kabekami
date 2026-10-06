@@ -125,8 +125,9 @@ enum PickTarget {
     SourceDir,
     PreviewImage,
     CacheDir,
-    /// `online_sources` の添字。開いている間に削除されても取り違えないよう種別も持つ。
-    DownloadDir(usize, ProviderKind),
+    /// `online_sources` の添字。ダイアログを開いている間は行の削除を止めるので、
+    /// 添字はずれない（追加は末尾なので影響しない）。
+    DownloadDir(usize),
 }
 
 /// 開いているダイアログ。kdialog はユーザーが閉じるまで戻らないので
@@ -405,13 +406,8 @@ impl KabekamiApp {
                 self.config.cache.directory = path;
                 self.cache_size_bytes = None;
             }
-            PickTarget::DownloadDir(i, provider) => {
-                if let Some(oc) = self
-                    .config
-                    .online_sources
-                    .get_mut(i)
-                    .filter(|oc| oc.provider == provider)
-                {
+            PickTarget::DownloadDir(i) => {
+                if let Some(oc) = self.config.online_sources.get_mut(i) {
                     oc.download_dir = Some(path);
                 }
             }
@@ -726,6 +722,8 @@ impl KabekamiApp {
         ui.add_space(8.0);
 
         let mut remove_idx: Option<usize> = None;
+        // ダイアログの書き込み先は添字で持つので、開いている間は削除させない
+        let can_remove = self.pending_pick.is_none();
         // ループ中に self.browse_button()（&self 借用）を呼ぶため、Vec を take して
         // 所有権を手元に移す。deep clone と違い take/戻しは O(1)。
         let mut sources = std::mem::take(&mut self.config.online_sources);
@@ -733,7 +731,7 @@ impl KabekamiApp {
             ui.group(|ui| {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut oc.enabled, format!("**{}**", oc.provider));
-                    if ui.small_button(s.remove).clicked() {
+                    if ui.add_enabled(can_remove, egui::Button::new(s.remove).small()).clicked() {
                         remove_idx = Some(i);
                     }
                 });
@@ -790,7 +788,7 @@ impl KabekamiApp {
                         );
                         opt_path_field(ui, &hint, 260.0, &mut oc.download_dir);
                         if self.browse_button(ui) {
-                            let target = PickTarget::DownloadDir(i, oc.provider);
+                            let target = PickTarget::DownloadDir(i);
                             self.start_pick(ui.ctx(), target, oc.download_dir.iter().cloned().collect());
                         }
                     });
