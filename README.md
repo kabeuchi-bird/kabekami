@@ -137,11 +137,11 @@ kabekami --quit
 
 Commands are forwarded via D-Bus (`org.kabekami.Daemon`).
 
-> **KRunner で実行する場合の注意**: KRunner (Alt+Space) で `kabekami --next` 等を実行すると、ShellRunner と AppRunner / HistoryRunner の両方がマッチして同じコマンドが二重発火することがあります。kabekami 側で 500 ms のスロットルを入れているため通常の二重発火は吸収されますが、安定して使いたい場合は下記の **Global Shortcuts** を推奨します。
+> **Note on KRunner**: Running `kabekami --next` etc. from KRunner (Alt+Space) can fire the command twice, because both ShellRunner and AppRunner / HistoryRunner match the same input. kabekami throttles commands for 500 ms, which absorbs the usual double fire, but the **Global Shortcuts** below are the more reliable option.
 
 ### Global Shortcuts
 
-Register shortcuts in **System Settings → Shortcuts → kabekami** (no defaults assigned):
+Register shortcuts in **System Settings → Shortcuts → kabekami** (no defaults assigned). Action names follow the UI language (a language change applies after restarting the daemon):
 
 | Action | Description |
 |--------|-------------|

@@ -14,7 +14,7 @@ use reqwest::Url;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::{ensure_downloaded, FetchContext};
+use super::{ensure_downloaded, get_json, FetchContext};
 
 const BASE_URL: &str = "https://www.bing.com/";
 /// `urlbase` の resolve 後にこのホスト以外を返したら拒否する。
@@ -54,13 +54,7 @@ pub async fn fetch(
         n, mkt
     );
 
-    let resp: BingResponse = client
-        .get(&api_url)
-        .send()
-        .await?
-        .json()
-        .await
-        .context("failed to parse Bing API response")?;
+    let resp: BingResponse = get_json(client.get(&api_url), "bing").await?;
 
     let res_suffix = resolution_suffix(ctx.screen_w, ctx.screen_h);
     let base = Url::parse(BASE_URL).context("BASE_URL is invalid (compile-time bug)")?;

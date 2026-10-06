@@ -31,23 +31,15 @@ pub struct Prefetcher {
 impl Prefetcher {
     /// 指定したキャッシュキー群に対応する画像の先読み加工をバックグラウンドで開始する。
     ///
-    /// 先読み中のタスクは abort してから起動し、キャッシュにあるキーは飛ばす。
-    /// 加工中のキーは `process_single_flight` が待ち側に回すので、ここでは見ない。
+    /// 先読み中のタスクは abort してから起動する。キャッシュにあるかどうかは
+    /// ここでは見ない（ファイル I/O なので単一ワーカーの上で行わない）。
+    /// ヒットも加工中の待ち合わせも `process_single_flight` が受け持つ。
     /// キーが複数なのは `CacheKey` が解像度を含むため
     /// （1 つだけ温めても解像度の違うモニターはミスする）。
     pub fn start(&mut self, keys: impl IntoIterator<Item = CacheKey>, cache: Arc<Cache>) {
         self.abort();
 
         for key in keys {
-            // キャッシュにすでにある場合はタスク不要
-            if cache.get(&key).is_some() {
-                tracing::debug!(
-                    "prefetch: cache hit, skipping {} ({}x{})",
-                    key.src.display(), key.screen_w, key.screen_h,
-                );
-                continue;
-            }
-
             tracing::debug!(
                 "prefetch: starting for {} ({}x{})",
                 key.src.display(), key.screen_w, key.screen_h,
@@ -292,17 +284,16 @@ mod tests {
         owned(cache.claim(cache.path_for(&k)));
     }
 
-    /// `start` はキャッシュにあるキーを飛ばす。
+    /// キャッシュ済みのキーは元画像を読まずに返る（先読みが同じ画像を
+    /// 開始しても、デコードはやり直さない）。元画像は存在しないので、
+    /// 読みに行けばエラーになる。
     #[tokio::test]
-    async fn start_skips_keys_already_cached() {
+    async fn a_cached_key_is_returned_without_decoding() {
         let dir = tempfile::tempdir().unwrap();
         let cache = cache(&dir);
         let k = key("/nonexistent/a.jpg");
-        cache.store(&k, &RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 255]))).unwrap();
+        let stored = cache.store(&k, &RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 255]))).unwrap();
 
-        let mut prefetcher = Prefetcher::default();
-        prefetcher.start([k], Arc::clone(&cache));
-
-        assert!(prefetcher.pending.is_empty(), "キャッシュ済みなら起動しない");
+        assert_eq!(process_single_flight(&k, &cache).await.unwrap(), stored);
     }
 }
