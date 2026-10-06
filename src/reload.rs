@@ -193,10 +193,12 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
 
             // 先読みの指す先が変わったときだけ捨てる（据え置きなら
             // ほぼ終わったデコードを捨てる理由がない）。表示・キャッシュ
-            // 設定はパスが同じでもキーが変わるので別に見る。
+            // 設定はパスが同じでもキーが変わるので別に見る。先読みの ON/OFF も
+            // すぐ効かせる（OFF なら走行中を止め、ON なら下で掛け直す）。
             let prefetch_stale = scheduler.peek_next() != warming.as_ref()
                 || cache_changed
-                || display_changed;
+                || display_changed
+                || new_cfg.rotation.prefetch != config.rotation.prefetch;
             if prefetch_stale {
                 prefetcher.abort();
             }
