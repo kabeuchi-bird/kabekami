@@ -238,7 +238,7 @@ async fn main() -> Result<()> {
     }
 
     let mut ticker = make_ticker(config.rotation.interval_secs);
-    let mut last_cmd_at: Option<std::time::Instant> = None;
+    let mut throttle = CommandThrottle::default();
 
     // 現在の画像を一覧から外した（ゴミ箱／ブラックリスト）あとの共通処理。
     // 次の画像へ進み、無ければ現在画像の表示をクリアし、タイマーを仕切り直す。
@@ -312,12 +312,10 @@ async fn main() -> Result<()> {
             }
 
             Some(cmd) = cmd_rx.recv() => {
-                let now = std::time::Instant::now();
-                if should_throttle(&cmd, last_cmd_at, now) {
+                if !throttle.admit(&cmd, std::time::Instant::now()) {
                     tracing::debug!("command throttled (< 500ms): {:?}", cmd);
                     continue;
                 }
-                last_cmd_at = Some(now);
                 match cmd {
                     TrayCmd::Next => {
                         prefetcher.abort();
@@ -812,7 +810,7 @@ fn distinct_sizes(screens: &[screen::Monitor]) -> Vec<(u32, u32)> {
     sizes
 }
 
-/// 連続して届いたコマンドの 2 発目以降を捨てるか判定する。
+/// 連続して届いたコマンドの 2 発目以降を捨てる。
 ///
 /// 500ms という長さの理由: KRunner で `kabekami --next` を実行すると
 /// CLI バイナリの起動 + D-Bus 接続 (50-200ms) を 2 回経由して daemon に
@@ -822,21 +820,34 @@ fn distinct_sizes(screens: &[screen::Monitor]) -> Vec<(u32, u32)> {
 /// ユーザー操作ではなく、取りこぼすと内部状態が画面と食い違うため除外する。
 /// 値を設定するだけの SetMode / SetInterval も除外する。二重に届いても結果は
 /// 同じで、抑止すると直前の「次へ」から 500ms 以内の選択が黙って捨てられる。
-fn should_throttle(
-    cmd: &TrayCmd,
-    last_cmd_at: Option<std::time::Instant>,
-    now: std::time::Instant,
-) -> bool {
-    const THROTTLE: Duration = Duration::from_millis(500);
-    let exempt = matches!(
-        cmd,
-        TrayCmd::Quit
-            | TrayCmd::PlasmaRestarted
-            | TrayCmd::ScreensChanged(_)
-            | TrayCmd::SetMode(_)
-            | TrayCmd::SetInterval(_)
-    );
-    !exempt && last_cmd_at.is_some_and(|t| now.duration_since(t) < THROTTLE)
+/// 除外したコマンドは抑止の起点にもしない（直後の「次へ」を捨てないため）。
+#[derive(Default)]
+struct CommandThrottle {
+    /// 最後に受け付けた抑止対象のコマンドの時刻。
+    last: Option<std::time::Instant>,
+}
+
+impl CommandThrottle {
+    /// `cmd` を処理してよければ `true`。
+    fn admit(&mut self, cmd: &TrayCmd, now: std::time::Instant) -> bool {
+        const THROTTLE: Duration = Duration::from_millis(500);
+        let exempt = matches!(
+            cmd,
+            TrayCmd::Quit
+                | TrayCmd::PlasmaRestarted
+                | TrayCmd::ScreensChanged(_)
+                | TrayCmd::SetMode(_)
+                | TrayCmd::SetInterval(_)
+        );
+        if exempt {
+            return true;
+        }
+        if self.last.is_some_and(|t| now.duration_since(t) < THROTTLE) {
+            return false;
+        }
+        self.last = Some(now);
+        true
+    }
 }
 
 fn make_ticker(interval_secs: u64) -> tokio::time::Interval {
@@ -1128,15 +1139,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn first_command_is_never_throttled() {
-        assert!(!should_throttle(&TrayCmd::Next, None, std::time::Instant::now()));
+    /// 直前に `Next` を受け付けた抑止器。
+    fn throttle_after_next(at: std::time::Instant) -> CommandThrottle {
+        let mut t = CommandThrottle::default();
+        assert!(t.admit(&TrayCmd::Next, at), "最初のコマンドは通る");
+        t
     }
 
     #[test]
     fn user_command_after_500ms_passes() {
         let first = std::time::Instant::now();
-        assert!(!should_throttle(&TrayCmd::Next, Some(first), first + Duration::from_millis(500)));
+        let mut t = throttle_after_next(first);
+        assert!(t.admit(&TrayCmd::Next, first + Duration::from_millis(500)));
     }
 
     /// KRunner 経由だと同じコマンドが 2 回届くことがあるため、
@@ -1155,7 +1169,8 @@ mod tests {
             TrayCmd::CopyToFavorites,
             TrayCmd::OpenSettings,
         ] {
-            assert!(should_throttle(&cmd, Some(first), again), "{cmd:?} は連打を吸収すべき");
+            let mut t = throttle_after_next(first);
+            assert!(!t.admit(&cmd, again), "{cmd:?} は連打を吸収すべき");
         }
     }
 
@@ -1176,10 +1191,24 @@ mod tests {
             TrayCmd::SetMode(DisplayMode::Fill),
             TrayCmd::SetInterval(30),
         ] {
+            let mut t = throttle_after_next(first);
             assert!(
-                !should_throttle(&cmd, Some(first), immediately_after),
+                t.admit(&cmd, immediately_after),
                 "{cmd:?} はスロットリングの対象外であるべき"
             );
         }
+    }
+
+    /// 除外したコマンドで抑止の起点を動かすと、`Next` の 400ms 後に
+    /// `SetMode`、さらに 200ms 後の `Next` が捨てられる。
+    #[test]
+    fn exempt_commands_do_not_restart_the_window() {
+        let first = std::time::Instant::now();
+        let mut t = throttle_after_next(first);
+        assert!(t.admit(&TrayCmd::SetMode(DisplayMode::Fill), first + Duration::from_millis(400)));
+        assert!(
+            t.admit(&TrayCmd::Next, first + Duration::from_millis(600)),
+            "最初の Next から 500ms 経っているので通る"
+        );
     }
 }
