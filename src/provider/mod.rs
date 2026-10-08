@@ -90,7 +90,7 @@ async fn fetch_if_due(
 
     match fetch_one(cfg, &dir, client, ctx).await {
         Ok(paths) if !paths.is_empty() => {
-            prune_dir(&dir, &paths).await;
+            prune_dir(&dir, &paths, cfg.provider.name()).await;
             mark_fetch_done(cfg).await;
             tracing::info!("provider {}: {} image(s) available", provider_name, paths.len());
             Some(FetchResult { provider: provider_name, new_paths: paths })
@@ -140,17 +140,21 @@ async fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
     elapsed.as_secs() >= interval_secs
 }
 
-/// ダウンロードディレクトリから `keep` に含まれないファイルを削除する。
+/// ダウンロードディレクトリから、このプロバイダーが保存した画像
+/// （`<provider>_` で始まる名前）のうち `keep` に含まれないものを削除する。
 ///
-/// `.last_fetch` タイムスタンプと `.tmp` 一時ファイルは `keep` にないが残す。
+/// 名前で絞るのは、`download_dir` がユーザーの画像フォルダや他のプロバイダーと
+/// 重なっていても、自分が落としたファイル以外を消さないため（ゴミ箱を経由しない
+/// 完全削除なので、ここを広げると取り返しがつかない）。`.tmp` 一時ファイルは残す。
 /// フェッチ成功後に呼び出すことで、`count` を超えた古い画像を自動的に除去する。
-async fn prune_dir(dir: &Path, keep: &[PathBuf]) {
+async fn prune_dir(dir: &Path, keep: &[PathBuf], provider: &str) {
+    let prefix = format!("{provider}_");
     let keep_set: std::collections::HashSet<&PathBuf> = keep.iter().collect();
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name == ".last_fetch" || name.ends_with(".tmp") {
+        if !name.starts_with(&prefix) || name.ends_with(".tmp") {
             continue;
         }
         if !keep_set.contains(&path) {
@@ -576,6 +580,24 @@ mod download_tests {
         let addrs: Vec<std::net::SocketAddr> =
             vec!["[::ffff:169.254.169.254]:0".parse().unwrap()];
         assert!(validate_resolved_addrs("metadata.example", &addrs).is_err());
+    }
+
+    /// prune はこのプロバイダーが保存した古い画像だけを消す。同じディレクトリに
+    /// あるユーザーの画像や他プロバイダーの画像は残す（#58）。
+    #[tokio::test]
+    async fn prune_only_removes_own_stale_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for name in ["bing_old.jpg", "bing_new.jpg", "bing_new.tmp", "holiday.jpg", "reddit_x.jpg", ".last_fetch"] {
+            std::fs::write(d.join(name), b"").unwrap();
+        }
+
+        super::prune_dir(d, &[d.join("bing_new.jpg")], "bing").await;
+
+        assert!(!d.join("bing_old.jpg").exists(), "自分の古い画像は消す");
+        for name in ["bing_new.jpg", "bing_new.tmp", "holiday.jpg", "reddit_x.jpg", ".last_fetch"] {
+            assert!(d.join(name).exists(), "{name} は残すべき");
+        }
     }
 
     /// 空集合は素通り（呼び出し元の lookup_host が空を返すことは通常ないが、安全側）。
