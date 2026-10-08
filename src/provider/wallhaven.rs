@@ -35,7 +35,7 @@ pub async fn fetch(
 ) -> Result<Vec<PathBuf>> {
     let query = cfg.query.as_deref().unwrap_or("nature");
 
-    let mut params: Vec<(&str, String)> = vec![
+    let params: Vec<(&str, String)> = vec![
         ("q", query.to_string()),
         ("sorting", "toplist".to_string()),
         ("purity", "100".to_string()),    // SFW のみ
@@ -43,13 +43,14 @@ pub async fn fetch(
         ("atleast", "1920x1080".to_string()),
         ("per_page", cfg.count.clamp(1, 24).to_string()),
     ];
+    let mut req = client.get(API_URL).query(&params);
+    // キーはクエリ (`apikey`) ではなくヘッダで送る。reqwest のエラー表示は URL を
+    // 含むため、クエリに載せると通信失敗の warn（と WARN 通知）にキーが出る（#57）。
     if let Some(key) = cfg.api_key.as_deref().filter(|k| !k.is_empty()) {
-        params.push(("apikey", key.to_string()));
+        req = req.header("X-API-Key", key);
     }
 
-    let resp: WallhavenResponse = client
-        .get(API_URL)
-        .query(&params)
+    let resp: WallhavenResponse = req
         .send()
         .await?
         .json()

@@ -304,7 +304,9 @@ impl std::fmt::Display for ProviderKind {
 }
 
 /// オンライン壁紙ソース 1 件の設定。TOML では `[[online_sources]]` 配列。
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+///
+/// `Debug` は手書き（`api_key` を伏せるため。下の impl を参照）。
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 pub struct OnlineSourceConfig {
     /// プロバイダー種別。
     pub provider: ProviderKind,
@@ -336,6 +338,39 @@ pub struct OnlineSourceConfig {
     /// 画像品質（Unsplash で使用: `"regular"` または `"full"`）。デフォルト: `"regular"`。
     #[serde(default)]
     pub quality: Option<String>,
+}
+
+/// 起動時の設定ダンプ（`tracing::info!(?config)`）で API キーが journal や
+/// WARN 通知に出ないよう、`api_key` だけ中身を伏せる（#57）。
+/// `..` を使わずに分解しているので、フィールドを足すとここがコンパイルエラーになり、
+/// 出力から漏れることはない。
+impl std::fmt::Debug for OnlineSourceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            provider,
+            enabled,
+            download_dir,
+            api_key,
+            query,
+            count,
+            subreddit,
+            interval_hours,
+            locale,
+            quality,
+        } = self;
+        f.debug_struct("OnlineSourceConfig")
+            .field("provider", provider)
+            .field("enabled", enabled)
+            .field("download_dir", download_dir)
+            .field("api_key", &api_key.as_ref().map(|_| "***"))
+            .field("query", query)
+            .field("count", count)
+            .field("subreddit", subreddit)
+            .field("interval_hours", interval_hours)
+            .field("locale", locale)
+            .field("quality", quality)
+            .finish()
+    }
 }
 
 impl OnlineSourceConfig {
@@ -559,5 +594,17 @@ max_size_mb = 123
         cfg.normalize();
         assert!((cfg.display.blur_sigma - 12.5).abs() < f32::EPSILON);
         assert!((cfg.display.bg_darken - 0.7).abs() < f32::EPSILON);
+    }
+
+    /// 起動時の `?config` ダンプに API キーを出さない（#57）。
+    #[test]
+    fn debug_output_hides_api_key() {
+        let cfg: Config = toml::from_str(
+            "[[online_sources]]\nprovider = \"unsplash\"\napi_key = \"secret-key-123\"\n",
+        )
+        .unwrap();
+        let dump = format!("{cfg:?}");
+        assert!(!dump.contains("secret-key-123"), "{dump}");
+        assert!(dump.contains("api_key: Some(\"***\")"), "{dump}");
     }
 }
