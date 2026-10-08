@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use eframe::egui;
-use kabekami_common::config::{Config, DisplayMode, OnlineSourceConfig, Order, ProviderKind};
+use kabekami_common::config::{
+    is_cache_file_name, Config, DisplayMode, OnlineSourceConfig, Order, ProviderKind,
+};
 use kabekami_common::i18n::{self, ConfigStrings, Lang};
 
 fn main() -> eframe::Result<()> {
@@ -120,11 +122,18 @@ fn pick_image_file(s: &'static ConfigStrings, start: Option<&std::path::Path>) -
     ])
 }
 
-fn compute_dir_size(dir: &std::path::Path) -> u64 {
+/// `dir` 直下の kabekami のキャッシュファイル。容量表示も消去もこれだけを対象にする
+/// （`cache.directory` が誤って画像フォルダを指していてもユーザーのファイルに触れない）。
+fn cache_files(dir: &std::path::Path) -> impl Iterator<Item = std::fs::DirEntry> {
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(is_cache_file_name))
+}
+
+fn compute_dir_size(dir: &std::path::Path) -> u64 {
+    cache_files(dir)
         .filter_map(|e| e.metadata().ok())
         .filter(|m| m.is_file())
         .map(|m| m.len())
@@ -623,12 +632,10 @@ impl KabekamiApp {
                 self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
             }
             if ui.button(s.clear_cache).clicked() {
-                if let Ok(entries) = std::fs::read_dir(&self.config.cache.directory) {
-                    for entry in entries.flatten() {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
+                for entry in cache_files(&self.config.cache.directory) {
+                    let _ = std::fs::remove_file(entry.path());
                 }
-                self.cache_size_bytes = Some(0);
+                self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
             }
             match self.cache_size_bytes {
                 None => {

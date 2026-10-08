@@ -115,6 +115,21 @@ impl Default for Cache {
     }
 }
 
+/// kabekami が書き出したキャッシュファイルの名前か。
+///
+/// `<16 桁 hex>.webp`（旧形式の `.jpg` / `.png` を含む）と、書きかけの
+/// `<16 桁 hex>.<pid>-<n>.tmp.webp` だけを真とする。キャッシュの消去・LRU 退避・
+/// 容量表示はすべてこれで絞る。`cache.directory` が誤って手持ちの画像フォルダを
+/// 指していても、ユーザーのファイルを消さないため（#59）。
+pub fn is_cache_file_name(name: &str) -> bool {
+    let Some((hash, rest)) = name.split_at_checked(16) else {
+        return false;
+    };
+    hash.bytes().all(|b| b.is_ascii_hexdigit())
+        && (matches!(rest, ".webp" | ".jpg" | ".png")
+            || (rest.starts_with('.') && rest.ends_with(".tmp.webp")))
+}
+
 /// UI 表示言語の設定。
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
@@ -559,5 +574,15 @@ max_size_mb = 123
         cfg.normalize();
         assert!((cfg.display.blur_sigma - 12.5).abs() < f32::EPSILON);
         assert!((cfg.display.bg_darken - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cache_file_name_matches_only_kabekami_output() {
+        for ok in ["0123456789abcdef.webp", "0123456789abcdef.jpg", "0123456789abcdef.1234-5.tmp.webp"] {
+            assert!(is_cache_file_name(ok), "{ok}");
+        }
+        for ng in ["holiday.jpg", "IMG_20240101_1234.webp", "0123456789abcdef.txt", "0123456789abcdef", "0123456789abcdefg.webp", "日本語のファイル名.webp"] {
+            assert!(!is_cache_file_name(ng), "{ng}");
+        }
     }
 }
