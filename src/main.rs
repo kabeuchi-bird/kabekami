@@ -350,10 +350,11 @@ async fn main() -> Result<()> {
 
                     TrayCmd::SetMode(mode) => {
                         tracing::info!("display mode → {:?}", mode);
+                        let before = config.clone();
                         config.display.mode = mode;
                         // トレイでの変更を再起動後も保つ。保存で発生する監視イベントは
                         // リロード側の同値スキップで吸収される。
-                        persist_config(&config, "display mode").await;
+                        persist_config(&before, &config, "display mode").await;
                         // 画像は同じだがモードが変わるとキャッシュキーも変わるので作り直す。
                         // 適用後の通知・トレイ・先読みは apply_and_notify に任せる
                         // （ここで手書きすると再適用経路が 2 系統に分かれる）。
@@ -365,8 +366,9 @@ async fn main() -> Result<()> {
                     TrayCmd::SetInterval(secs) => {
                         let secs = secs.max(crate::config::MIN_INTERVAL_SECS);
                         tracing::info!("interval → {}s", secs);
+                        let before = config.clone();
                         config.rotation.interval_secs = secs;
-                        persist_config(&config, "interval").await;
+                        persist_config(&before, &config, "interval").await;
                         ticker = make_ticker(secs);
                         update_tray(&tray_handle, move |t| t.interval_secs = secs).await;
                     }
@@ -967,11 +969,12 @@ fn tray_display_name(path: Option<&Path>) -> String {
         .to_string()
 }
 
-/// 設定を保存し、失敗しても警告に留めて処理を続行する。
+/// `before` から変えたキーだけを保存し、失敗しても警告に留めて処理を続行する。
+/// 全体を書き直さないので、ユーザーのコメントや GUI が保存した他のキーは残る。
 /// `what` は失敗ログに出す変更内容（例: `"display mode"`）。
-async fn persist_config(config: &Config, what: &str) {
-    let owned = config.clone();
-    state::save_offloaded(move || owned.save(), what).await;
+async fn persist_config(before: &Config, config: &Config, what: &str) {
+    let (before, owned) = (before.clone(), config.clone());
+    state::save_offloaded(move || owned.save_changes(&before), what).await;
 }
 
 /// 期限の来たオンラインプロバイダーの取得をバックグラウンドで起動し、`task` に保持する。

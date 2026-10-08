@@ -25,6 +25,9 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 ///
 /// 失敗時は tmp ファイルを掃除してからエラーを返す。
 pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+    // シンボリックリンク（ドットファイル管理など）はリンク先に書く。そのまま rename
+    // するとリンクが実ファイルに置き換わる（#60）。未作成なら元のパスのまま。
+    let path = &fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
     })?;
@@ -105,6 +108,21 @@ mod tests {
         assert!(leftover.is_empty(), "no tmp files should remain");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// シンボリックリンクはリンクのまま残し、リンク先を書き換える。
+    #[test]
+    fn writes_through_symlinks_without_replacing_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.toml");
+        let link = dir.path().join("config.toml");
+        fs::write(&target, b"old").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        atomic_write(&link, b"new").unwrap();
+
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"new");
     }
 
     #[test]

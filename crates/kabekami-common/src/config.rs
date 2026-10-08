@@ -177,22 +177,36 @@ impl Config {
         Ok(dir.join("kabekami").join("config.toml"))
     }
 
-    /// 設定を TOML として `~/.config/kabekami/config.toml` に書き出す。
-    pub fn save(&self) -> Result<()> {
+    /// `base`（読み込んだ時点の設定）から変えたキーだけを
+    /// `~/.config/kabekami/config.toml` に書き込む。詳細は `save_changes_to`。
+    pub fn save_changes(&self, base: &Config) -> Result<()> {
         let path = Self::config_path()?;
-        self.save_to(&path)
+        self.save_changes_to(base, &path)
     }
 
-    /// 設定を TOML として指定パスに書き出す。
+    /// `base` から変えたキーだけを、既存のファイルに上書きする（#60）。
     ///
-    /// `atomic_write::atomic_write` 経由で:
-    /// - 一意な tmp 名（PID + nanos）で別プロセスの並列書き込みと衝突しない
-    /// - tmp に書き込んだ後 `sync_all()` し、`rename` で差し替え、親ディレクトリも fsync
-    /// - 電源断時にも `config.toml` が途中状態で残らない
-    pub fn save_to(&self, path: &Path) -> Result<()> {
-        let text = toml::to_string_pretty(self)
-            .context("failed to serialize config")?;
-        crate::atomic_write::atomic_write(path, text.as_bytes())
+    /// 全体を書き直さないのは、次のものを失わないため:
+    /// - ユーザーのコメントや書式（同梱の雛形はコメント付き）
+    /// - 触っていないキーの書き方（`~/Pictures` が `normalize()` 後の絶対パスにならない）
+    /// - 他のプロセスが保存したキー（GUI を開いている間にトレイで変えた値など）
+    ///
+    /// 書き込みは `atomic_write` 経由（電源断時に途中状態のファイルを残さない）。
+    pub fn save_changes_to(&self, base: &Config, path: &Path) -> Result<()> {
+        let mut doc: toml_edit::DocumentMut = match std::fs::read_to_string(path) {
+            Ok(text) => text
+                .parse()
+                .with_context(|| format!("failed to parse config file: {}", path.display()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("failed to read config file: {}", path.display()))
+            }
+        };
+        let old = toml::Table::try_from(base).context("failed to serialize config")?;
+        let new = toml::Table::try_from(self).context("failed to serialize config")?;
+        merge_changes(doc.as_table_mut(), &old, &new)?;
+        crate::atomic_write::atomic_write(path, doc.to_string().as_bytes())
             .with_context(|| format!("failed to write config: {}", path.display()))
     }
 
@@ -357,6 +371,46 @@ impl OnlineSourceConfig {
     }
 }
 
+/// `old` → `new` で変わったキーだけを `doc` に反映する。
+///
+/// 両方がテーブルで、`doc` 側も通常のテーブルなら中へ降りてキー単位で比べる
+/// （同じセクションの他のキーとコメントを残すため）。それ以外は値ごと置き換える
+/// （`[[online_sources]]` は 1 件でも変われば配列ごと書き直す）。
+fn merge_changes(doc: &mut toml_edit::Table, old: &toml::Table, new: &toml::Table) -> Result<()> {
+    for (key, nv) in new {
+        let ov = old.get(key);
+        if ov == Some(nv) {
+            continue;
+        }
+        if let (Some(toml::Value::Table(ot)), toml::Value::Table(nt)) = (ov, nv) {
+            let item = doc
+                .entry(key)
+                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+            if let Some(t) = item.as_table_mut() {
+                merge_changes(t, ot, nt)?;
+                continue;
+            }
+        }
+        doc.insert(key, to_item(key, nv)?);
+    }
+    for key in old.keys().filter(|k| !new.contains_key(*k)) {
+        doc.remove(key);
+    }
+    Ok(())
+}
+
+/// `toml::Value` を `toml_edit::Item` に変換する。`[[...]]` やセクションとして
+/// 書かれるよう、`key = value` の 1 項目の文書として出力してから取り出す。
+fn to_item(key: &str, value: &toml::Value) -> Result<toml_edit::Item> {
+    let mut single = toml::Table::new();
+    single.insert(key.to_owned(), value.clone());
+    let mut doc: toml_edit::DocumentMut = toml::to_string(&single)
+        .context("failed to serialize config")?
+        .parse()
+        .context("failed to re-parse serialized config")?;
+    doc.remove(key).context("serialized config lost its key")
+}
+
 fn default_online_count() -> u32 {
     10
 }
@@ -486,20 +540,66 @@ max_size_mb = 123
 
     #[test]
     fn save_and_reload_roundtrip() {
-        let dir = std::env::temp_dir().join("kabekami-config-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("config.toml");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
 
-        let mut cfg = Config::default();
+        let base = Config::default();
+        let mut cfg = base.clone();
         cfg.rotation.interval_secs = 300;
         cfg.display.mode = DisplayMode::Fill;
         cfg.display.blur_sigma = 15.0;
-        cfg.save_to(&path).unwrap();
+        cfg.save_changes_to(&base, &path).unwrap();
 
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.rotation.interval_secs, 300);
         assert_eq!(loaded.display.mode, DisplayMode::Fill);
         assert!((loaded.display.blur_sigma - 15.0).abs() < f32::EPSILON);
+    }
+
+    /// 保存は変えたキーだけを書き換える。コメント・`~` のパス・他から保存された
+    /// キーは残る（#60）。
+    #[test]
+    fn save_changes_keeps_comments_untouched_keys_and_concurrent_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# 手書きのコメント\n[sources]\ndirectories = [\"~/Pictures\"] # 壁紙\n\n[rotation]\ninterval_secs = 60\n",
+        )
+        .unwrap();
+
+        // GUI が読み込んだ時点の設定
+        let base = Config::load_from(&path).unwrap();
+        // GUI を開いている間に、トレイが表示モードを保存した
+        let mut tray = base.clone();
+        tray.display.mode = DisplayMode::Fill;
+        tray.save_changes_to(&base, &path).unwrap();
+        // GUI は間隔だけを変えて保存する（表示モードは古い値のまま持っている）
+        let mut gui = base.clone();
+        gui.rotation.interval_secs = 120;
+        gui.save_changes_to(&base, &path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# 手書きのコメント"), "{text}");
+        assert!(text.contains("\"~/Pictures\"] # 壁紙"), "{text}");
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.rotation.interval_secs, 120);
+        assert_eq!(loaded.display.mode, DisplayMode::Fill, "トレイの変更が消えた");
+    }
+
+    /// 値を消した（`Some` → `None`）キーはファイルからも消える。
+    #[test]
+    fn save_changes_removes_cleared_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[sources]\nfavorites_dir = \"/fav\"\n").unwrap();
+
+        let base = Config::load_from(&path).unwrap();
+        let mut cfg = base.clone();
+        cfg.sources.favorites_dir = None;
+        cfg.save_changes_to(&base, &path).unwrap();
+
+        assert_eq!(Config::load_from(&path).unwrap().sources.favorites_dir, None);
     }
 
     #[test]

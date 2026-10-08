@@ -54,6 +54,7 @@ kdialog がインストールされていません。
 # ステータス表示
 saved         = "設定を保存しました"
 save_failed   = "保存失敗"
+load_failed   = "config.toml を読み込めません。直すまで保存は無効です"
 preview_error = "プレビューエラー"
 
 # タブ見出し
