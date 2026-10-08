@@ -43,6 +43,8 @@ pub struct ReloadCtx<'a> {
     pub scanned_recursive: &'a mut bool,
     pub watch_rx: &'a mut tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
     pub watcher_handle: &'a mut Option<watcher::DirWatcher>,
+    /// 監視の再走査要求。張り替えた監視にも同じものを渡す。
+    pub rescan: &'a Arc<tokio::sync::Notify>,
 }
 
 /// 設定リロードを丸ごと省いてよいか。
@@ -83,6 +85,7 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
         scanned_recursive,
         watch_rx,
         watcher_handle,
+        rescan,
     } = ctx;
 
     // `apply_and_notify` に渡す引数束。`config` などを書き換えたあとに組むので、
@@ -95,7 +98,7 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                 cache: &*cache,
                 plasma: plasma_shell,
                 tray_handle,
-                scheduler: &*scheduler,
+                scheduler: &mut *scheduler,
                 screen_check_tx,
                 notifier: &mut *notifier,
                 prefetcher: &mut *prefetcher,
@@ -161,6 +164,7 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                         (*watch_rx, *watcher_handle) = crate::spawn_dir_watcher_offloaded(
                             &source_dirs,
                             new_cfg.sources.recursive,
+                            rescan.clone(),
                         )
                         .await;
                         *scanned_dirs = source_dirs;

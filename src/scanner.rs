@@ -3,6 +3,7 @@
 //! 設定された `directories` を走査し、拡張子で画像ファイルをフィルタして
 //! `Vec<PathBuf>` を返す。`recursive = true` ならサブディレクトリも辿る。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -20,6 +21,7 @@ pub(crate) const IMAGE_EXTENSIONS: &[&str] = &[
 /// - 返値は決定性のためにソートされる。
 pub fn scan(directories: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
+    let mut visited = HashSet::new();
     for dir in directories {
         if !dir.exists() {
             tracing::warn!("source directory not found: {}", dir.display());
@@ -29,7 +31,7 @@ pub fn scan(directories: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>> {
             tracing::warn!("source is not a directory: {}", dir.display());
             continue;
         }
-        scan_dir(dir, recursive, &mut out)
+        scan_dir(dir, recursive, &mut out, &mut visited)
             .with_context(|| format!("failed to scan directory: {}", dir.display()))?;
     }
     out.sort();
@@ -37,7 +39,19 @@ pub fn scan(directories: &[PathBuf], recursive: bool) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn scan_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> Result<()> {
+/// `visited` は走査済みディレクトリの実体（canonicalize 後）。シンボリックリンクで
+/// 同じディレクトリに戻ってくる循環を止め、重なったソース指定の二重走査も避ける。
+fn scan_dir(
+    dir: &Path,
+    recursive: bool,
+    out: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    if let Ok(real) = dir.canonicalize() {
+        if !visited.insert(real) {
+            return Ok(());
+        }
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(err) => {
@@ -55,7 +69,13 @@ fn scan_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> Result<()> {
             }
         };
         let path = entry.path();
+        // `DirEntry::file_type` はリンクを辿らないので、リンクはリンク先で判定する
+        // （辿らないと is_file も is_dir も偽になり、黙って読み飛ばす。#61）。
         let file_type = match entry.file_type() {
+            Ok(ft) if ft.is_symlink() => match std::fs::metadata(&path) {
+                Ok(m) => m.file_type(),
+                Err(_) => continue, // リンク切れ
+            },
             Ok(ft) => ft,
             Err(err) => {
                 tracing::warn!("cannot stat {}: {}", path.display(), err);
@@ -64,7 +84,7 @@ fn scan_dir(dir: &Path, recursive: bool, out: &mut Vec<PathBuf>) -> Result<()> {
         };
         if file_type.is_dir() {
             if recursive {
-                let _ = scan_dir(&path, recursive, out);
+                let _ = scan_dir(&path, recursive, out, visited);
             }
         } else if file_type.is_file() && is_image(&path) {
             out.push(path);
@@ -134,4 +154,23 @@ mod tests {
         let res = scan(&[PathBuf::from("/nonexistent/kabekami/xyz")], false).unwrap();
         assert!(res.is_empty());
     }
+
+    /// リンクの画像・ディレクトリも拾い、自分を指す循環リンクでは止まる（#61）。
+    #[cfg(unix)]
+    #[test]
+    fn follows_symlinks_without_looping() {
+        use std::os::unix::fs::symlink;
+        let root = tmp_dir("symlink");
+        let other = tmp_dir("symlink-target");
+        touch(&other.join("linked.jpg"));
+        touch(&other.join("sub/deep.jpg"));
+        symlink(other.join("linked.jpg"), root.join("file-link.jpg")).unwrap();
+        symlink(other.join("sub"), root.join("dir-link")).unwrap();
+        symlink(&root, root.join("loop")).unwrap();
+        symlink(root.join("missing.jpg"), root.join("dangling.jpg")).unwrap();
+
+        let found = scan(std::slice::from_ref(&root), true).unwrap();
+        assert_eq!(found, vec![root.join("dir-link/deep.jpg"), root.join("file-link.jpg")]);
+    }
+
 }
