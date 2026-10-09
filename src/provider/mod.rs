@@ -329,17 +329,28 @@ pub fn make_client() -> Result<reqwest::Client> {
         attempt.follow()
     });
 
-    let client = reqwest::Client::builder()
+    Ok(client_builder().redirect(policy).build()?)
+}
+
+/// リダイレクトを追わないクライアント。独自ヘッダで API キーを送るリクエスト用。
+///
+/// reqwest が別ホストへのリダイレクトで外すのは `Authorization` などの既知の
+/// ヘッダだけで、`X-API-Key` のような独自ヘッダは転送先へそのまま送られる。
+/// キーを付けたリクエストではリダイレクト自体を追わず、3xx はエラーにする。
+pub fn make_no_redirect_client() -> Result<reqwest::Client> {
+    Ok(client_builder().redirect(redirect::Policy::none()).build()?)
+}
+
+/// 両クライアントに共通の設定（UA・タイムアウト・SSRF 対策の resolver）。
+fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
         .user_agent(concat!(
             "kabekami/",
             env!("CARGO_PKG_VERSION"),
             " (Linux wallpaper tool)"
         ))
         .timeout(Duration::from_secs(30))
-        .redirect(policy)
         .dns_resolver(std::sync::Arc::new(KabekamiResolver))
-        .build()?;
-    Ok(client)
 }
 
 /// reqwest 用のカスタム DNS resolver。
