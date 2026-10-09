@@ -74,6 +74,12 @@ pub struct CacheKey {
     pub mode: DisplayMode,
     pub blur_sigma: f32,
     pub bg_darken: f32,
+    /// 元画像の (mtime, サイズ)。同じパスのまま中身を差し替えても古い加工結果に
+    /// ヒットしないよう、キーに含める（#61）。stat はファイル I/O なので
+    /// 組み立て時（単一ワーカー上）ではなく、`spawn_blocking` 内で
+    /// `with_source_stamp` が埋める。`None` は未取得（取得前・元画像が無い）。
+    /// mtime を返さない FS でもサイズだけは効かせるため、mtime は別に `Option`。
+    pub src_stamp: Option<(Option<SystemTime>, u64)>,
 }
 
 impl CacheKey {
@@ -90,7 +96,23 @@ impl CacheKey {
             mode: display.mode,
             blur_sigma: display.blur_sigma,
             bg_darken: display.bg_darken,
+            src_stamp: None,
         }
+    }
+
+    /// 元画像を stat して `src_stamp` を埋める（ブロッキング）。
+    pub fn with_source_stamp(mut self) -> Self {
+        if let Ok(m) = std::fs::metadata(&self.src) {
+            let mtime = m.modified().ok();
+            if mtime.is_none() {
+                tracing::debug!(
+                    "no mtime for {}; cache freshness relies on size only",
+                    self.src.display()
+                );
+            }
+            self.src_stamp = Some((mtime, m.len()));
+        }
+        self
     }
 }
 
@@ -214,6 +236,7 @@ impl Cache {
         (key.screen_w, key.screen_h, key.mode).hash(&mut h);
         // f32 は Hash を持たないのでビット列で（±0 や NaN も bit-exact に区別）
         (key.blur_sigma.to_bits(), key.bg_darken.to_bits()).hash(&mut h);
+        key.src_stamp.hash(&mut h);
         format!("{:016x}", h.finish())
     }
 }
@@ -306,6 +329,7 @@ mod tests {
             mode: DisplayMode::BlurPad,
             blur_sigma: 25.0,
             bg_darken: 0.1,
+            src_stamp: None,
         }
     }
 
@@ -496,6 +520,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(std::fs::read(&final_path).unwrap(), b"outer", "後から rename した方が残る");
+    }
+
+
+    /// 同じパスでも中身（mtime・サイズ）が変われば別のキャッシュになる（#61）。
+    #[test]
+    fn replacing_the_source_changes_the_cache_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("cache"), 0);
+        let src = dir.path().join("a.jpg");
+        std::fs::write(&src, b"old").unwrap();
+        let before = cache.path_for(&key(src.to_str().unwrap()).with_source_stamp());
+
+        std::fs::write(&src, b"new image").unwrap();
+        let after = cache.path_for(&key(src.to_str().unwrap()).with_source_stamp());
+
+        assert_ne!(before, after, "差し替え前の加工結果にヒットしてしまう");
     }
 
 }
