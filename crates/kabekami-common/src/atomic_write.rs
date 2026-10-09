@@ -26,8 +26,8 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// 失敗時は tmp ファイルを掃除してからエラーを返す。
 pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     // シンボリックリンク（ドットファイル管理など）はリンク先に書く。そのまま rename
-    // するとリンクが実ファイルに置き換わる（#60）。未作成なら元のパスのまま。
-    let path = &fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // するとリンクが実ファイルに置き換わる（#60）。
+    let path = &write_target(path);
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
     })?;
@@ -63,6 +63,27 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+/// 実際に書き込む先。シンボリックリンクならリンク先をたどる。
+///
+/// リンク先がまだ無い（リンク切れ）と `canonicalize` は失敗するので、そのときは
+/// `read_link` で 1 段ずつたどる（相対パスのリンク先はリンクの親ディレクトリ基準）。
+/// リンクでもなく存在もしなければ、元のパスのまま。
+fn write_target(path: &Path) -> std::path::PathBuf {
+    if let Ok(real) = fs::canonicalize(path) {
+        return real;
+    }
+    let mut cur = path.to_path_buf();
+    // 循環リンクで止まらないよう、Linux の SYMLOOP_MAX と同じ 40 段で打ち切る
+    for _ in 0..40 {
+        let Ok(target) = fs::read_link(&cur) else { break };
+        cur = match cur.parent() {
+            Some(parent) if target.is_relative() => parent.join(target),
+            _ => target,
+        };
+    }
+    cur
 }
 
 fn unique_tmp_path(path: &Path) -> std::path::PathBuf {
@@ -123,6 +144,22 @@ mod tests {
 
         assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
+
+    /// リンク先がまだ無いシンボリックリンクでも、リンクを実ファイルに置き換えない。
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_is_kept_and_its_target_is_created() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("dotfiles")).unwrap();
+        let link = dir.path().join("config.toml");
+        // 相対パスのリンク先（リンクの親ディレクトリ基準）
+        std::os::unix::fs::symlink("dotfiles/config.toml", &link).unwrap();
+
+        atomic_write(&link, b"x").unwrap();
+
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "リンクのまま");
+        assert_eq!(fs::read(dir.path().join("dotfiles/config.toml")).unwrap(), b"x");
     }
 
     #[test]
