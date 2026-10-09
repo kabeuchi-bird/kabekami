@@ -118,16 +118,25 @@ impl Default for Cache {
 /// kabekami が書き出したキャッシュファイルの名前か。
 ///
 /// `<16 桁 hex>.webp`（旧形式の `.jpg` / `.png` を含む）と、書きかけの
-/// `<16 桁 hex>.<pid>-<n>.tmp.webp` だけを真とする。キャッシュの消去・LRU 退避・
+/// `<16 桁 hex>.<pid>-<n>.tmp.webp`（`pid`・`n` は 10 進数字）だけを真とする。キャッシュの消去・LRU 退避・
 /// 容量表示はすべてこれで絞る。`cache.directory` が誤って手持ちの画像フォルダを
 /// 指していても、ユーザーのファイルを消さないため（#59）。
 pub fn is_cache_file_name(name: &str) -> bool {
     let Some((hash, rest)) = name.split_at_checked(16) else {
         return false;
     };
-    hash.bytes().all(|b| b.is_ascii_hexdigit())
-        && (matches!(rest, ".webp" | ".jpg" | ".png")
-            || (rest.starts_with('.') && rest.ends_with(".tmp.webp")))
+    if !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    if matches!(rest, ".webp" | ".jpg" | ".png") {
+        return true;
+    }
+    // 書きかけ: `.<pid>-<n>.tmp.webp`（`cache::write_atomically` の命名）
+    let is_num = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    rest.strip_prefix('.')
+        .and_then(|r| r.strip_suffix(".tmp.webp"))
+        .and_then(|mid| mid.split_once('-'))
+        .is_some_and(|(pid, n)| is_num(pid) && is_num(n))
 }
 
 /// UI 表示言語の設定。
@@ -581,7 +590,20 @@ max_size_mb = 123
         for ok in ["0123456789abcdef.webp", "0123456789abcdef.jpg", "0123456789abcdef.1234-5.tmp.webp"] {
             assert!(is_cache_file_name(ok), "{ok}");
         }
-        for ng in ["holiday.jpg", "IMG_20240101_1234.webp", "0123456789abcdef.txt", "0123456789abcdef", "0123456789abcdefg.webp", "日本語のファイル名.webp"] {
+        for ng in [
+            "holiday.jpg",
+            "IMG_20240101_1234.webp",
+            "0123456789abcdef.txt",
+            "0123456789abcdef",
+            "0123456789abcdefg.webp",
+            "日本語のファイル名.webp",
+            // 書きかけの形に似ているが kabekami の命名ではないもの
+            "0123456789abcdef.personal.tmp.webp",
+            "0123456789abcdef.tmp.webp",
+            "0123456789abcdef.12-.tmp.webp",
+            "0123456789abcdef.-3.tmp.webp",
+            "0123456789abcdef.1a-3.tmp.webp",
+        ] {
             assert!(!is_cache_file_name(ng), "{ng}");
         }
     }
