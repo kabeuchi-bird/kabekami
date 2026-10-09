@@ -257,12 +257,8 @@ fn touch(path: &Path) -> bool {
     true
 }
 
-/// kabekami がこれまでに書き出したことがある拡張子をすべて列挙する。
-/// フォーマット変更後も旧形式のファイルが LRU 退避対象から漏れないようにする。
-const CACHE_EXTS: &[&str] = &["jpg", "webp", "png"];
-
-/// キャッシュディレクトリ内の画像ファイルを mtime 昇順（古い順）で返す。
-/// `CACHE_EXTS` に含まれる拡張子のみを対象とする。
+/// キャッシュディレクトリ内のキャッシュファイルを mtime 昇順（古い順）で返す。
+/// `is_cache_file_name` に合うものだけを対象とする（旧形式の `.jpg` も含む）。
 fn cache_entries_by_mtime(dir: &Path) -> Result<Vec<(PathBuf, u64, SystemTime)>> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -271,8 +267,8 @@ fn cache_entries_by_mtime(dir: &Path) -> Result<Vec<(PathBuf, u64, SystemTime)>>
     for entry in std::fs::read_dir(dir).context("failed to read cache directory")? {
         let entry = entry?;
         let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !CACHE_EXTS.contains(&ext) {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !kabekami_common::config::is_cache_file_name(name) {
             continue;
         }
         let meta = entry.metadata()?;
@@ -351,8 +347,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::new(dir.path().to_path_buf(), 1);
 
-        let old_path = dir.path().join("0000old.jpg");
-        let new_path = dir.path().join("zzzznew.jpg");
+        let old_path = dir.path().join("000000000000000a.jpg");
+        let new_path = dir.path().join("000000000000000b.webp");
         std::fs::write(&new_path, vec![0u8; 1200 * 1024]).unwrap();
         let old = std::fs::File::create(&old_path).unwrap();
         old.set_len(600 * 1024).unwrap();
@@ -366,6 +362,22 @@ mod tests {
             new_path.exists(),
             "recent file must survive even over the limit"
         );
+    }
+
+    /// キャッシュ名でないファイルは古くて大きくても退避しない。
+    /// `cache.directory` が手持ちの画像フォルダを指していても消さないため（#59）。
+    #[test]
+    fn eviction_never_touches_files_kabekami_did_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 1);
+        let user = dir.path().join("holiday.jpg");
+        let f = std::fs::File::create(&user).unwrap();
+        f.set_len(2 * 1024 * 1024).unwrap();
+        f.set_modified(SystemTime::now() - EVICT_GRACE * 2).unwrap();
+
+        cache.evict_if_needed().unwrap();
+
+        assert!(user.exists(), "ユーザーのファイルを消した");
     }
 
     #[test]
@@ -444,7 +456,7 @@ mod tests {
     fn set_max_size_mb_takes_effect_on_the_next_eviction() {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::new(dir.path().to_path_buf(), 0);
-        let old = dir.path().join("old.webp");
+        let old = dir.path().join("000000000000000a.webp");
         let f = std::fs::File::create(&old).unwrap();
         f.set_len(2 * 1024 * 1024).unwrap();
         f.set_modified(SystemTime::now() - EVICT_GRACE * 2).unwrap();

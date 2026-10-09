@@ -10,7 +10,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use eframe::egui;
-use kabekami_common::config::{Config, DisplayMode, OnlineSourceConfig, Order, ProviderKind};
+use kabekami_common::config::{
+    is_cache_file_name, Config, DisplayMode, OnlineSourceConfig, Order, ProviderKind,
+};
 use kabekami_common::i18n::{self, ConfigStrings, Lang};
 
 fn main() -> eframe::Result<()> {
@@ -120,11 +122,18 @@ fn pick_image_file(s: &'static ConfigStrings, start: Option<&std::path::Path>) -
     ])
 }
 
-fn compute_dir_size(dir: &std::path::Path) -> u64 {
+/// `dir` 直下の kabekami のキャッシュファイル。容量表示も消去もこれだけを対象にする
+/// （`cache.directory` が誤って画像フォルダを指していてもユーザーのファイルに触れない）。
+fn cache_files(dir: &std::path::Path) -> impl Iterator<Item = std::fs::DirEntry> {
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(is_cache_file_name))
+}
+
+fn compute_dir_size(dir: &std::path::Path) -> u64 {
+    cache_files(dir)
         .filter_map(|e| e.metadata().ok())
         .filter(|m| m.is_file())
         .map(|m| m.len())
@@ -245,6 +254,9 @@ struct KabekamiApp {
 
     // Cache tab: computed size (None = not yet measured)
     cache_size_bytes: Option<u64>,
+    /// 「クリア」を押してから確定するまでの、消去対象のディレクトリと件数。
+    /// 押した時点の値を固定し、確定前に入力欄が変わっても別の場所を消さない。
+    clear_pending: Option<(PathBuf, usize)>,
 
     /// `kdialog` が利用可能か（起動時に 1 回判定し、参照ボタンの活性／非活性に使う）。
     has_kdialog: bool,
@@ -275,6 +287,7 @@ impl KabekamiApp {
             new_dir_input: String::new(),
             new_online_provider: ProviderKind::Bing,
             cache_size_bytes: None,
+            clear_pending: None,
             has_kdialog: kdialog_available(),
         }
     }
@@ -623,12 +636,9 @@ impl KabekamiApp {
                 self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
             }
             if ui.button(s.clear_cache).clicked() {
-                if let Ok(entries) = std::fs::read_dir(&self.config.cache.directory) {
-                    for entry in entries.flatten() {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-                self.cache_size_bytes = Some(0);
+                let dir = self.config.cache.directory.clone();
+                let count = cache_files(&dir).count();
+                self.clear_pending = Some((dir, count));
             }
             match self.cache_size_bytes {
                 None => {
@@ -647,6 +657,28 @@ impl KabekamiApp {
                 }
             }
         });
+
+        // 消去は確認を挟む。名前で絞っていても、指す先を間違えたまま押すと
+        // 同じ形の名前のファイルを消しうるので、対象のパスを見せてから消す。
+        if let Some((dir, count)) = self.clear_pending.clone() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    s.clear_cache_confirm
+                        .replace("{count}", &count.to_string())
+                        .replace("{dir}", &dir.display().to_string()),
+                );
+                if ui.button(s.confirm_delete).clicked() {
+                    for entry in cache_files(&dir) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                    self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
+                    self.clear_pending = None;
+                }
+                if ui.button(s.cancel).clicked() {
+                    self.clear_pending = None;
+                }
+            });
+        }
     }
 
     fn ui_online(&mut self, ui: &mut egui::Ui) {
