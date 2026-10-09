@@ -254,6 +254,9 @@ struct KabekamiApp {
 
     // Cache tab: computed size (None = not yet measured)
     cache_size_bytes: Option<u64>,
+    /// 「クリア」を押してから確定するまでの、消去対象のディレクトリと件数。
+    /// 押した時点の値を固定し、確定前に入力欄が変わっても別の場所を消さない。
+    clear_pending: Option<(PathBuf, usize)>,
 
     /// `kdialog` が利用可能か（起動時に 1 回判定し、参照ボタンの活性／非活性に使う）。
     has_kdialog: bool,
@@ -284,6 +287,7 @@ impl KabekamiApp {
             new_dir_input: String::new(),
             new_online_provider: ProviderKind::Bing,
             cache_size_bytes: None,
+            clear_pending: None,
             has_kdialog: kdialog_available(),
         }
     }
@@ -632,10 +636,9 @@ impl KabekamiApp {
                 self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
             }
             if ui.button(s.clear_cache).clicked() {
-                for entry in cache_files(&self.config.cache.directory) {
-                    let _ = std::fs::remove_file(entry.path());
-                }
-                self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
+                let dir = self.config.cache.directory.clone();
+                let count = cache_files(&dir).count();
+                self.clear_pending = Some((dir, count));
             }
             match self.cache_size_bytes {
                 None => {
@@ -654,6 +657,28 @@ impl KabekamiApp {
                 }
             }
         });
+
+        // 消去は確認を挟む。名前で絞っていても、指す先を間違えたまま押すと
+        // 同じ形の名前のファイルを消しうるので、対象のパスを見せてから消す。
+        if let Some((dir, count)) = self.clear_pending.clone() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    s.clear_cache_confirm
+                        .replace("{count}", &count.to_string())
+                        .replace("{dir}", &dir.display().to_string()),
+                );
+                if ui.button(s.confirm_delete).clicked() {
+                    for entry in cache_files(&dir) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                    self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
+                    self.clear_pending = None;
+                }
+                if ui.button(s.cancel).clicked() {
+                    self.clear_pending = None;
+                }
+            });
+        }
     }
 
     fn ui_online(&mut self, ui: &mut egui::Ui) {
