@@ -193,6 +193,26 @@ impl Config {
     ///
     /// 書き込みは `atomic_write` 経由（電源断時に途中状態のファイルを残さない）。
     pub fn save_changes_to(&self, base: &Config, path: &Path) -> Result<()> {
+        // GUI とデーモン（トレイ）は別プロセスなので、読み込みから書き込みまでを
+        // プロセス間ロックで排他する（同時に読んだ両方が書くと、後の方が先の変更を消す）。
+        // ロックは本体ではなく横のファイルに掛ける（本体は rename で差し替わるため）。
+        let lock_path = path.with_file_name(format!(
+            ".{}.lock",
+            path.file_name().and_then(|n| n.to_str()).unwrap_or("config.toml")
+        ));
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create config dir: {}", parent.display()))?;
+        }
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open lock file: {}", lock_path.display()))?;
+        lock.lock()
+            .with_context(|| format!("failed to lock: {}", lock_path.display()))?;
+
         let mut doc: toml_edit::DocumentMut = match std::fs::read_to_string(path) {
             Ok(text) => text
                 .parse()
@@ -373,20 +393,25 @@ impl OnlineSourceConfig {
 
 /// `old` → `new` で変わったキーだけを `doc` に反映する。
 ///
-/// 両方がテーブルで、`doc` 側も通常のテーブルなら中へ降りてキー単位で比べる
-/// （同じセクションの他のキーとコメントを残すため）。それ以外は値ごと置き換える
-/// （`[[online_sources]]` は 1 件でも変われば配列ごと書き直す）。
-fn merge_changes(doc: &mut toml_edit::Table, old: &toml::Table, new: &toml::Table) -> Result<()> {
+/// 両方がテーブルで、`doc` 側もテーブル（`[section]` でも `section = { ... }` でも）
+/// なら中へ降りてキー単位で比べる（同じセクションの他のキーとコメントを残すため）。
+/// それ以外は値ごと置き換える（`[[online_sources]]` は 1 件でも変われば配列ごと書き直す）。
+fn merge_changes(
+    doc: &mut dyn toml_edit::TableLike,
+    old: &toml::Table,
+    new: &toml::Table,
+) -> Result<()> {
     for (key, nv) in new {
         let ov = old.get(key);
         if ov == Some(nv) {
             continue;
         }
         if let (Some(toml::Value::Table(ot)), toml::Value::Table(nt)) = (ov, nv) {
-            let item = doc
-                .entry(key)
-                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-            if let Some(t) = item.as_table_mut() {
+            if !doc.contains_key(key) {
+                // インラインテーブルの中なら `insert` がインラインに変換する
+                doc.insert(key, toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            if let Some(t) = doc.get_mut(key).and_then(toml_edit::Item::as_table_like_mut) {
                 merge_changes(t, ot, nt)?;
                 continue;
             }
@@ -600,6 +625,57 @@ max_size_mb = 123
         cfg.save_changes_to(&base, &path).unwrap();
 
         assert_eq!(Config::load_from(&path).unwrap().sources.favorites_dir, None);
+    }
+
+    /// インラインテーブルで書かれたセクションも、変えたキーだけを書き換える。
+    #[test]
+    fn save_changes_updates_inline_tables_key_by_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "display = { mode = \"fill\", blur_sigma = 10.0 } # 手書き\n").unwrap();
+
+        let base = Config::load_from(&path).unwrap();
+        // 別プロセスがインラインテーブルの別キーを保存した
+        std::fs::write(&path, "display = { mode = \"fit\", blur_sigma = 10.0 } # 手書き\n").unwrap();
+        let mut cfg = base.clone();
+        cfg.display.bg_darken = 0.5;
+        cfg.save_changes_to(&base, &path).unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# 手書き"), "{text}");
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.display.mode, DisplayMode::Fit, "別キーの変更が消えた: {text}");
+        assert_eq!(loaded.display.blur_sigma, 10.0);
+        assert_eq!(loaded.display.bg_darken, 0.5);
+    }
+
+    /// 同時に保存しても、互いの変更を消さない（読み込みから書き込みまでを排他する）。
+    #[test]
+    fn concurrent_saves_keep_both_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for _ in 0..20 {
+            std::fs::write(&path, "[rotation]\ninterval_secs = 60\n").unwrap();
+            let base = Config::load_from(&path).unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let mut a = base.clone();
+                    a.display.mode = DisplayMode::Fill;
+                    barrier.wait();
+                    a.save_changes_to(&base, &path).unwrap();
+                });
+                s.spawn(|| {
+                    let mut b = base.clone();
+                    b.rotation.interval_secs = 120;
+                    barrier.wait();
+                    b.save_changes_to(&base, &path).unwrap();
+                });
+            });
+            let loaded = Config::load_from(&path).unwrap();
+            assert_eq!(loaded.display.mode, DisplayMode::Fill);
+            assert_eq!(loaded.rotation.interval_secs, 120);
+        }
     }
 
     #[test]
