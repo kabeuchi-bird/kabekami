@@ -224,6 +224,9 @@ enum Tab {
 
 struct KabekamiApp {
     config: Config,
+    /// 最後にディスクと一致していた設定。保存はここから変えたキーだけを書く（#60）。
+    /// `None` は config.toml を読めなかった状態で、既定値で上書きしないよう保存を止める。
+    saved: Option<Config>,
     tab: Tab,
     status: String,
     status_is_error: bool,
@@ -252,7 +255,13 @@ struct KabekamiApp {
 
 impl KabekamiApp {
     fn new() -> Self {
-        let config = Config::load().unwrap_or_default();
+        let (config, saved, status) = match Config::load() {
+            Ok(c) => (c.clone(), Some(c), String::new()),
+            Err(e) => {
+                let s = i18n::config_strings(Lang::from_code(&Config::default().ui.language));
+                (Config::default(), None, format!("{}: {e:#}", s.load_failed))
+            }
+        };
 
         // channel: UI → worker (unbounded so UI never blocks)
         let (req_tx, req_rx) = mpsc::sync_channel::<PreviewRequest>(1);
@@ -264,8 +273,9 @@ impl KabekamiApp {
         Self {
             config,
             tab: Tab::Sources,
-            status: String::new(),
-            status_is_error: false,
+            status_is_error: saved.is_none(),
+            saved,
+            status,
             preview_image_path: String::new(),
             preview_texture: None,
             preview_req_tx: req_tx,
@@ -307,10 +317,25 @@ impl KabekamiApp {
         self.status_is_error = is_error;
     }
 
+    /// 変えたキーだけを保存し、他のプロセス（トレイ）が保存した値も含めて読み直す。
     fn save_config(&mut self) {
-        match self.config.save() {
-            Ok(()) => self.set_status(self.s().saved, false),
-            Err(e) => self.set_status(format!("{}: {e}", self.s().save_failed), true),
+        let Some(base) = &self.saved else { return };
+        if let Err(e) = self.config.save_changes(base) {
+            self.set_status(format!("{}: {e:#}", self.s().save_failed), true);
+            return;
+        }
+        match Config::load() {
+            Ok(c) => {
+                self.config = c.clone();
+                self.saved = Some(c);
+                self.set_status(self.s().saved, false);
+            }
+            Err(e) => {
+                // 書き込みは済んでいるので、差分の基準は書いた内容に進める
+                // （古い基準のままだと、次の保存で元の値へ戻した変更を取りこぼす）
+                self.saved = Some(self.config.clone());
+                self.set_status(format!("{}: {e:#}", self.s().load_failed), true);
+            }
         }
     }
 
@@ -380,7 +405,8 @@ impl eframe::App for KabekamiApp {
 
         egui::TopBottomPanel::bottom("actions").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button(s.save_button).clicked() {
+                let can_save = self.saved.is_some();
+                if ui.add_enabled(can_save, egui::Button::new(s.save_button)).clicked() {
                     self.save_config();
                 }
                 ui.separator();

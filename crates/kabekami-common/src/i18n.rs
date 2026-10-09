@@ -164,6 +164,8 @@ string_table! {
         // ステータス表示
         saved = "Config saved.",
         save_failed = "Save failed",
+        /// config.toml が読めないときの表示。続けて `: <エラー本文>` が付く
+        load_failed = "Cannot read config.toml; saving is disabled until it is fixed",
         preview_error = "Preview error",
 
         // タブ見出し
