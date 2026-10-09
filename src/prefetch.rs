@@ -159,6 +159,30 @@ mod tests {
         Arc::new(Cache::new(dir.path().to_path_buf(), 0))
     }
 
+    /// キャッシュ済みのキーは元画像を読まずに返る。先読みを開始しても同じで、
+    /// 加工し直さない。元画像は画像として読めない中身にしてあるので、
+    /// デコードに進めば失敗する。
+    #[tokio::test]
+    async fn a_cached_key_is_served_without_decoding_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir);
+        let src = dir.path().join("a.jpg");
+        std::fs::write(&src, b"not an image").unwrap();
+        let k = key(src.to_str().unwrap());
+        let stored = cache
+            .store(&k.clone().with_source_stamp(), &RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 255])))
+            .unwrap();
+
+        assert_eq!(process_single_flight(&k, &cache).await.unwrap(), stored);
+
+        let mut prefetcher = Prefetcher::default();
+        prefetcher.start([k], Arc::clone(&cache));
+        for handle in prefetcher.pending.drain(..) {
+            handle.await.unwrap();
+        }
+        assert!(stored.exists(), "加工結果はそのまま");
+    }
+
     /// 同じ出力パスの加工権は 1 つだけ。2 人目以降は待ち側になる。
     #[tokio::test]
     async fn only_one_claimant_owns_a_given_output() {
