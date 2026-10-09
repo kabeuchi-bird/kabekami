@@ -330,7 +330,12 @@ impl KabekamiApp {
                 self.saved = Some(c);
                 self.set_status(self.s().saved, false);
             }
-            Err(e) => self.set_status(format!("{}: {e:#}", self.s().load_failed), true),
+            Err(e) => {
+                // 書き込みは済んでいるので、差分の基準は書いた内容に進める
+                // （古い基準のままだと、次の保存で元の値へ戻した変更を取りこぼす）
+                self.saved = Some(self.config.clone());
+                self.set_status(format!("{}: {e:#}", self.s().load_failed), true);
+            }
         }
     }
 
