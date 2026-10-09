@@ -531,7 +531,10 @@ async fn main() -> Result<()> {
                 tracing::info!("file watcher lost events; rescanning sources");
                 match scan_images(&scanned_dirs, scanned_recursive, &blacklist).await {
                     Ok(images) if !images.is_empty() => {
+                        // 作り直すと次の画像が変わりうるので、温めている先読みは捨てて掛け直す
+                        prefetcher.abort();
                         scheduler.rebuild(images, config.rotation.order);
+                        start_prefetch(&mut prefetcher, &scheduler, &screens, &config, &cache);
                         sync_tray_current(&tray_handle, &scheduler).await;
                     }
                     Ok(_) => tracing::warn!("rescan: no images found, keeping current list"),
@@ -917,6 +920,12 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
     let result = loop {
         match apply(&path, ctx.screens, ctx.config, ctx.cache, ctx.plasma).await {
             Err(e) if is_not_found(&e) => {
+                // NotFound はキャッシュの書き込み（置き場所の削除と競合した場合など）
+                // からも来る。元画像が残っているなら一覧から外さない
+                // （確かめられないときも外さない）。
+                if tokio::fs::try_exists(&path).await.unwrap_or(true) {
+                    break Err(e);
+                }
                 tracing::warn!("source image is gone, dropping it: {}", path.display());
                 ctx.scheduler.remove_image(&path);
                 match ctx.scheduler.next() {
