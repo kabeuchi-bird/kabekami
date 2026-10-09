@@ -78,7 +78,8 @@ pub struct CacheKey {
     /// ヒットしないよう、キーに含める（#61）。stat はファイル I/O なので
     /// 組み立て時（単一ワーカー上）ではなく、`spawn_blocking` 内で
     /// `with_source_stamp` が埋める。`None` は未取得（取得前・元画像が無い）。
-    pub src_stamp: Option<(SystemTime, u64)>,
+    /// mtime を返さない FS でもサイズだけは効かせるため、mtime は別に `Option`。
+    pub src_stamp: Option<(Option<SystemTime>, u64)>,
 }
 
 impl CacheKey {
@@ -102,7 +103,14 @@ impl CacheKey {
     /// 元画像を stat して `src_stamp` を埋める（ブロッキング）。
     pub fn with_source_stamp(mut self) -> Self {
         if let Ok(m) = std::fs::metadata(&self.src) {
-            self.src_stamp = m.modified().ok().map(|t| (t, m.len()));
+            let mtime = m.modified().ok();
+            if mtime.is_none() {
+                tracing::debug!(
+                    "no mtime for {}; cache freshness relies on size only",
+                    self.src.display()
+                );
+            }
+            self.src_stamp = Some((mtime, m.len()));
         }
         self
     }
