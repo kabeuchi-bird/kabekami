@@ -35,7 +35,7 @@ pub async fn fetch(
 ) -> Result<Vec<PathBuf>> {
     let query = cfg.query.as_deref().unwrap_or("nature");
 
-    let mut params: Vec<(&str, String)> = vec![
+    let params: Vec<(&str, String)> = vec![
         ("q", query.to_string()),
         ("sorting", "toplist".to_string()),
         ("purity", "100".to_string()),    // SFW のみ
@@ -43,15 +43,23 @@ pub async fn fetch(
         ("atleast", "1920x1080".to_string()),
         ("per_page", cfg.count.clamp(1, 24).to_string()),
     ];
-    if let Some(key) = cfg.api_key.as_deref().filter(|k| !k.is_empty()) {
-        params.push(("apikey", key.to_string()));
-    }
+    // キーはクエリ (`apikey`) ではなくヘッダで送る。reqwest のエラー表示は URL を
+    // 含むため、クエリに載せると通信失敗の warn（と WARN 通知）にキーが出る（#57）。
+    // 独自ヘッダはリダイレクト先にも転送されるので、キーを付けるときは
+    // リダイレクトを追わないクライアントで送る。
+    let req = match cfg.api_key.as_deref().filter(|k| !k.is_empty()) {
+        Some(key) => super::make_no_redirect_client()?
+            .get(API_URL)
+            .query(&params)
+            .header("X-API-Key", key),
+        None => client.get(API_URL).query(&params),
+    };
 
-    let resp: WallhavenResponse = client
-        .get(API_URL)
-        .query(&params)
-        .send()
-        .await?
+    let resp = req.send().await?;
+    if resp.status().is_redirection() {
+        anyhow::bail!("wallhaven API redirected ({}); not following with the API key", resp.status());
+    }
+    let resp: WallhavenResponse = resp
         .json()
         .await
         .context("failed to parse Wallhaven API response")?;
