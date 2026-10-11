@@ -28,6 +28,15 @@ struct WallhavenImage {
     path: String,
 }
 
+/// `X-API-Key` に載せる値。sensitive にしておくと、リクエストやヘッダーを
+/// Debug 出力してもキーが伏せられる。
+fn api_key_header(key: &str) -> Result<reqwest::header::HeaderValue> {
+    let mut value = reqwest::header::HeaderValue::from_str(key)
+        .context("wallhaven: api_key contains characters not allowed in a header")?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
 pub async fn fetch(
     cfg: &OnlineSourceConfig,
     dir: &Path,
@@ -51,7 +60,7 @@ pub async fn fetch(
         Some(key) => super::make_no_redirect_client()?
             .get(API_URL)
             .query(&params)
-            .header("X-API-Key", key),
+            .header("X-API-Key", api_key_header(key)?),
         None => client.get(API_URL).query(&params),
     };
 
@@ -72,4 +81,17 @@ pub async fn fetch(
     }
 
     Ok(available)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Debug 出力（診断ログ等）にキーが出ないこと。
+    #[test]
+    fn api_key_header_is_hidden_from_debug_output() {
+        let value = api_key_header("secret-key-123").unwrap();
+        assert!(value.is_sensitive());
+        assert!(!format!("{value:?}").contains("secret-key-123"));
+    }
 }
