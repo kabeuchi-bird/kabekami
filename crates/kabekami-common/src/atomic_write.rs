@@ -27,7 +27,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     // シンボリックリンク（ドットファイル管理など）はリンク先に書く。そのまま rename
     // するとリンクが実ファイルに置き換わる（#60）。
-    let path = &write_target(path);
+    let path = &write_target(path)?;
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
     })?;
@@ -69,21 +69,37 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
 ///
 /// リンク先がまだ無い（リンク切れ）と `canonicalize` は失敗するので、そのときは
 /// `read_link` で 1 段ずつたどる（相対パスのリンク先はリンクの親ディレクトリ基準）。
-/// リンクでもなく存在もしなければ、元のパスのまま。
-fn write_target(path: &Path) -> std::path::PathBuf {
+/// たどり着いた先がまだ無ければ、親ディレクトリだけ実体に揃える（別名のパスから
+/// 書いても同じ先になるように）。循環していれば、リンクを実ファイルで潰さないよう
+/// エラーにする。
+pub fn write_target(path: &Path) -> io::Result<std::path::PathBuf> {
     if let Ok(real) = fs::canonicalize(path) {
-        return real;
+        return Ok(real);
     }
     let mut cur = path.to_path_buf();
-    // 循環リンクで止まらないよう、Linux の SYMLOOP_MAX と同じ 40 段で打ち切る
+    // Linux の SYMLOOP_MAX と同じ 40 段で打ち切る
     for _ in 0..40 {
-        let Ok(target) = fs::read_link(&cur) else { break };
-        cur = match cur.parent() {
-            Some(parent) if target.is_relative() => parent.join(target),
-            _ => target,
-        };
+        match fs::read_link(&cur) {
+            Ok(target) => {
+                cur = match cur.parent() {
+                    Some(parent) if target.is_relative() => parent.join(target),
+                    _ => target,
+                };
+            }
+            // リンクではない（まだ無いファイル）。ここが書き込み先
+            Err(_) => {
+                let real_parent = cur.parent().and_then(|p| fs::canonicalize(p).ok());
+                return Ok(match (real_parent, cur.file_name()) {
+                    (Some(parent), Some(name)) => parent.join(name),
+                    _ => cur,
+                });
+            }
+        }
     }
-    cur
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("too many levels of symbolic links: {}", path.display()),
+    ))
 }
 
 fn unique_tmp_path(path: &Path) -> std::path::PathBuf {
@@ -160,6 +176,20 @@ mod tests {
 
         assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "リンクのまま");
         assert_eq!(fs::read(dir.path().join("dotfiles/config.toml")).unwrap(), b"x");
+    }
+
+    /// 循環したリンクは書き込まずにエラーにし、リンクのまま残す。
+    #[cfg(unix)]
+    #[test]
+    fn symlink_loop_is_an_error_and_keeps_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+
+        assert!(atomic_write(&a, b"x").is_err());
+        assert!(fs::symlink_metadata(&a).unwrap().file_type().is_symlink(), "リンクのまま");
     }
 
     #[test]
