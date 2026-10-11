@@ -254,9 +254,10 @@ struct KabekamiApp {
 
     // Cache tab: computed size (None = not yet measured)
     cache_size_bytes: Option<u64>,
-    /// 「クリア」を押してから確定するまでの、消去対象のディレクトリと件数。
-    /// 押した時点の値を固定し、確定前に入力欄が変わっても別の場所を消さない。
-    clear_pending: Option<(PathBuf, usize)>,
+    /// 「クリア」を押してから確定するまでの、消去対象のディレクトリとファイル一覧。
+    /// 押した時点で固定し、確定後はこの一覧だけを消す（確定前に入力欄が変わったり
+    /// ファイルが増えたりしても、確認で見せたもの以外は消さない）。
+    clear_pending: Option<(PathBuf, Vec<PathBuf>)>,
 
     /// `kdialog` が利用可能か（起動時に 1 回判定し、参照ボタンの活性／非活性に使う）。
     has_kdialog: bool,
@@ -637,8 +638,8 @@ impl KabekamiApp {
             }
             if ui.button(s.clear_cache).clicked() {
                 let dir = self.config.cache.directory.clone();
-                let count = cache_files(&dir).count();
-                self.clear_pending = Some((dir, count));
+                let files = cache_files(&dir).map(|e| e.path()).collect();
+                self.clear_pending = Some((dir, files));
             }
             match self.cache_size_bytes {
                 None => {
@@ -660,16 +661,24 @@ impl KabekamiApp {
 
         // 消去は確認を挟む。名前で絞っていても、指す先を間違えたまま押すと
         // 同じ形の名前のファイルを消しうるので、対象のパスを見せてから消す。
-        if let Some((dir, count)) = self.clear_pending.clone() {
+        if let Some((dir, files)) = &self.clear_pending {
+            let (dir, files) = (dir.clone(), files.clone());
             ui.horizontal(|ui| {
                 ui.label(
                     s.clear_cache_confirm
-                        .replace("{count}", &count.to_string())
+                        .replace("{count}", &files.len().to_string())
                         .replace("{dir}", &dir.display().to_string()),
                 );
                 if ui.button(s.confirm_delete).clicked() {
-                    for entry in cache_files(&dir) {
-                        let _ = std::fs::remove_file(entry.path());
+                    // 既に無いものは消えたのと同じ扱い。それ以外の失敗は件数と最初の理由を出す
+                    let errors: Vec<std::io::Error> = files
+                        .iter()
+                        .filter_map(|f| std::fs::remove_file(f).err())
+                        .filter(|e| e.kind() != std::io::ErrorKind::NotFound)
+                        .collect();
+                    if let Some(first) = errors.first() {
+                        let msg = s.clear_cache_failed.replace("{count}", &errors.len().to_string());
+                        self.set_status(format!("{msg}: {first}"), true);
                     }
                     self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
                     self.clear_pending = None;
