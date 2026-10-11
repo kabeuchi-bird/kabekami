@@ -196,6 +196,10 @@ impl Config {
         // GUI とデーモン（トレイ）は別プロセスなので、読み込みから書き込みまでを
         // プロセス間ロックで排他する（同時に読んだ両方が書くと、後の方が先の変更を消す）。
         // ロックは本体ではなく横のファイルに掛ける（本体は rename で差し替わるため）。
+        // シンボリックリンクと実パスのように別名から保存しても同じロックになるよう、
+        // 実際の書き込み先を基準にする。
+        let path = &crate::atomic_write::write_target(path)
+            .with_context(|| format!("failed to resolve config path: {}", path.display()))?;
         let lock_path = path.with_file_name(format!(
             ".{}.lock",
             path.file_name().and_then(|n| n.to_str()).unwrap_or("config.toml")
@@ -676,6 +680,39 @@ max_size_mb = 123
             assert_eq!(loaded.display.mode, DisplayMode::Fill);
             assert_eq!(loaded.rotation.interval_secs, 120);
         }
+    }
+
+    /// シンボリックリンクと実パスの別名から同時に保存しても、同じロックで排他される。
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_saves_through_a_symlink_share_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.toml");
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        for _ in 0..20 {
+            std::fs::write(&real, "[rotation]\ninterval_secs = 60\n").unwrap();
+            let base = Config::load_from(&real).unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    let mut a = base.clone();
+                    a.display.mode = DisplayMode::Fill;
+                    barrier.wait();
+                    a.save_changes_to(&base, &link).unwrap();
+                });
+                s.spawn(|| {
+                    let mut b = base.clone();
+                    b.rotation.interval_secs = 120;
+                    barrier.wait();
+                    b.save_changes_to(&base, &real).unwrap();
+                });
+            });
+            let loaded = Config::load_from(&real).unwrap();
+            assert_eq!(loaded.display.mode, DisplayMode::Fill);
+            assert_eq!(loaded.rotation.interval_secs, 120);
+        }
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
     }
 
     #[test]
