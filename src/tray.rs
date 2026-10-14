@@ -34,7 +34,7 @@ pub enum TrayCmd {
     SetInterval(u64),
     /// 現在の壁紙ファイルを xdg-open で開く
     OpenCurrent,
-    /// 現在の壁紙ファイルをソースフォルダから削除する
+    /// 現在の壁紙ファイルをゴミ箱へ移動する
     DeleteCurrent,
     /// 現在の壁紙を二度と表示しないリストに追加する
     BlacklistCurrent,
@@ -137,17 +137,15 @@ impl ksni::Tray for KabekamiTray {
         use ksni::menu::*;
 
         // 表示モードのラジオボタン選択インデックス
-        const MODES: &[(DisplayMode, &str)] = &[
-            (DisplayMode::Fill, "Fill"),
-            (DisplayMode::Fit, "Fit"),
-            (DisplayMode::Stretch, "Stretch"),
-            (DisplayMode::BlurPad, "BlurPad"),
-            (DisplayMode::Smart, "Smart"),
+        let s = self.strings;
+        let modes = [
+            (DisplayMode::Fill, s.mode_fill),
+            (DisplayMode::Fit, s.mode_fit),
+            (DisplayMode::Stretch, s.mode_stretch),
+            (DisplayMode::BlurPad, s.mode_blurpad),
+            (DisplayMode::Smart, s.mode_smart),
         ];
-        let mode_selected = MODES
-            .iter()
-            .position(|(m, _)| *m == self.mode)
-            .unwrap_or(3);
+        let mode_selected = modes.iter().position(|(m, _)| *m == self.mode).unwrap_or(3);
 
         // 切り替え間隔のラジオボタン選択インデックス（プリセット外は全ボタン非選択）
         let interval_selected = INTERVAL_PRESETS
@@ -185,10 +183,10 @@ impl ksni::Tray for KabekamiTray {
                 label: self.strings.display_mode.into(),
                 submenu: vec![RadioGroup {
                     selected: mode_selected,
-                    select: Box::new(|this: &mut Self, idx| {
-                        let _ = this.notifier.send(TrayCmd::SetMode(MODES[idx].0));
+                    select: Box::new(move |this: &mut Self, idx| {
+                        let _ = this.notifier.send(TrayCmd::SetMode(modes[idx].0));
                     }),
-                    options: MODES
+                    options: modes
                         .iter()
                         .map(|(_, label)| RadioItem {
                             label: label.to_string(),

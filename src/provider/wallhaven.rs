@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::{ensure_downloaded, get_json, safe_ext};
+use super::{ensure_downloaded, get_json, image_path, safe_ext};
 
 const API_URL: &str = "https://wallhaven.cc/api/v1/search";
 
@@ -37,17 +37,34 @@ fn api_key_header(key: &str) -> Result<reqwest::header::HeaderValue> {
     Ok(value)
 }
 
+/// `purity` 設定を API の値（SFW / Sketchy / NSFW のビット列）にする。指定した
+/// 段階までを含める。NSFW はキーが無いと API が返さないので、黙って SFW だけに
+/// ならないようエラーにする。
+fn purity_bits(purity: Option<&str>, has_key: bool) -> Result<&'static str> {
+    match purity.unwrap_or("sfw") {
+        "sfw" => Ok("100"),
+        "sketchy" => Ok("110"),
+        "nsfw" if has_key => Ok("111"),
+        "nsfw" => anyhow::bail!("wallhaven: purity = \"nsfw\" requires api_key"),
+        other => anyhow::bail!(
+            "wallhaven: unknown purity {other:?} (expected \"sfw\", \"sketchy\" or \"nsfw\")"
+        ),
+    }
+}
+
 pub async fn fetch(
     cfg: &OnlineSourceConfig,
     dir: &Path,
     client: &reqwest::Client,
 ) -> Result<Vec<PathBuf>> {
     let query = cfg.query.as_deref().unwrap_or("nature");
+    let api_key = cfg.api_key.as_deref().filter(|k| !k.is_empty());
+    let purity = purity_bits(cfg.purity.as_deref(), api_key.is_some())?;
 
     let params: Vec<(&str, String)> = vec![
         ("q", query.to_string()),
         ("sorting", "toplist".to_string()),
-        ("purity", "100".to_string()),    // SFW のみ
+        ("purity", purity.to_string()),
         ("categories", "111".to_string()), // general + anime + people
         ("atleast", "1920x1080".to_string()),
         ("per_page", cfg.count.clamp(1, 24).to_string()),
@@ -56,7 +73,7 @@ pub async fn fetch(
     // 含むため、クエリに載せると通信失敗の warn（と WARN 通知）にキーが出る（#57）。
     // 独自ヘッダはリダイレクト先にも転送されるので、キーを付けるときは
     // リダイレクトを追わないクライアントで送る。
-    let req = match cfg.api_key.as_deref().filter(|k| !k.is_empty()) {
+    let req = match api_key {
         Some(key) => super::make_no_redirect_client()?
             .get(API_URL)
             .query(&params)
@@ -69,8 +86,8 @@ pub async fn fetch(
     let mut available = Vec::new();
 
     for img in &resp.data {
-        let filename = format!("wallhaven_{}.{}", img.id, safe_ext(&img.path));
-        available.extend(ensure_downloaded(client, "wallhaven", &img.path, dir.join(&filename)).await);
+        let Some(dest) = image_path(dir, "wallhaven", &img.id, &safe_ext(&img.path)) else { continue };
+        available.extend(ensure_downloaded(client, "wallhaven", &img.path, dest).await);
     }
 
     Ok(available)
@@ -79,6 +96,15 @@ pub async fn fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn purity_defaults_to_sfw_and_nsfw_needs_a_key() {
+        assert_eq!(purity_bits(None, false).unwrap(), "100");
+        assert_eq!(purity_bits(Some("sketchy"), false).unwrap(), "110");
+        assert_eq!(purity_bits(Some("nsfw"), true).unwrap(), "111");
+        assert!(purity_bits(Some("nsfw"), false).is_err());
+        assert!(purity_bits(Some("all"), true).is_err());
+    }
 
     /// Debug 出力（診断ログ等）にキーが出ないこと。
     #[test]

@@ -37,7 +37,8 @@ trait FreedesktopDBus {
 
 /// セッション管理ウォッチャーをバックグラウンドタスクとして起動する。
 ///
-/// - ログアウト/シャットダウン開始 → `TrayCmd::Quit`
+/// - シャットダウン・再起動の開始 → `TrayCmd::Quit`（`PrepareForShutdown` は
+///   ログアウトでは来ない）
 /// - Plasma 再起動検知 → `TrayCmd::PlasmaRestarted`
 ///
 /// D-Bus が利用できない環境では警告を出してサイレントに無効化される。

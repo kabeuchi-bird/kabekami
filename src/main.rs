@@ -33,7 +33,7 @@ use crate::prefetch::Prefetcher;
 use crate::scheduler::Scheduler;
 use crate::tray::TrayCmd;
 
-/// `KABEKAMI_SCREEN` 環境変数が未設定かつ `kscreen-doctor` も使えない場合のフォールバック解像度。
+/// `KABEKAMI_SCREEN` で指定されず `kscreen-doctor` でも検出できない場合のフォールバック解像度。
 const FALLBACK_SCREEN_W: u32 = 1920;
 const FALLBACK_SCREEN_H: u32 = 1080;
 
@@ -147,7 +147,7 @@ async fn main() -> Result<()> {
     )
     .await;
 
-    // セッション管理ウォッチャーを起動（ログアウト検知・Plasma 再起動検知）
+    // セッション管理ウォッチャーを起動（シャットダウン検知・Plasma 再起動検知）
     session::spawn_session_watcher(cmd_tx.clone()).await;
 
     // 画面構成変更の監視（壁紙更新を契機に再検出、60s スロットル）
@@ -210,7 +210,7 @@ async fn main() -> Result<()> {
     sync_tray_current(&tray_handle, &scheduler).await;
 
     // `apply_and_notify` に渡す `ApplyCtx` を組み立てる。参照するローカル変数が多く
-    // 呼び出しが 10 箇所あるため、借用リストの重複をここ 1 箇所に閉じ込める。
+    // 呼び出しが 9 箇所あるため、借用リストの重複をここ 1 箇所に閉じ込める。
     // マクロにすることで、借用がステートメント単位で完結する（関数に切り出すと
     // `&mut notifier` 等を保持するクロージャが main 全体を借用してしまう）。
     macro_rules! apply_ctx {
@@ -424,15 +424,12 @@ async fn main() -> Result<()> {
                             tracing::warn!("copy_to_favorites: favorites_dir not configured");
                             break 'fav;
                         };
-                        let Some(filename) = path.file_name().map(|n| n.to_owned()) else { break 'fav };
-                        let dest = fav_dir.join(&filename);
-                        if let Err(e) = tokio::fs::create_dir_all(&fav_dir).await {
-                            tracing::error!("favorites: failed to create dir {}: {}", fav_dir.display(), e);
-                            break 'fav;
-                        }
-                        match tokio::fs::copy(&path, &dest).await {
-                            Ok(_) => tracing::info!("copied to favorites: {}", dest.display()),
-                            Err(e) => tracing::error!("favorites: failed to copy {}: {}", path.display(), e),
+                        let src = path.clone();
+                        match tokio::task::spawn_blocking(move || copy_to_favorites(&src, &fav_dir)).await {
+                            Ok(Ok(Some(dest))) => tracing::info!("copied to favorites: {}", dest.display()),
+                            Ok(Ok(None)) => tracing::info!("already in favorites: {}", path.display()),
+                            Ok(Err(e)) => tracing::error!("favorites: failed to copy {}: {}", path.display(), e),
+                            Err(e) => tracing::error!("favorites task panicked: {}", e),
                         }
                     }
 
@@ -758,15 +755,11 @@ fn resolve_lang(config: &Config) -> i18n::Lang {
 /// 3. フォールバック（1920×1080 の単一モニター）
 async fn resolve_screens() -> Vec<screen::Monitor> {
     // 1. 環境変数による手動指定
+    if let Some(m) = screen::from_env() {
+        tracing::info!("screen from KABEKAMI_SCREEN: {}x{}", m.width, m.height);
+        return vec![m];
+    }
     if let Ok(val) = std::env::var("KABEKAMI_SCREEN") {
-        if let Some((w, h)) = val.split_once('x') {
-            if let (Ok(w), Ok(h)) = (w.trim().parse::<u32>(), h.trim().parse::<u32>()) {
-                if w > 0 && h > 0 {
-                    tracing::info!("screen from KABEKAMI_SCREEN: {}x{}", w, h);
-                    return vec![screen::Monitor { name: "env".into(), width: w, height: h }];
-                }
-            }
-        }
         tracing::warn!("invalid KABEKAMI_SCREEN='{}', expected WxH (e.g. 2560x1440)", val);
     }
 
@@ -1065,6 +1058,36 @@ async fn persist_config(before: &Config, config: &Config, what: &str) {
     state::save_offloaded(move || owned.save_changes(&before), what).await;
 }
 
+/// `src` を `fav_dir` へコピーし、コピー先を返す。同じ中身のファイルが同名
+/// （またはずらした名前）ですでにあれば何もせず `None`（`src` 自身がお気に入りに
+/// ある場合もここに入る）。
+///
+/// 同名の別ファイルは上書きせず `1-name`, `2-name`… と名前をずらす。
+/// コピー先は `create_new` で開くので、同じファイルへのコピーで中身を空にすることも
+/// （`fs::copy` は先に宛先を切り詰める）、既存のお気に入りを潰すことも起きない。
+fn copy_to_favorites(src: &Path, fav_dir: &Path) -> std::io::Result<Option<std::path::PathBuf>> {
+    std::fs::create_dir_all(fav_dir)?;
+    let content = std::fs::read(src)?;
+    let name = src.file_name().unwrap_or_default().to_string_lossy();
+    for n in 0u32.. {
+        let dest = fav_dir.join(if n == 0 { name.to_string() } else { format!("{n}-{name}") });
+        if std::fs::read(&dest).is_ok_and(|d| d == content) {
+            return Ok(None);
+        }
+        let mut out = match std::fs::OpenOptions::new().write(true).create_new(true).open(&dest) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        if let Err(e) = std::io::Write::write_all(&mut out, &content) {
+            let _ = std::fs::remove_file(&dest);
+            return Err(e);
+        }
+        return Ok(Some(dest));
+    }
+    unreachable!("u32 range exhausted")
+}
+
 /// 期限の来たオンラインプロバイダーの取得をバックグラウンドで起動し、`task` に保持する。
 /// 走行中のフェッチがあれば何もしない。
 fn spawn_fetch(
@@ -1282,5 +1305,26 @@ mod tests {
             t.admit(&TrayCmd::Next, first + Duration::from_millis(600)),
             "最初の Next から 500ms 経っているので通る"
         );
+    }
+
+    /// お気に入り内の画像を「コピー」しても中身が消えず、同名の別ファイルも潰さない。
+    #[test]
+    fn copy_to_favorites_never_clobbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let fav = dir.path().join("fav");
+        std::fs::create_dir(&fav).unwrap();
+        let inside = fav.join("a.jpg");
+        std::fs::write(&inside, b"favorite").unwrap();
+
+        assert_eq!(copy_to_favorites(&inside, &fav).unwrap(), None, "自分自身へはコピーしない");
+        assert_eq!(std::fs::read(&inside).unwrap(), b"favorite");
+
+        let other = dir.path().join("a.jpg");
+        std::fs::write(&other, b"other").unwrap();
+        let dest = copy_to_favorites(&other, &fav).unwrap().unwrap();
+        assert_eq!(dest, fav.join("1-a.jpg"));
+        assert_eq!(std::fs::read(&dest).unwrap(), b"other");
+        assert_eq!(std::fs::read(&inside).unwrap(), b"favorite", "同名の既存ファイルは残る");
+        assert_eq!(copy_to_favorites(&other, &fav).unwrap(), None, "同じ画像を二重にコピーしない");
     }
 }

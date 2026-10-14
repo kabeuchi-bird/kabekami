@@ -6,7 +6,7 @@
 //! 3. `rename()` で本ファイル名に差し替え（POSIX rename はアトミック）
 //! 4. 親ディレクトリも fsync して rename を永続化
 //!
-//! 5 番目の親ディレクトリ fsync は ext4/xfs などのジャーナリング FS で
+//! 4 番目の親ディレクトリ fsync は ext4/xfs などのジャーナリング FS で
 //! rename をディスクに確実に反映させるために必要（電源断耐性）。
 
 use std::fs::{self, OpenOptions};
@@ -69,7 +69,7 @@ pub fn atomic_write(path: &Path, contents: &[u8]) -> io::Result<()> {
     }
 
     // 親ディレクトリの fsync。ext4/xfs では rename の永続化に必要。
-    // 失敗してもデータ自体は書き込み済みなのでログ程度に留め、エラーは返さない。
+    // 失敗してもデータ自体は書き込み済みなので、エラーは返さず無視する。
     if let Ok(dir) = fs::File::open(parent) {
         let _ = dir.sync_all();
     }

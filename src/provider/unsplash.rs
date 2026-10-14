@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::{ensure_downloaded, get_json};
+use super::{ensure_downloaded, get_json, image_path};
 
 const API_URL: &str = "https://api.unsplash.com/photos/random";
 
@@ -71,9 +71,9 @@ pub async fn fetch(
     let mut available = Vec::new();
 
     for photo in &photos {
-        let filename = format!("unsplash_{}.jpg", photo.id);
+        let Some(dest) = image_path(dir, "unsplash", &photo.id, "jpg") else { continue };
         let url = if use_full { &photo.urls.full } else { &photo.urls.regular };
-        available.extend(ensure_downloaded(client, "unsplash", url, dir.join(&filename)).await);
+        available.extend(ensure_downloaded(client, "unsplash", url, dest).await);
     }
 
     Ok(available)
