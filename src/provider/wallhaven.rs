@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
@@ -28,6 +28,15 @@ struct WallhavenImage {
     path: String,
 }
 
+/// `X-API-Key` に載せる値。sensitive にしておくと、リクエストやヘッダーを
+/// Debug 出力してもキーが伏せられる。
+fn api_key_header(key: &str) -> Result<reqwest::header::HeaderValue> {
+    let mut value = reqwest::header::HeaderValue::from_str(key)
+        .context("wallhaven: api_key contains characters not allowed in a header")?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
 pub async fn fetch(
     cfg: &OnlineSourceConfig,
     dir: &Path,
@@ -35,7 +44,7 @@ pub async fn fetch(
 ) -> Result<Vec<PathBuf>> {
     let query = cfg.query.as_deref().unwrap_or("nature");
 
-    let mut params: Vec<(&str, String)> = vec![
+    let params: Vec<(&str, String)> = vec![
         ("q", query.to_string()),
         ("sorting", "toplist".to_string()),
         ("purity", "100".to_string()),    // SFW のみ
@@ -43,12 +52,19 @@ pub async fn fetch(
         ("atleast", "1920x1080".to_string()),
         ("per_page", cfg.count.clamp(1, 24).to_string()),
     ];
-    if let Some(key) = cfg.api_key.as_deref().filter(|k| !k.is_empty()) {
-        params.push(("apikey", key.to_string()));
-    }
+    // キーはクエリ (`apikey`) ではなくヘッダで送る。reqwest のエラー表示は URL を
+    // 含むため、クエリに載せると通信失敗の warn（と WARN 通知）にキーが出る（#57）。
+    // 独自ヘッダはリダイレクト先にも転送されるので、キーを付けるときは
+    // リダイレクトを追わないクライアントで送る。
+    let req = match cfg.api_key.as_deref().filter(|k| !k.is_empty()) {
+        Some(key) => super::make_no_redirect_client()?
+            .get(API_URL)
+            .query(&params)
+            .header("X-API-Key", api_key_header(key)?),
+        None => client.get(API_URL).query(&params),
+    };
 
-    let resp: WallhavenResponse =
-        get_json(client.get(API_URL).query(&params), "wallhaven").await?;
+    let resp: WallhavenResponse = get_json(req, "wallhaven").await?;
 
     let mut available = Vec::new();
 
@@ -58,4 +74,17 @@ pub async fn fetch(
     }
 
     Ok(available)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Debug 出力（診断ログ等）にキーが出ないこと。
+    #[test]
+    fn api_key_header_is_hidden_from_debug_output() {
+        let value = api_key_header("secret-key-123").unwrap();
+        assert!(value.is_sensitive());
+        assert!(!format!("{value:?}").contains("secret-key-123"));
+    }
 }

@@ -212,17 +212,22 @@ fn safe_ext(url: &str) -> String {
 
 /// プロバイダー API を呼んで JSON を受け取る。HTTP エラーはパース失敗と
 /// 取り違えないよう先に弾き、エラー表示から URL を外す（クエリに API キーが
-/// 載るプロバイダーがあるため）。
+/// 載るプロバイダーがあるため）。3xx が届くのはリダイレクトを追わない
+/// クライアント（キー付きのリクエスト）のときだけで、その場合もエラーにする。
 async fn get_json<T: serde::de::DeserializeOwned>(
     req: reqwest::RequestBuilder,
     provider: &str,
 ) -> Result<T> {
-    req.send()
+    let resp = req
+        .send()
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(reqwest::Error::without_url)
-        .with_context(|| format!("{provider} API request failed"))?
-        .json()
+        .with_context(|| format!("{provider} API request failed"))?;
+    if resp.status().is_redirection() {
+        anyhow::bail!("{provider} API redirected ({}); not following", resp.status());
+    }
+    resp.json()
         .await
         .with_context(|| format!("failed to parse {provider} API response"))
 }
@@ -350,17 +355,28 @@ pub fn make_client() -> Result<reqwest::Client> {
         attempt.follow()
     });
 
-    let client = reqwest::Client::builder()
+    Ok(client_builder().redirect(policy).build()?)
+}
+
+/// リダイレクトを追わないクライアント。独自ヘッダで API キーを送るリクエスト用。
+///
+/// reqwest が別ホストへのリダイレクトで外すのは `Authorization` などの既知の
+/// ヘッダだけで、`X-API-Key` のような独自ヘッダは転送先へそのまま送られる。
+/// キーを付けたリクエストではリダイレクト自体を追わず、3xx はエラーにする。
+pub fn make_no_redirect_client() -> Result<reqwest::Client> {
+    Ok(client_builder().redirect(redirect::Policy::none()).build()?)
+}
+
+/// 両クライアントに共通の設定（UA・タイムアウト・SSRF 対策の resolver）。
+fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
         .user_agent(concat!(
             "kabekami/",
             env!("CARGO_PKG_VERSION"),
             " (Linux wallpaper tool)"
         ))
         .timeout(Duration::from_secs(30))
-        .redirect(policy)
         .dns_resolver(std::sync::Arc::new(KabekamiResolver))
-        .build()?;
-    Ok(client)
 }
 
 /// reqwest 用のカスタム DNS resolver。
