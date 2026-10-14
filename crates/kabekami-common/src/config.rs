@@ -400,6 +400,10 @@ pub struct OnlineSourceConfig {
     /// 画像品質（Unsplash で使用: `"regular"` または `"full"`）。デフォルト: `"regular"`。
     #[serde(default)]
     pub quality: Option<String>,
+    /// 取得する内容の上限（Wallhaven で使用）。`"sfw"`・`"sketchy"`（SFW と Sketchy）・
+    /// `"nsfw"`（すべて。`api_key` が必要）。デフォルト: `"sfw"`。
+    #[serde(default)]
+    pub purity: Option<String>,
 }
 
 /// 起動時の設定ダンプ（`tracing::info!(?config)`）で API キーが journal や
@@ -419,6 +423,7 @@ impl std::fmt::Debug for OnlineSourceConfig {
             interval_hours,
             locale,
             quality,
+            purity,
         } = self;
         f.debug_struct("OnlineSourceConfig")
             .field("provider", provider)
@@ -431,6 +436,7 @@ impl std::fmt::Debug for OnlineSourceConfig {
             .field("interval_hours", interval_hours)
             .field("locale", locale)
             .field("quality", quality)
+            .field("purity", purity)
             .finish()
     }
 }

@@ -14,7 +14,7 @@ use reqwest::Url;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::{ensure_downloaded, get_json, FetchContext};
+use super::{ensure_downloaded, get_json, image_path, FetchContext};
 
 const BASE_URL: &str = "https://www.bing.com/";
 /// `urlbase` の resolve 後にこのホスト以外を返したら拒否する。
@@ -61,11 +61,8 @@ pub async fn fetch(
     let mut available = Vec::new();
 
     for img in &resp.images {
-        // startdate はサーバー由来のため英数字のみ残してサニタイズ
-        let safe_date: String =
-            img.startdate.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-        let filename = format!("bing_{}.jpg", safe_date);
-        let dest = dir.join(&filename);
+        // startdate はサーバー由来。ファイル名に使える文字だけ `image_path` が残す
+        let Some(dest) = image_path(dir, "bing", &img.startdate, "jpg") else { continue };
 
         // `urlbase + res_suffix` を `base` 相対で resolve し、ホストが Bing 以外なら拒否する。
         // 単純な文字列連結だと `urlbase = "//attacker/foo"` で別ホストへ誘導されうるため。

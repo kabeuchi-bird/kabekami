@@ -31,7 +31,7 @@ pub struct FetchContext {
     pub screen_h: u32,
 }
 
-/// プロバイダーが新たにダウンロードした画像のパスと件数。
+/// 1 回の取得で利用可能になった画像のパス（取得済みで今回ダウンロードしなかったものも含む）。
 pub struct FetchResult {
     pub provider: String,
     pub new_paths: Vec<PathBuf>,
@@ -196,6 +196,16 @@ async fn ensure_downloaded(
             None
         }
     }
+}
+
+/// プロバイダーが保存する画像のパス `<dir>/<provider>_<id>.<ext>`。
+///
+/// `id` はサーバー由来なので英数字・`-`・`_` 以外を落とす（`/` や `..` で
+/// `dir` の外へ書かせないため）。何も残らなければ `None`。
+fn image_path(dir: &Path, provider: &str, id: &str, ext: &str) -> Option<PathBuf> {
+    let id: String =
+        id.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')).collect();
+    (!id.is_empty()).then(|| dir.join(format!("{provider}_{id}.{ext}")))
 }
 
 /// URL パス末尾の画像拡張子（小文字）。該当しなければ `jpg`。
@@ -525,7 +535,17 @@ fn embedded_v4(hi: u16, lo: u16) -> Ipv4Addr {
 
 #[cfg(test)]
 mod download_tests {
-    use super::{is_private_host, safe_ext};
+    use super::{image_path, is_private_host, safe_ext};
+    use std::path::Path;
+
+    /// サーバーが返す ID でダウンロード先の外へ書かせない。
+    #[test]
+    fn image_path_stays_inside_dir() {
+        let dir = Path::new("/dl");
+        assert_eq!(image_path(dir, "unsplash", "ab-C_9", "jpg"), Some(dir.join("unsplash_ab-C_9.jpg")));
+        assert_eq!(image_path(dir, "reddit", "../../.bashrc", "jpg"), Some(dir.join("reddit_bashrc.jpg")));
+        assert_eq!(image_path(dir, "bing", "/..", "jpg"), None);
+    }
 
     /// 画像の拡張子でない名前で保存すると、走査にも監視にも拾われない。
     #[test]

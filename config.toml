@@ -136,6 +136,7 @@ enabled  = false
 # api_key = "YOUR_WALLHAVEN_API_KEY"
 query    = "landscape"   # search keywords
 count    = 10            # images to keep; max 24 per fetch
+# purity = "sfw"         # "sfw" (default), "sketchy" (SFW + Sketchy) or "nsfw" (all; needs api_key)
 # download_dir = "~/Pictures/Wallhaven"
 # interval_hours = 24
 

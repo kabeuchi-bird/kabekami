@@ -134,6 +134,7 @@ enabled  = false
 # api_key = "YOUR_WALLHAVEN_API_KEY"
 query    = "landscape"   # 検索キーワード
 count    = 10            # 保持する枚数。1 回の取得上限は 24 枚
+# purity = "sfw"         # "sfw"（デフォルト）、"sketchy"（SFW＋Sketchy）、"nsfw"（すべて。api_key が必要）
 # download_dir = "~/Pictures/Wallhaven"
 # interval_hours = 24
 

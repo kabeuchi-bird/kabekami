@@ -1,9 +1,9 @@
 //! kabekami-config — GUI 設定ツール。
 //!
 //! egui (eframe) による設定画面を提供する。
-//! - タブ: Sources / Rotation / Display / Cache / Ui
+//! - タブ: Sources / Online / Rotation / Display / Cache / Ui
 //! - Display タブで BlurPad パラメータをリアルタイムプレビュー
-//! - 保存時に `~/.config/kabekami/config.toml` を上書きし、
+//! - 保存時に `~/.config/kabekami/config.toml` の変えたキーだけを書き換え、
 //!   デーモンが inotify 経由で自動リロードする
 
 use std::ffi::OsString;
@@ -188,28 +188,51 @@ fn opt_path_field(ui: &mut egui::Ui, hint: &str, width: f32, val: &mut Option<Pa
     }
 }
 
+/// API の値をそのまま選ぶラジオボタン（値は API の名前なので訳さない）。
+/// 先頭が既定値で、選ばれたら `None`（設定ファイルに書かない）にする。
+fn api_choice(ui: &mut egui::Ui, label: &str, default_mark: &str, val: &mut Option<String>, choices: &[&str]) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut cur = val.clone().unwrap_or_else(|| choices[0].to_string());
+        for (i, c) in choices.iter().enumerate() {
+            let text = if i == 0 { format!("{c} {default_mark}") } else { c.to_string() };
+            ui.radio_value(&mut cur, c.to_string(), text);
+        }
+        *val = (cur != choices[0]).then_some(cur);
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Preview background thread
 // ---------------------------------------------------------------------------
 
 struct PreviewRequest {
+    /// 送った順の通し番号。結果に付けて返し、最新の要求の結果かを見分ける。
+    seq: u64,
     path: PathBuf,
     mode: DisplayMode,
     blur_sigma: f32,
     bg_darken: f32,
 }
 
-/// ワーカーからの結果。エラーはスレッドを越えるので文字列にしておく。
-type PreviewResult = Result<egui::ColorImage, String>;
+/// ワーカーからの結果（要求の通し番号付き）。エラーはスレッドを越えるので文字列にしておく。
+type PreviewResult = (u64, Result<egui::ColorImage, String>);
 
+/// 溜まった要求は最新の 1 件だけ描く（スライダーを動かしている間の中間値は捨てる）。
+/// 要求を捨てるのはここだけなので、最後に送った値は必ず描かれる。
 fn spawn_preview_worker(
     req_rx: mpsc::Receiver<PreviewRequest>,
-    res_tx: mpsc::SyncSender<PreviewResult>,
+    res_tx: mpsc::Sender<PreviewResult>,
 ) {
     std::thread::spawn(move || {
-        for req in req_rx {
-            // ignore send error (UI closed)
-            let _ = res_tx.try_send(render_preview(&req).map_err(|e| e.to_string()));
+        while let Ok(mut req) = req_rx.recv() {
+            while let Ok(newer) = req_rx.try_recv() {
+                req = newer;
+            }
+            // 送れないのは UI が閉じたとき
+            if res_tx.send((req.seq, render_preview(&req).map_err(|e| e.to_string()))).is_err() {
+                break;
+            }
         }
     });
 }
@@ -261,9 +284,11 @@ struct KabekamiApp {
     // Preview state
     preview_image_path: String,
     preview_texture: Option<egui::TextureHandle>,
-    preview_req_tx: mpsc::SyncSender<PreviewRequest>,
+    preview_req_tx: mpsc::Sender<PreviewRequest>,
     preview_res_rx: mpsc::Receiver<PreviewResult>,
     preview_rendering: bool,
+    /// 最後に送った要求の通し番号。この番号の結果が届くまでスピナーを出し続ける。
+    preview_seq: u64,
     /// Track last-sent params to avoid redundant renders
     preview_last: Option<(String, DisplayMode, f32, f32)>,
 
@@ -296,10 +321,10 @@ impl KabekamiApp {
             }
         };
 
-        // channel: UI → worker (unbounded so UI never blocks)
-        let (req_tx, req_rx) = mpsc::sync_channel::<PreviewRequest>(1);
-        // channel: worker → UI (sync, capacity 1: drop stale results)
-        let (res_tx, res_rx) = mpsc::sync_channel::<PreviewResult>(1);
+        // どちらも無制限（UI は送信で止まらない）。古い要求はワーカーが、
+        // 古い結果は `poll_preview` が読み飛ばす。
+        let (req_tx, req_rx) = mpsc::channel::<PreviewRequest>();
+        let (res_tx, res_rx) = mpsc::channel::<PreviewResult>();
 
         spawn_preview_worker(req_rx, res_tx);
 
@@ -314,6 +339,7 @@ impl KabekamiApp {
             preview_req_tx: req_tx,
             preview_res_rx: res_rx,
             preview_rendering: false,
+            preview_seq: 0,
             preview_last: None,
             new_dir_input: String::new(),
             new_online_provider: ProviderKind::Bing,
@@ -389,8 +415,10 @@ impl KabekamiApp {
         }
         self.preview_last = Some(key);
         self.preview_rendering = true;
+        self.preview_seq += 1;
 
-        let _ = self.preview_req_tx.try_send(PreviewRequest {
+        let _ = self.preview_req_tx.send(PreviewRequest {
+            seq: self.preview_seq,
             path: PathBuf::from(path_str),
             mode,
             blur_sigma: sigma,
@@ -450,8 +478,10 @@ impl KabekamiApp {
     }
 
     fn poll_preview(&mut self, ctx: &egui::Context) {
-        if let Ok(result) = self.preview_res_rx.try_recv() {
-            self.preview_rendering = false;
+        if let Some((seq, result)) = self.preview_res_rx.try_iter().last() {
+            // 途中の結果も表示はする（動かしている間の手応え）。後続の要求が
+            // 残っていればスピナーは止めない
+            self.preview_rendering = seq != self.preview_seq;
             match result {
                 Ok(img) => {
                     self.preview_texture = Some(ctx.load_texture(
@@ -792,7 +822,7 @@ impl KabekamiApp {
         for (i, oc) in sources.iter_mut().enumerate() {
             ui.group(|ui| {
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut oc.enabled, format!("**{}**", oc.provider));
+                    ui.checkbox(&mut oc.enabled, egui::RichText::new(oc.provider.to_string()).strong());
                     if ui.small_button(s.remove).clicked() {
                         remove_idx = Some(i);
                     }
@@ -811,17 +841,11 @@ impl KabekamiApp {
                         let locale_hint = format!("en-US {}", s.default_option);
                         opt_text_field(ui, s.locale, &locale_hint, 150.0, false, &mut oc.locale);
                     }
-                    // Unsplash: 画質
                     if oc.provider == ProviderKind::Unsplash {
-                        ui.horizontal(|ui| {
-                            ui.label(s.quality);
-                            let mut q = oc.quality.clone().unwrap_or_else(|| "regular".to_string());
-                            // "regular" / "full" は Unsplash API の値そのものなので訳さない
-                            let regular_label = format!("regular {}", s.default_option);
-                            ui.radio_value(&mut q, "regular".to_string(), regular_label);
-                            ui.radio_value(&mut q, "full".to_string(), "full");
-                            oc.quality = if q == "regular" { None } else { Some(q) };
-                        });
+                        api_choice(ui, s.quality, s.default_option, &mut oc.quality, &["regular", "full"]);
+                    }
+                    if oc.provider == ProviderKind::Wallhaven {
+                        api_choice(ui, s.purity, s.default_option, &mut oc.purity, &["sfw", "sketchy", "nsfw"]);
                     }
                     // 保持枚数
                     ui.horizontal(|ui| {
@@ -891,6 +915,7 @@ impl KabekamiApp {
                     interval_hours: None,
                     locale: None,
                     quality: None,
+                    purity: None,
                 });
             }
         });

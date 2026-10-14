@@ -123,6 +123,12 @@ string_table! {
         /// グローバルショートカットの表示名（KDE のショートカット設定に出る）
         toggle_pause = "Pause / Resume",
         display_mode = "Display Mode",
+        // 表示モードのサブメニュー項目
+        mode_fill = "Fill",
+        mode_fit = "Fit",
+        mode_stretch = "Stretch",
+        mode_blurpad = "BlurPad",
+        mode_smart = "Smart",
         interval = "Rotation Interval",
         open_current = "Open Current Wallpaper",
         delete_current = "Move to Trash",
@@ -238,6 +244,8 @@ string_table! {
         subreddit = "Subreddit:",
         locale = "Locale:",
         quality = "Quality:",
+        /// Wallhaven の表示範囲。選択肢の "sfw" / "sketchy" / "nsfw" は API の値なので訳さない
+        purity = "Purity:",
         /// `{}` = プロバイダー既定の再取得間隔（時間）
         interval_default_hint = "(default: {}h)",
         /// 設定値が未指定のときに選択欄へ出す表示。既定値を示す注記にも流用する

@@ -9,7 +9,8 @@
 //! - **トリガー**: 壁紙更新イベント（`trigger_tx.send(())` 経由）
 //! - **スロットル**: 連続呼び出しは最低 60 秒間隔まで間引く。短い rotation
 //!   interval （例: 10 秒）でも kscreen-doctor を叩きすぎないようにする。
-//! - 環境変数 `KABEKAMI_SCREEN` が設定されている場合は無効化（ユーザー上書きを尊重）
+//! - 環境変数 `KABEKAMI_SCREEN` が正しく設定されている場合は無効化（ユーザー上書きを尊重。
+//!   不正な値なら起動時と同じく自動検出に倒すので、こちらも動かす）
 //! - 差分検出時は `TrayCmd::ScreensChanged` を送信し、メインループ側で
 //!   `screens` を差し替えて壁紙を再適用する。
 //!
@@ -31,12 +32,12 @@ const MIN_INTERVAL: Duration = Duration::from_secs(60);
 ///
 /// - `Some(trigger_tx)` を返した場合、`trigger_tx.send(())` で検出を要求できる。
 ///   メインループは壁紙更新の直後にこれを呼ぶ。
-/// - `KABEKAMI_SCREEN` が設定されている場合は `None` を返す（動的検出を行わない）。
+/// - `KABEKAMI_SCREEN` が正しく設定されている場合は `None` を返す（動的検出を行わない）。
 pub fn spawn(
     initial: Vec<Monitor>,
     cmd_tx: UnboundedSender<TrayCmd>,
 ) -> Option<UnboundedSender<()>> {
-    if std::env::var_os("KABEKAMI_SCREEN").is_some() {
+    if screen::from_env().is_some() {
         tracing::debug!("screen watcher: KABEKAMI_SCREEN is set, watcher disabled");
         return None;
     }

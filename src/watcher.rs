@@ -140,14 +140,6 @@ pub fn spawn(
     (rx, Some(DirWatcher { _inner: watcher, complete }))
 }
 
-/// 設定ファイル（`~/.config/kabekami/config.toml`）の変更を監視する。
-///
-/// エディタや設定 GUI による上書き保存を検知するために、ファイル単体ではなく
-/// 親ディレクトリを監視する（atomic-write 系エディタはファイルを置換するため
-/// ファイル直接の watch だと取りこぼすことがある）。
-///
-/// イベントは内容なし `()` のチャンネルで通知する。バーストはメインループ側の
-/// 100ms スロットルおよびリロード処理の冪等性で吸収する。
 /// `notify` のイベント 1 件（パス 1 つ分）を `WatchEvent` に変換する。
 ///
 /// - 画像の作成・移入は `Added`。
@@ -179,6 +171,19 @@ fn events_for(kind: EventKind, path: PathBuf, recursive: bool) -> Vec<WatchEvent
     }
 }
 
+/// 設定ファイル（`~/.config/kabekami/config.toml`）の変更を監視する。
+///
+/// エディタや設定 GUI による上書き保存を検知するために、ファイル単体ではなく
+/// 親ディレクトリを監視する（atomic-write 系エディタはファイルを置換するため
+/// ファイル直接の watch だと取りこぼすことがある）。
+///
+/// イベントは内容なし `()` のチャンネルで通知する。バーストはメインループ側の
+/// 100ms スロットルおよびリロード処理の冪等性で吸収する。
+///
+/// `config.toml` がシンボリックリンク（ドットファイル管理など）なら、リンク先の
+/// ディレクトリも監視する。保存はリンク先へ書くので（`atomic_write`）、リンク側の
+/// ディレクトリにはイベントが来ない。リンク先は起動時に 1 回だけ解決するので、
+/// 動作中にリンクを張り替えた場合、新しいリンク先の変更は次の起動まで拾わない。
 pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<notify::RecommendedWatcher>) {
     // `spawn` と同じく、失敗時も閉じた受信端を返す。
     let (tx, rx) = mpsc::unbounded_channel::<()>();
@@ -192,7 +197,12 @@ pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<notify
         return (rx, None);
     }
 
+    // リンク先が解決できなければリンク側だけを見る（無ければ作成時のイベントで拾う）
+    let real = kabekami_common::atomic_write::write_target(config_path)
+        .ok()
+        .filter(|r| r != config_path);
     let target = config_path.to_path_buf();
+    let real_target = real.clone();
 
     let mut watcher = match notify::recommended_watcher(
         move |res: notify::Result<notify::Event>| {
@@ -204,7 +214,7 @@ pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<notify
             ) {
                 return;
             }
-            if event.paths.iter().any(|p| p == &target) {
+            if event.paths.iter().any(|p| *p == target || real_target.as_ref() == Some(p)) {
                 let _ = tx.send(());
             }
         },
@@ -223,6 +233,12 @@ pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<notify
             e
         );
         return (rx, None);
+    }
+
+    if let Some(real_parent) = real.as_deref().and_then(Path::parent).filter(|p| *p != parent) {
+        if let Err(e) = watcher.watch(real_parent, RecursiveMode::NonRecursive) {
+            tracing::warn!("failed to watch config link target dir {}: {}", real_parent.display(), e);
+        }
     }
 
     tracing::info!(
@@ -274,6 +290,23 @@ mod tests {
         let gone = PathBuf::from("/pics/album");
         let ev = events_for(EventKind::Remove(RemoveKind::Any), gone.clone(), true);
         assert!(matches!(ev.as_slice(), [WatchEvent::Removed(p)] if *p == gone));
+    }
+
+    /// `config.toml` がリンクでも、リンク先への保存でリロードが走る。
+    #[tokio::test]
+    async fn config_symlink_target_changes_are_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (real_dir, link_dir) = (dir.path().join("dotfiles"), dir.path().join("config"));
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::create_dir_all(&link_dir).unwrap();
+        let real = real_dir.join("config.toml");
+        std::fs::write(&real, "").unwrap();
+        std::os::unix::fs::symlink(&real, link_dir.join("config.toml")).unwrap();
+
+        let (mut rx, _w) = spawn_config(&link_dir.join("config.toml"));
+        kabekami_common::atomic_write::atomic_write(&link_dir.join("config.toml"), b"x = 1").unwrap();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
+        assert_eq!(got, Ok(Some(())));
     }
 
     #[test]

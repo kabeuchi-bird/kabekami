@@ -1,7 +1,8 @@
 //! 加工済み画像のキャッシュ管理。
 //!
 //! ## キャッシュキー
-//! `DefaultHasher`(元画像の絶対パス | 画面幅 | 画面高 | DisplayMode | blur_sigma | bg_darken)
+//! `DefaultHasher`(元画像の絶対パス | 画面幅 | 画面高 | DisplayMode | blur_sigma | bg_darken
+//! | 元画像の mtime・サイズ)
 //! → 16 進数文字列 + `.webp` がキャッシュファイル名となる。
 //!
 //! ## LRU 退避

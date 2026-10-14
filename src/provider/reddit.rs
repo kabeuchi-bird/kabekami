@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::{ensure_downloaded, get_json, safe_ext};
+use super::{ensure_downloaded, get_json, image_path, safe_ext};
 
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 
@@ -96,8 +96,8 @@ pub async fn fetch(
         // (`"tt3_abc"` → `"abc"` のような誤動作になる)、prefix 完全一致の
         // `strip_prefix` を使う。
         let id = post.name.strip_prefix("t3_").unwrap_or(&post.name);
-        let filename = format!("reddit_{}.{}", id, safe_ext(&post.url));
-        available.extend(ensure_downloaded(client, "reddit", &post.url, dir.join(&filename)).await);
+        let Some(dest) = image_path(dir, "reddit", id, &safe_ext(&post.url)) else { continue };
+        available.extend(ensure_downloaded(client, "reddit", &post.url, dest).await);
     }
 
     Ok(available)

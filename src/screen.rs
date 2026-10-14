@@ -1,8 +1,8 @@
 //! 画面解像度の自動取得。
 //!
 //! `kscreen-doctor --json` の出力をパースして、有効な出力（モニター）の
-//! 解像度を返す。環境変数 `KABEKAMI_SCREEN=WxH` が設定されている場合は
-//! main.rs 側で優先して使用され、この関数は呼ばれない。
+//! 解像度を返す。環境変数 `KABEKAMI_SCREEN=WxH` が正しく設定されている場合は
+//! main.rs 側で `from_env` が優先され、検出は行わない。
 
 use serde::Deserialize;
 
@@ -15,6 +15,14 @@ pub struct Monitor {
     pub width: u32,
     /// 現在のアクティブ解像度（高さ）。
     pub height: u32,
+}
+
+/// `KABEKAMI_SCREEN=WxH` による手動指定（単一モニター扱い）。未設定・不正なら `None`。
+pub fn from_env() -> Option<Monitor> {
+    let val = std::env::var("KABEKAMI_SCREEN").ok()?;
+    let (w, h) = val.split_once('x')?;
+    let (width, height) = (w.trim().parse().ok()?, h.trim().parse().ok()?);
+    (width > 0 && height > 0).then(|| Monitor { name: "env".into(), width, height })
 }
 
 /// 接続・有効化された全モニターを検出する。
