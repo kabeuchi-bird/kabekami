@@ -486,9 +486,8 @@ max_size_mb = 123
 
     #[test]
     fn save_and_reload_roundtrip() {
-        let dir = std::env::temp_dir().join("kabekami-config-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let path = dir.join("config.toml");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
 
         let mut cfg = Config::default();
         cfg.rotation.interval_secs = 300;
