@@ -114,8 +114,10 @@ fn darken(img: &mut RgbaImage, amount: f32) {
 pub fn load_oriented(src: &std::path::Path) -> anyhow::Result<image::DynamicImage> {
     use image::ImageDecoder;
 
-    let reader = image::ImageReader::open(src)
-        .map_err(|e| anyhow::anyhow!("failed to open {}: {}", src.display(), e))?;
+    // `with_context` で io::Error を chain に残す（呼び出し側が NotFound を判別する）
+    let reader = anyhow::Context::with_context(image::ImageReader::open(src), || {
+        format!("failed to open {}", src.display())
+    })?;
     let ext_fmt = reader.format(); // 拡張子から推定したフォーマット
     let reader = reader
         .with_guessed_format()

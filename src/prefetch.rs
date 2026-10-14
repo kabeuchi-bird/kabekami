@@ -31,9 +31,10 @@ pub struct Prefetcher {
 impl Prefetcher {
     /// 指定したキャッシュキー群に対応する画像の先読み加工をバックグラウンドで開始する。
     ///
-    /// 先読み中のタスクは abort してから起動する。キャッシュにあるかどうかは
-    /// ここでは見ない（ファイル I/O なので単一ワーカーの上で行わない）。
-    /// ヒットも加工中の待ち合わせも `process_single_flight` が受け持つ。
+    /// 先読み中のタスクは abort してから起動する。キャッシュの有無はここ（単一
+    /// ワーカー上）では見ない。キーの元画像 stat もヒット確認もファイル I/O なので、
+    /// `process_for_cache` が `spawn_blocking` 内で行い、ヒットならそこで返る。
+    /// 加工中のキーは `process_single_flight` が待ち側に回す。
     /// キーが複数なのは `CacheKey` が解像度を含むため
     /// （1 つだけ温めても解像度の違うモニターはミスする）。
     pub fn start(&mut self, keys: impl IntoIterator<Item = CacheKey>, cache: Arc<Cache>) {
@@ -95,6 +96,8 @@ pub async fn process_single_flight(key: &CacheKey, cache: &Arc<Cache>) -> anyhow
 /// この関数は `spawn_blocking` から呼ばれることを想定している。
 /// キャッシュにすでにある場合は二重書き込みを避けるためスキップする。
 pub fn process_for_cache(key: &CacheKey, cache: &Cache) -> anyhow::Result<PathBuf> {
+    // 元画像の mtime・サイズをここ（ブロッキング側）で埋めてからキャッシュを引く
+    let key = &key.clone().with_source_stamp();
     let src = key.src.as_path();
 
     // 加工権を取る前に先行が完了していればここでヒットする
@@ -134,6 +137,7 @@ mod tests {
             mode: DisplayMode::Fill,
             blur_sigma: 0.0,
             bg_darken: 0.0,
+            src_stamp: None,
         }
     }
 
@@ -153,6 +157,30 @@ mod tests {
 
     fn cache(dir: &tempfile::TempDir) -> Arc<Cache> {
         Arc::new(Cache::new(dir.path().to_path_buf(), 0))
+    }
+
+    /// キャッシュ済みのキーは元画像を読まずに返る。先読みを開始しても同じで、
+    /// 加工し直さない。元画像は画像として読めない中身にしてあるので、
+    /// デコードに進めば失敗する。
+    #[tokio::test]
+    async fn a_cached_key_is_served_without_decoding_the_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = cache(&dir);
+        let src = dir.path().join("a.jpg");
+        std::fs::write(&src, b"not an image").unwrap();
+        let k = key(src.to_str().unwrap());
+        let stored = cache
+            .store(&k.clone().with_source_stamp(), &RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 255])))
+            .unwrap();
+
+        assert_eq!(process_single_flight(&k, &cache).await.unwrap(), stored);
+
+        let mut prefetcher = Prefetcher::default();
+        prefetcher.start([k], Arc::clone(&cache));
+        for handle in prefetcher.pending.drain(..) {
+            handle.await.unwrap();
+        }
+        assert!(stored.exists(), "加工結果はそのまま");
     }
 
     /// 同じ出力パスの加工権は 1 つだけ。2 人目以降は待ち側になる。
@@ -284,16 +312,4 @@ mod tests {
         owned(cache.claim(cache.path_for(&k)));
     }
 
-    /// キャッシュ済みのキーは元画像を読まずに返る（先読みが同じ画像を
-    /// 開始しても、デコードはやり直さない）。元画像は存在しないので、
-    /// 読みに行けばエラーになる。
-    #[tokio::test]
-    async fn a_cached_key_is_returned_without_decoding() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = cache(&dir);
-        let k = key("/nonexistent/a.jpg");
-        let stored = cache.store(&k, &RgbaImage::from_pixel(4, 4, Rgba([0, 0, 0, 255]))).unwrap();
-
-        assert_eq!(process_single_flight(&k, &cache).await.unwrap(), stored);
-    }
 }
