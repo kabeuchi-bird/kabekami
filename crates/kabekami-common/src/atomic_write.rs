@@ -99,8 +99,8 @@ mod tests {
 
     #[test]
     fn writes_atomically_and_overwrites() {
-        let dir = std::env::temp_dir().join(format!("kabekami-atomic-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
         let path = dir.join("file.txt");
 
         atomic_write(&path, b"first").unwrap();
@@ -110,14 +110,12 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"second");
 
         // tmp ファイルが残っていないこと
-        let leftover: Vec<_> = fs::read_dir(&dir)
+        let leftover: Vec<_> = fs::read_dir(dir)
             .unwrap()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
             .collect();
         assert!(leftover.is_empty(), "no tmp files should remain");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// 新規は 0600、既存はその権限を保つ。API キー入りの config.toml を

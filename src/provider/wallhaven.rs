@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::{ensure_downloaded, safe_ext};
+use super::{ensure_downloaded, get_json, safe_ext};
 
 const API_URL: &str = "https://wallhaven.cc/api/v1/search";
 
@@ -64,14 +64,7 @@ pub async fn fetch(
         None => client.get(API_URL).query(&params),
     };
 
-    let resp = req.send().await?;
-    if resp.status().is_redirection() {
-        anyhow::bail!("wallhaven API redirected ({}); not following with the API key", resp.status());
-    }
-    let resp: WallhavenResponse = resp
-        .json()
-        .await
-        .context("failed to parse Wallhaven API response")?;
+    let resp: WallhavenResponse = get_json(req, "wallhaven").await?;
 
     let mut available = Vec::new();
 
