@@ -207,14 +207,16 @@ fn api_choice(ui: &mut egui::Ui, label: &str, default_mark: &str, val: &mut Opti
 // ---------------------------------------------------------------------------
 
 struct PreviewRequest {
+    /// 送った順の通し番号。結果に付けて返し、最新の要求の結果かを見分ける。
+    seq: u64,
     path: PathBuf,
     mode: DisplayMode,
     blur_sigma: f32,
     bg_darken: f32,
 }
 
-/// ワーカーからの結果。エラーはスレッドを越えるので文字列にしておく。
-type PreviewResult = Result<egui::ColorImage, String>;
+/// ワーカーからの結果（要求の通し番号付き）。エラーはスレッドを越えるので文字列にしておく。
+type PreviewResult = (u64, Result<egui::ColorImage, String>);
 
 /// 溜まった要求は最新の 1 件だけ描く（スライダーを動かしている間の中間値は捨てる）。
 /// 要求を捨てるのはここだけなので、最後に送った値は必ず描かれる。
@@ -228,7 +230,7 @@ fn spawn_preview_worker(
                 req = newer;
             }
             // 送れないのは UI が閉じたとき
-            if res_tx.send(render_preview(&req).map_err(|e| e.to_string())).is_err() {
+            if res_tx.send((req.seq, render_preview(&req).map_err(|e| e.to_string()))).is_err() {
                 break;
             }
         }
@@ -285,6 +287,8 @@ struct KabekamiApp {
     preview_req_tx: mpsc::Sender<PreviewRequest>,
     preview_res_rx: mpsc::Receiver<PreviewResult>,
     preview_rendering: bool,
+    /// 最後に送った要求の通し番号。この番号の結果が届くまでスピナーを出し続ける。
+    preview_seq: u64,
     /// Track last-sent params to avoid redundant renders
     preview_last: Option<(String, DisplayMode, f32, f32)>,
 
@@ -335,6 +339,7 @@ impl KabekamiApp {
             preview_req_tx: req_tx,
             preview_res_rx: res_rx,
             preview_rendering: false,
+            preview_seq: 0,
             preview_last: None,
             new_dir_input: String::new(),
             new_online_provider: ProviderKind::Bing,
@@ -410,8 +415,10 @@ impl KabekamiApp {
         }
         self.preview_last = Some(key);
         self.preview_rendering = true;
+        self.preview_seq += 1;
 
         let _ = self.preview_req_tx.send(PreviewRequest {
+            seq: self.preview_seq,
             path: PathBuf::from(path_str),
             mode,
             blur_sigma: sigma,
@@ -471,8 +478,10 @@ impl KabekamiApp {
     }
 
     fn poll_preview(&mut self, ctx: &egui::Context) {
-        if let Some(result) = self.preview_res_rx.try_iter().last() {
-            self.preview_rendering = false;
+        if let Some((seq, result)) = self.preview_res_rx.try_iter().last() {
+            // 途中の結果も表示はする（動かしている間の手応え）。後続の要求が
+            // 残っていればスピナーは止めない
+            self.preview_rendering = seq != self.preview_seq;
             match result {
                 Ok(img) => {
                     self.preview_texture = Some(ctx.load_texture(

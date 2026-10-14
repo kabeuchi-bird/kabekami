@@ -1068,10 +1068,14 @@ async fn persist_config(before: &Config, config: &Config, what: &str) {
 fn copy_to_favorites(src: &Path, fav_dir: &Path) -> std::io::Result<Option<std::path::PathBuf>> {
     std::fs::create_dir_all(fav_dir)?;
     let content = std::fs::read(src)?;
+    let len = content.len() as u64;
     let name = src.file_name().unwrap_or_default().to_string_lossy();
     for n in 0u32.. {
         let dest = fav_dir.join(if n == 0 { name.to_string() } else { format!("{n}-{name}") });
-        if std::fs::read(&dest).is_ok_and(|d| d == content) {
+        // サイズが違えば中身は読まない（同名の別画像の大半はここで外れる）
+        if std::fs::metadata(&dest).is_ok_and(|m| m.len() == len)
+            && std::fs::read(&dest).is_ok_and(|d| d == content)
+        {
             return Ok(None);
         }
         let mut out = match std::fs::OpenOptions::new().write(true).create_new(true).open(&dest) {

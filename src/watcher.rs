@@ -182,7 +182,8 @@ fn events_for(kind: EventKind, path: PathBuf, recursive: bool) -> Vec<WatchEvent
 ///
 /// `config.toml` がシンボリックリンク（ドットファイル管理など）なら、リンク先の
 /// ディレクトリも監視する。保存はリンク先へ書くので（`atomic_write`）、リンク側の
-/// ディレクトリにはイベントが来ない。
+/// ディレクトリにはイベントが来ない。リンク先は起動時に 1 回だけ解決するので、
+/// 動作中にリンクを張り替えた場合、新しいリンク先の変更は次の起動まで拾わない。
 pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<notify::RecommendedWatcher>) {
     // `spawn` と同じく、失敗時も閉じた受信端を返す。
     let (tx, rx) = mpsc::unbounded_channel::<()>();
