@@ -7,12 +7,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::{ensure_downloaded, safe_ext};
+use super::{ensure_downloaded, get_json, safe_ext};
 
 const API_URL: &str = "https://wallhaven.cc/api/v1/search";
 
@@ -47,14 +47,8 @@ pub async fn fetch(
         params.push(("apikey", key.to_string()));
     }
 
-    let resp: WallhavenResponse = client
-        .get(API_URL)
-        .query(&params)
-        .send()
-        .await?
-        .json()
-        .await
-        .context("failed to parse Wallhaven API response")?;
+    let resp: WallhavenResponse =
+        get_json(client.get(API_URL).query(&params), "wallhaven").await?;
 
     let mut available = Vec::new();
 
