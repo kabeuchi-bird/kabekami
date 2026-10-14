@@ -211,6 +211,12 @@ string_table! {
         unlimited_hint = "0 = unlimited",
         refresh = "Refresh",
         clear_cache = "Clear Cache",
+        /// 置換トークン: `{count}` = 削除するファイル数, `{dir}` = 対象ディレクトリ
+        clear_cache_confirm = "Delete {count} cache file(s) in {dir}?",
+        confirm_delete = "Delete",
+        /// 置換トークン: `{count}` = 削除できなかったファイル数
+        clear_cache_failed = "Failed to delete {count} cache file(s)",
+        cancel = "Cancel",
         current_size_unknown = "Current size: (click Refresh)",
         current_size = "Current size",
         unlimited = "unlimited",
