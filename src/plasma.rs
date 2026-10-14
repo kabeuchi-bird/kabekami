@@ -91,7 +91,12 @@ impl PlasmaShell {
             }
         }
 
-        set_wallpaper_cli(&canonical[0].1)
+        // 外部コマンドの終了待ちは単一ワーカーを止めるので逃がす
+        // （D-Bus が失敗している状況でトレイまで固まらないように）
+        let path = canonical[0].1.clone();
+        tokio::task::spawn_blocking(move || set_wallpaper_cli(&path))
+            .await
+            .context("plasma-apply-wallpaperimage task panicked")?
     }
 }
 

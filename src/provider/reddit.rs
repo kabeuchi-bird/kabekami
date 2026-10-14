@@ -6,12 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 
 use kabekami_common::config::OnlineSourceConfig;
 
-use super::{ensure_downloaded, safe_ext};
+use super::{ensure_downloaded, get_json, safe_ext};
 
 const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 
@@ -71,15 +71,14 @@ pub async fn fetch(
     let fetch_limit = cfg.count.saturating_mul(3).min(100);
 
     let api_url = format!("https://www.reddit.com/r/{}/top.json", subreddit);
-    let listing: RedditListing = client
-        .get(&api_url)
-        .query(&[("t", "week"), ("limit", &fetch_limit.to_string())])
-        .header("Accept", "application/json")
-        .send()
-        .await?
-        .json()
-        .await
-        .context("failed to parse Reddit API response")?;
+    let listing: RedditListing = get_json(
+        client
+            .get(&api_url)
+            .query(&[("t", "week"), ("limit", &fetch_limit.to_string())])
+            .header("Accept", "application/json"),
+        "reddit",
+    )
+    .await?;
 
     let target = cfg.count as usize;
     let mut available = Vec::new();

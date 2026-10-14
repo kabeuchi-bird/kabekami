@@ -109,13 +109,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn tmp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kabekami-scanner-test-{}", name));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     fn touch(p: &Path) {
         if let Some(parent) = p.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -125,7 +118,8 @@ mod tests {
 
     #[test]
     fn picks_up_images_by_extension() {
-        let root = tmp_dir("ext");
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
         touch(&root.join("a.jpg"));
         touch(&root.join("b.PNG"));
         touch(&root.join("ignore.txt"));
@@ -138,7 +132,8 @@ mod tests {
 
     #[test]
     fn recursive_vs_flat() {
-        let root = tmp_dir("recursive");
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
         touch(&root.join("top.jpg"));
         touch(&root.join("sub/nested.jpg"));
 
@@ -160,8 +155,8 @@ mod tests {
     #[test]
     fn follows_symlinks_without_looping() {
         use std::os::unix::fs::symlink;
-        let root = tmp_dir("symlink");
-        let other = tmp_dir("symlink-target");
+        let (root_dir, other_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (root, other) = (root_dir.path().to_path_buf(), other_dir.path().to_path_buf());
         touch(&other.join("linked.jpg"));
         touch(&other.join("sub/deep.jpg"));
         symlink(other.join("linked.jpg"), root.join("file-link.jpg")).unwrap();
@@ -172,5 +167,4 @@ mod tests {
         let found = scan(std::slice::from_ref(&root), true).unwrap();
         assert_eq!(found, vec![root.join("dir-link/deep.jpg"), root.join("file-link.jpg")]);
     }
-
 }
