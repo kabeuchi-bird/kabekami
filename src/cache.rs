@@ -74,6 +74,12 @@ pub struct CacheKey {
     pub mode: DisplayMode,
     pub blur_sigma: f32,
     pub bg_darken: f32,
+    /// 元画像の (mtime, サイズ)。同じパスのまま中身を差し替えても古い加工結果に
+    /// ヒットしないよう、キーに含める（#61）。stat はファイル I/O なので
+    /// 組み立て時（単一ワーカー上）ではなく、`spawn_blocking` 内で
+    /// `with_source_stamp` が埋める。`None` は未取得（取得前・元画像が無い）。
+    /// mtime を返さない FS でもサイズだけは効かせるため、mtime は別に `Option`。
+    pub src_stamp: Option<(Option<SystemTime>, u64)>,
 }
 
 impl CacheKey {
@@ -90,7 +96,23 @@ impl CacheKey {
             mode: display.mode,
             blur_sigma: display.blur_sigma,
             bg_darken: display.bg_darken,
+            src_stamp: None,
         }
+    }
+
+    /// 元画像を stat して `src_stamp` を埋める（ブロッキング）。
+    pub fn with_source_stamp(mut self) -> Self {
+        if let Ok(m) = std::fs::metadata(&self.src) {
+            let mtime = m.modified().ok();
+            if mtime.is_none() {
+                tracing::debug!(
+                    "no mtime for {}; cache freshness relies on size only",
+                    self.src.display()
+                );
+            }
+            self.src_stamp = Some((mtime, m.len()));
+        }
+        self
     }
 }
 
@@ -214,6 +236,7 @@ impl Cache {
         (key.screen_w, key.screen_h, key.mode).hash(&mut h);
         // f32 は Hash を持たないのでビット列で（±0 や NaN も bit-exact に区別）
         (key.blur_sigma.to_bits(), key.bg_darken.to_bits()).hash(&mut h);
+        key.src_stamp.hash(&mut h);
         format!("{:016x}", h.finish())
     }
 }
@@ -257,12 +280,8 @@ fn touch(path: &Path) -> bool {
     true
 }
 
-/// kabekami がこれまでに書き出したことがある拡張子をすべて列挙する。
-/// フォーマット変更後も旧形式のファイルが LRU 退避対象から漏れないようにする。
-const CACHE_EXTS: &[&str] = &["jpg", "webp", "png"];
-
-/// キャッシュディレクトリ内の画像ファイルを mtime 昇順（古い順）で返す。
-/// `CACHE_EXTS` に含まれる拡張子のみを対象とする。
+/// キャッシュディレクトリ内のキャッシュファイルを mtime 昇順（古い順）で返す。
+/// `is_cache_file_name` に合うものだけを対象とする（旧形式の `.jpg` も含む）。
 fn cache_entries_by_mtime(dir: &Path) -> Result<Vec<(PathBuf, u64, SystemTime)>> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -271,8 +290,8 @@ fn cache_entries_by_mtime(dir: &Path) -> Result<Vec<(PathBuf, u64, SystemTime)>>
     for entry in std::fs::read_dir(dir).context("failed to read cache directory")? {
         let entry = entry?;
         let path = entry.path();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !CACHE_EXTS.contains(&ext) {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !kabekami_common::config::is_cache_file_name(name) {
             continue;
         }
         let meta = entry.metadata()?;
@@ -307,6 +326,7 @@ mod tests {
             mode: DisplayMode::BlurPad,
             blur_sigma: 25.0,
             bg_darken: 0.1,
+            src_stamp: None,
         }
     }
 
@@ -352,8 +372,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::new(dir.path().to_path_buf(), 1);
 
-        let old_path = dir.path().join("0000old.jpg");
-        let new_path = dir.path().join("zzzznew.jpg");
+        let old_path = dir.path().join("000000000000000a.jpg");
+        let new_path = dir.path().join("000000000000000b.webp");
         std::fs::write(&new_path, vec![0u8; 1200 * 1024]).unwrap();
         let old = std::fs::File::create(&old_path).unwrap();
         old.set_len(600 * 1024).unwrap();
@@ -367,6 +387,22 @@ mod tests {
             new_path.exists(),
             "recent file must survive even over the limit"
         );
+    }
+
+    /// キャッシュ名でないファイルは古くて大きくても退避しない。
+    /// `cache.directory` が手持ちの画像フォルダを指していても消さないため（#59）。
+    #[test]
+    fn eviction_never_touches_files_kabekami_did_not_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().to_path_buf(), 1);
+        let user = dir.path().join("holiday.jpg");
+        let f = std::fs::File::create(&user).unwrap();
+        f.set_len(2 * 1024 * 1024).unwrap();
+        f.set_modified(SystemTime::now() - EVICT_GRACE * 2).unwrap();
+
+        cache.evict_if_needed().unwrap();
+
+        assert!(user.exists(), "ユーザーのファイルを消した");
     }
 
     #[test]
@@ -445,7 +481,7 @@ mod tests {
     fn set_max_size_mb_takes_effect_on_the_next_eviction() {
         let dir = tempfile::tempdir().unwrap();
         let cache = Cache::new(dir.path().to_path_buf(), 0);
-        let old = dir.path().join("old.webp");
+        let old = dir.path().join("000000000000000a.webp");
         let f = std::fs::File::create(&old).unwrap();
         f.set_len(2 * 1024 * 1024).unwrap();
         f.set_modified(SystemTime::now() - EVICT_GRACE * 2).unwrap();
@@ -497,6 +533,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(std::fs::read(&final_path).unwrap(), b"outer", "後から rename した方が残る");
+    }
+
+
+    /// 同じパスでも中身（mtime・サイズ）が変われば別のキャッシュになる（#61）。
+    #[test]
+    fn replacing_the_source_changes_the_cache_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("cache"), 0);
+        let src = dir.path().join("a.jpg");
+        std::fs::write(&src, b"old").unwrap();
+        let before = cache.path_for(&key(src.to_str().unwrap()).with_source_stamp());
+
+        std::fs::write(&src, b"new image").unwrap();
+        let after = cache.path_for(&key(src.to_str().unwrap()).with_source_stamp());
+
+        assert_ne!(before, after, "差し替え前の加工結果にヒットしてしまう");
     }
 
 }

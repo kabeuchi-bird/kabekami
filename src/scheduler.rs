@@ -257,6 +257,17 @@ impl Scheduler {
         }
     }
 
+    /// `path` 自身と、その配下の画像をすべて外し、外した枚数を返す。
+    /// ディレクトリごとの移動・削除では中の画像のイベントが来ないため（#61）。
+    pub fn remove_under(&mut self, path: &Path) -> usize {
+        let gone: Vec<PathBuf> =
+            self.images.iter().filter(|p| p.starts_with(path)).cloned().collect();
+        for p in &gone {
+            self.remove_image(p);
+        }
+        gone.len()
+    }
+
     // ---- private --------------------------------------------------------
 
     /// キューを補充する。
@@ -559,6 +570,17 @@ mod tests {
         assert!(s.next().is_none());
         assert!(s.prev().is_none());
         assert!(s.peek_next().is_none());
+    }
+
+    #[test]
+    fn remove_under_drops_a_directory_and_everything_below_it() {
+        let mut s = Scheduler::new(
+            vec!["/p/a/1.jpg".into(), "/p/a/b/2.jpg".into(), "/p/ab.jpg".into(), "/p/c.jpg".into()],
+            Order::Sequential,
+        );
+        assert_eq!(s.remove_under(Path::new("/p/a")), 2);
+        assert_eq!(s.image_count(), 2, "/p/ab.jpg は /p/a の配下ではない");
+        assert_eq!(s.remove_under(Path::new("/p/c.jpg")), 1, "ファイル自身も外せる");
     }
 
     /// 取得通知の件数はこの戻り値で数える。既知の画像を `true` にすると、

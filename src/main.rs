@@ -116,8 +116,10 @@ async fn main() -> Result<()> {
     let mut prefetcher = Prefetcher::default();
 
     // ディレクトリ監視を起動（環境によっては unavailable のため Option）
+    // 監視がイベントを取りこぼしたときの再走査要求。監視を張り替えても同じものを使う。
+    let rescan = Arc::new(tokio::sync::Notify::new());
     let (mut watch_rx, mut watcher_handle) =
-        spawn_dir_watcher_offloaded(&source_dirs, config.sources.recursive).await;
+        spawn_dir_watcher_offloaded(&source_dirs, config.sources.recursive, rescan.clone()).await;
     // 最後に「成功して」スキャンした対象。リロード時の再スキャン要否をこれと比べる。
     // `config` と比べないのは、スキャンが空／失敗して旧一覧を保った場合に
     // 次のリロードで再試行できるようにするため。
@@ -219,7 +221,7 @@ async fn main() -> Result<()> {
                 cache: &cache,
                 plasma: &plasma_shell,
                 tray_handle: &tray_handle,
-                scheduler: &scheduler,
+                scheduler: &mut scheduler,
                 screen_check_tx: screen_check_tx.as_ref(),
                 notifier: &mut notifier,
                 prefetcher: &mut prefetcher,
@@ -347,10 +349,11 @@ async fn main() -> Result<()> {
 
                     TrayCmd::SetMode(mode) => {
                         tracing::info!("display mode → {:?}", mode);
+                        let before = config.clone();
                         config.display.mode = mode;
                         // トレイでの変更を再起動後も保つ。保存で発生する監視イベントは
                         // リロード側の同値スキップで吸収される。
-                        persist_config(&config, "display mode").await;
+                        persist_config(&before, &config, "display mode").await;
                         update_tray(&tray_handle, move |t| t.mode = mode).await;
                         // 画像は同じだがモードが変わるとキャッシュキーも変わるので作り直す。
                         // 適用後の通知・壁紙名・先読みは apply_and_notify に任せる
@@ -363,8 +366,9 @@ async fn main() -> Result<()> {
                     TrayCmd::SetInterval(secs) => {
                         let secs = secs.max(crate::config::MIN_INTERVAL_SECS);
                         tracing::info!("interval → {}s", secs);
+                        let before = config.clone();
                         config.rotation.interval_secs = secs;
-                        persist_config(&config, "interval").await;
+                        persist_config(&before, &config, "interval").await;
                         ticker = make_ticker(secs);
                         update_tray(&tray_handle, move |t| t.interval_secs = secs).await;
                     }
@@ -515,8 +519,27 @@ async fn main() -> Result<()> {
                     scanned_recursive: &mut scanned_recursive,
                     watch_rx: &mut watch_rx,
                     watcher_handle: &mut watcher_handle,
+                    rescan: &rescan,
                 })
                 .await;
+            }
+
+            // 監視がイベントを落とした（キューの溢れ等）。差分が分からないので
+            // 最後に走査した対象を丸ごと走査し直す（#61）。空・失敗のときは
+            // リロードと同じく一覧を据え置く。
+            _ = rescan.notified() => {
+                tracing::info!("file watcher lost events; rescanning sources");
+                match scan_images(&scanned_dirs, scanned_recursive, &blacklist).await {
+                    Ok(images) if !images.is_empty() => {
+                        // 作り直すと次の画像が変わりうるので、温めている先読みは捨てて掛け直す
+                        prefetcher.abort();
+                        scheduler.rebuild(images, config.rotation.order);
+                        start_prefetch(&mut prefetcher, &scheduler, &screens, &config, &cache);
+                        sync_tray_current(&tray_handle, &scheduler).await;
+                    }
+                    Ok(_) => tracing::warn!("rescan: no images found, keeping current list"),
+                    Err(e) => tracing::warn!("rescan failed, keeping current list: {:#}", e),
+                }
             }
 
             msg = warn_rx.recv() => {
@@ -562,12 +585,13 @@ async fn scan_images(
 async fn spawn_dir_watcher_offloaded(
     source_dirs: &[std::path::PathBuf],
     recursive: bool,
+    rescan: Arc<tokio::sync::Notify>,
 ) -> (
     tokio::sync::mpsc::Receiver<watcher::WatchEvent>,
     Option<watcher::DirWatcher>,
 ) {
     let dirs = source_dirs.to_vec();
-    match tokio::task::spawn_blocking(move || watcher::spawn(&dirs, recursive)).await {
+    match tokio::task::spawn_blocking(move || watcher::spawn(&dirs, recursive, rescan)).await {
         Ok(pair) => pair,
         Err(e) => {
             // 監視の起動に失敗したのと同じ縮退状態にする。
@@ -907,7 +931,8 @@ struct ApplyCtx<'a> {
     cache: &'a Arc<Cache>,
     plasma: &'a plasma::PlasmaShell,
     tray_handle: &'a Option<ksni::Handle<tray::KabekamiTray>>,
-    scheduler: &'a Scheduler,
+    /// 元画像が消えていたときに一覧から外すため可変で借りる。
+    scheduler: &'a mut Scheduler,
     screen_check_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<()>>,
     notifier: &'a mut notify::Notifier,
     prefetcher: &'a mut Prefetcher,
@@ -916,8 +941,33 @@ struct ApplyCtx<'a> {
 }
 
 /// apply + 通知 + tray 更新 + prefetch 開始 + 画面構成再検出トリガーをまとめて行う。
+///
+/// 元画像が消えていたら（監視が拾えなかった移動・削除）一覧から外して次へ進む。
+/// 外さないと、順番が回ってくるたびに同じエラー通知が出続ける（#61）。
+/// 1 回ごとに 1 枚減るので、このループは必ず終わる。
 async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
-    if let Err(e) = apply(path, ctx.screens, ctx.config, ctx.cache, ctx.plasma).await {
+    let mut path = path.to_path_buf();
+    let result = loop {
+        match apply(&path, ctx.screens, ctx.config, ctx.cache, ctx.plasma).await {
+            Err(e) if is_not_found(&e) => {
+                // NotFound はキャッシュの書き込み（置き場所の削除と競合した場合など）
+                // からも来る。元画像が残っているなら一覧から外さない
+                // （確かめられないときも外さない）。
+                if tokio::fs::try_exists(&path).await.unwrap_or(true) {
+                    break Err(e);
+                }
+                tracing::warn!("source image is gone, dropping it: {}", path.display());
+                ctx.scheduler.remove_image(&path);
+                match ctx.scheduler.next() {
+                    Some(next) => path = next,
+                    None => break Err(e),
+                }
+            }
+            r => break r,
+        }
+    };
+    let path = path.as_path();
+    if let Err(e) = result {
         tracing::error!(error = %e, "{}", log_ctx);
         let msg = e.to_string();
         ctx.notifier.error(&msg, Some(path)).await;
@@ -925,9 +975,11 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
     } else {
         ctx.notifier.clear();
         let name = tray_display_name(Some(path));
+        let count = ctx.scheduler.image_count();
         update_tray(ctx.tray_handle, move |t| {
             t.last_error = None;
             t.current_name = name;
+            t.image_count = count;
         })
         .await;
         // 現在の壁紙を記録しておき、再起動後も同じ画像を「現在」として扱えるようにする
@@ -938,6 +990,14 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
             let _ = tx.send(());
         }
     }
+}
+
+/// エラーの原因が「ファイルが無い」か。
+fn is_not_found(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
 }
 
 /// トレイがあれば状態を書き換える。トレイが無い環境では何もしない。
@@ -966,8 +1026,10 @@ fn apply_watch_event(
             }
         }
         watcher::WatchEvent::Removed(path) => {
-            tracing::info!("image removed: {}", path.display());
-            scheduler.remove_image(&path);
+            let n = scheduler.remove_under(&path);
+            if n > 0 {
+                tracing::info!("{} image(s) removed: {}", n, path.display());
+            }
         }
     }
 }
@@ -995,11 +1057,12 @@ fn tray_display_name(path: Option<&Path>) -> String {
         .to_string()
 }
 
-/// 設定を保存し、失敗しても警告に留めて処理を続行する。
+/// `before` から変えたキーだけを保存し、失敗しても警告に留めて処理を続行する。
+/// 全体を書き直さないので、ユーザーのコメントや GUI が保存した他のキーは残る。
 /// `what` は失敗ログに出す変更内容（例: `"display mode"`）。
-async fn persist_config(config: &Config, what: &str) {
-    let owned = config.clone();
-    state::save_offloaded(move || owned.save(), what).await;
+async fn persist_config(before: &Config, config: &Config, what: &str) {
+    let (before, owned) = (before.clone(), config.clone());
+    state::save_offloaded(move || owned.save_changes(&before), what).await;
 }
 
 /// 期限の来たオンラインプロバイダーの取得をバックグラウンドで起動し、`task` に保持する。
@@ -1197,6 +1260,16 @@ mod tests {
                 "{cmd:?} はスロットリングの対象外であるべき"
             );
         }
+    }
+
+    /// 元画像が消えたことを、読み込みエラーの chain から判別できる（#61）。
+    /// 判別できないと、消えた画像を一覧から外せずエラー通知が出続ける。
+    #[test]
+    fn missing_source_is_detected_as_not_found() {
+        let e = kabekami_common::display_mode::load_oriented(Path::new("/nonexistent/gone.jpg"))
+            .unwrap_err();
+        assert!(is_not_found(&e), "{e:#}");
+        assert!(!is_not_found(&anyhow::anyhow!("decode failed")));
     }
 
     /// Next → 400ms → SetMode → 200ms → Next の最後の Next が通ること。

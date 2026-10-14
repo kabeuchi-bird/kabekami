@@ -55,6 +55,7 @@ kdialog がインストールされていません。
 # ステータス表示
 saved         = "設定を保存しました"
 save_failed   = "保存失敗"
+load_failed   = "config.toml を読み込めません。直すまで保存は無効です"
 preview_error = "プレビューエラー"
 
 # タブ見出し
@@ -100,6 +101,10 @@ max_size_mb          = "最大サイズ"
 unlimited_hint       = "0 = 無制限"
 refresh              = "更新"
 clear_cache          = "クリア"
+clear_cache_confirm  = "{dir} のキャッシュファイル {count} 個を削除しますか？"
+confirm_delete       = "削除"
+clear_cache_failed   = "キャッシュファイル {count} 個を削除できませんでした"
+cancel               = "キャンセル"
 current_size_unknown = "現在のサイズ: (更新 をクリック)"
 current_size         = "現在のサイズ"
 unlimited            = "無制限"

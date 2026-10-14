@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use eframe::egui;
-use kabekami_common::config::{Config, DisplayMode, OnlineSourceConfig, Order, ProviderKind};
+use kabekami_common::config::{
+    is_cache_file_name, Config, DisplayMode, OnlineSourceConfig, Order, ProviderKind,
+};
 use kabekami_common::i18n::{self, ConfigStrings, Lang};
 
 fn main() -> eframe::Result<()> {
@@ -138,12 +140,18 @@ struct PendingPick {
     rx: mpsc::Receiver<Option<PathBuf>>,
 }
 
-
-fn compute_dir_size(dir: &std::path::Path) -> u64 {
+/// `dir` 直下の kabekami のキャッシュファイル。容量表示も消去もこれだけを対象にする
+/// （`cache.directory` が誤って画像フォルダを指していてもユーザーのファイルに触れない）。
+fn cache_files(dir: &std::path::Path) -> impl Iterator<Item = std::fs::DirEntry> {
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(is_cache_file_name))
+}
+
+fn compute_dir_size(dir: &std::path::Path) -> u64 {
+    cache_files(dir)
         .filter_map(|e| e.metadata().ok())
         .filter(|m| m.is_file())
         .map(|m| m.len())
@@ -243,6 +251,9 @@ enum Tab {
 
 struct KabekamiApp {
     config: Config,
+    /// 最後にディスクと一致していた設定。保存はここから変えたキーだけを書く（#60）。
+    /// `None` は config.toml を読めなかった状態で、既定値で上書きしないよう保存を止める。
+    saved: Option<Config>,
     tab: Tab,
     status: String,
     status_is_error: bool,
@@ -264,6 +275,10 @@ struct KabekamiApp {
 
     // Cache tab: computed size (None = not yet measured)
     cache_size_bytes: Option<u64>,
+    /// 「クリア」を押してから確定するまでの、消去対象のディレクトリとファイル一覧。
+    /// 押した時点で固定し、確定後はこの一覧だけを消す（確定前に入力欄が変わったり
+    /// ファイルが増えたりしても、確認で見せたもの以外は消さない）。
+    clear_pending: Option<(PathBuf, Vec<PathBuf>)>,
 
     /// `kdialog` が利用可能か（起動時に 1 回判定し、参照ボタンの活性／非活性に使う）。
     has_kdialog: bool,
@@ -273,7 +288,13 @@ struct KabekamiApp {
 
 impl KabekamiApp {
     fn new() -> Self {
-        let config = Config::load().unwrap_or_default();
+        let (config, saved, status) = match Config::load() {
+            Ok(c) => (c.clone(), Some(c), String::new()),
+            Err(e) => {
+                let s = i18n::config_strings(Lang::from_code(&Config::default().ui.language));
+                (Config::default(), None, format!("{}: {e:#}", s.load_failed))
+            }
+        };
 
         // channel: UI → worker (unbounded so UI never blocks)
         let (req_tx, req_rx) = mpsc::sync_channel::<PreviewRequest>(1);
@@ -285,8 +306,9 @@ impl KabekamiApp {
         Self {
             config,
             tab: Tab::Sources,
-            status: String::new(),
-            status_is_error: false,
+            status_is_error: saved.is_none(),
+            saved,
+            status,
             preview_image_path: String::new(),
             preview_texture: None,
             preview_req_tx: req_tx,
@@ -296,6 +318,7 @@ impl KabekamiApp {
             new_dir_input: String::new(),
             new_online_provider: ProviderKind::Bing,
             cache_size_bytes: None,
+            clear_pending: None,
             has_kdialog: kdialog_available(),
             pending_pick: None,
         }
@@ -329,10 +352,25 @@ impl KabekamiApp {
         self.status_is_error = is_error;
     }
 
+    /// 変えたキーだけを保存し、他のプロセス（トレイ）が保存した値も含めて読み直す。
     fn save_config(&mut self) {
-        match self.config.save() {
-            Ok(()) => self.set_status(self.s().saved, false),
-            Err(e) => self.set_status(format!("{}: {e}", self.s().save_failed), true),
+        let Some(base) = &self.saved else { return };
+        if let Err(e) = self.config.save_changes(base) {
+            self.set_status(format!("{}: {e:#}", self.s().save_failed), true);
+            return;
+        }
+        match Config::load() {
+            Ok(c) => {
+                self.config = c.clone();
+                self.saved = Some(c);
+                self.set_status(self.s().saved, false);
+            }
+            Err(e) => {
+                // 書き込みは済んでいるので、差分の基準は書いた内容に進める
+                // （古い基準のままだと、次の保存で元の値へ戻した変更を取りこぼす）
+                self.saved = Some(self.config.clone());
+                self.set_status(format!("{}: {e:#}", self.s().load_failed), true);
+            }
         }
     }
 
@@ -454,7 +492,8 @@ impl eframe::App for KabekamiApp {
 
         egui::TopBottomPanel::bottom("actions").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button(s.save_button).clicked() {
+                let can_save = self.saved.is_some();
+                if ui.add_enabled(can_save, egui::Button::new(s.save_button)).clicked() {
                     self.save_config();
                 }
                 ui.separator();
@@ -686,12 +725,9 @@ impl KabekamiApp {
                 self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
             }
             if ui.button(s.clear_cache).clicked() {
-                if let Ok(entries) = std::fs::read_dir(&self.config.cache.directory) {
-                    for entry in entries.flatten() {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-                self.cache_size_bytes = Some(0);
+                let dir = self.config.cache.directory.clone();
+                let files = cache_files(&dir).map(|e| e.path()).collect();
+                self.clear_pending = Some((dir, files));
             }
             match self.cache_size_bytes {
                 None => {
@@ -710,6 +746,36 @@ impl KabekamiApp {
                 }
             }
         });
+
+        // 消去は確認を挟む。名前で絞っていても、指す先を間違えたまま押すと
+        // 同じ形の名前のファイルを消しうるので、対象のパスを見せてから消す。
+        if let Some((dir, files)) = &self.clear_pending {
+            let (dir, files) = (dir.clone(), files.clone());
+            ui.horizontal(|ui| {
+                ui.label(
+                    s.clear_cache_confirm
+                        .replace("{count}", &files.len().to_string())
+                        .replace("{dir}", &dir.display().to_string()),
+                );
+                if ui.button(s.confirm_delete).clicked() {
+                    // 既に無いものは消えたのと同じ扱い。それ以外の失敗は件数と最初の理由を出す
+                    let errors: Vec<std::io::Error> = files
+                        .iter()
+                        .filter_map(|f| std::fs::remove_file(f).err())
+                        .filter(|e| e.kind() != std::io::ErrorKind::NotFound)
+                        .collect();
+                    if let Some(first) = errors.first() {
+                        let msg = s.clear_cache_failed.replace("{count}", &errors.len().to_string());
+                        self.set_status(format!("{msg}: {first}"), true);
+                    }
+                    self.cache_size_bytes = Some(compute_dir_size(&self.config.cache.directory));
+                    self.clear_pending = None;
+                }
+                if ui.button(s.cancel).clicked() {
+                    self.clear_pending = None;
+                }
+            });
+        }
     }
 
     fn ui_online(&mut self, ui: &mut egui::Ui) {
