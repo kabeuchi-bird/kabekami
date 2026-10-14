@@ -19,7 +19,6 @@ pub struct DaemonState {
     #[serde(default)]
     pub paused: bool,
     /// 最後に適用した壁紙のパス。再起動時に `Scheduler::restore_current` に渡す。
-    #[serde(default)]
     pub current: Option<PathBuf>,
 }
 

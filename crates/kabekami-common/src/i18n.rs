@@ -75,8 +75,8 @@ macro_rules! string_table {
         /// 省略されたキーは英語へフォールバックするため全て `Option`。
         #[derive(Default, Deserialize)]
         struct $raw {
-            $( #[serde(default)] $field: Option<String>, )*
-            $( #[serde(default)] $lfield: Option<Vec<String>>, )*
+            $( $field: Option<String>, )*
+            $( $lfield: Option<Vec<String>>, )*
         }
 
         impl $raw {
@@ -395,7 +395,6 @@ pub fn config_strings(lang: Lang) -> &'static ConfigStrings {
 /// 重ね合わせと、英語へのフォールバックが同じ仕組みで扱える。
 #[derive(Default, Deserialize)]
 struct LangFile {
-    #[serde(default)]
     display_name: Option<String>,
     #[serde(default)]
     tray: RawUiStrings,

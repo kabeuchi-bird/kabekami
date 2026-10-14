@@ -127,15 +127,11 @@ async fn fetch_one(
 /// `.last_fetch` タイムスタンプを確認して再取得が必要かどうかを返す。
 async fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
     let stamp = cfg.resolved_download_dir().join(".last_fetch");
-    if !tokio::fs::try_exists(&stamp).await.unwrap_or(false) {
+    // 無い（初回）・読めない・mtime が取れないときは取得する
+    let Ok(modified) = tokio::fs::metadata(&stamp).await.and_then(|m| m.modified()) else {
         return true;
-    }
+    };
     let interval_secs = cfg.effective_interval_hours() * 3600;
-    let modified = tokio::fs::metadata(&stamp)
-        .await
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .unwrap_or(SystemTime::UNIX_EPOCH);
     let elapsed = SystemTime::now().duration_since(modified).unwrap_or_default();
     elapsed.as_secs() >= interval_secs
 }

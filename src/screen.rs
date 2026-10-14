@@ -71,12 +71,11 @@ struct JsonOutput {
     enabled: bool,
     /// 画面の優先度（1 がプライマリ）。Plasma 5.27 以降、Plasma の画面番号
     /// （スクリプトの `desktop.screen`）はこの順に振られる。
-    #[serde(default)]
     priority: Option<u32>,
     /// 優先度が無い古い kscreen の場合のプライマリ指定。
     #[serde(default)]
     primary: bool,
-    #[serde(default, rename = "currentModeId")]
+    #[serde(rename = "currentModeId")]
     current_mode_id: Option<String>,
     #[serde(default)]
     modes: Vec<JsonMode>,

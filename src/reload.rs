@@ -260,7 +260,7 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                 // current が落ちた場合は apply_and_notify を通らないので、
                 // state に残る旧画像を明示的に消す。
                 None => {
-                    state_writer.persist(scheduler.is_paused(), None).await;
+                    state_writer.persist(scheduler.paused, None).await;
                 }
             }
             // 貼り直した場合は `apply_and_notify` が先読みを掛け直す

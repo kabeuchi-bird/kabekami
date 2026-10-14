@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     let mut scheduler = Scheduler::new(images, config.rotation.order);
     let daemon_state = state::DaemonState::load(&kabekami_config_dir);
     if daemon_state.paused {
-        scheduler.pause();
+        scheduler.paused = true;
         tracing::info!("restored paused state from previous session");
     }
     // 前回の壁紙を復元する。デスクトップには Plasma 側の設定で既に表示されているため
@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
         lang,
         config.sources.favorites_dir.is_some(),
         config.ui.enable_blacklist,
-        scheduler.is_paused(),
+        scheduler.paused,
     )
     .await;
 
@@ -258,7 +258,7 @@ async fn main() -> Result<()> {
                     // 再起動後に画面に出ていない画像を指し続ける（`remove_image` が
                     // `current` を落としているので名前は空になる）
                     sync_tray_current(&tray_handle, &scheduler).await;
-                    state_writer.persist(scheduler.is_paused(), None).await;
+                    state_writer.persist(scheduler.paused, None).await;
                 }
             }
             ticker = make_ticker(config.rotation.interval_secs);
@@ -335,14 +335,9 @@ async fn main() -> Result<()> {
                     }
 
                     TrayCmd::TogglePause => {
-                        if scheduler.is_paused() {
-                            scheduler.resume();
-                            tracing::info!("resumed");
-                        } else {
-                            scheduler.pause();
-                            tracing::info!("paused");
-                        }
-                        let paused = scheduler.is_paused();
+                        scheduler.paused = !scheduler.paused;
+                        let paused = scheduler.paused;
+                        tracing::info!("{}", if paused { "paused" } else { "resumed" });
                         state_writer.persist(paused, scheduler.current().map(|p| p.as_path())).await;
                         update_tray(&tray_handle, move |t| t.paused = paused).await;
                     }
@@ -976,7 +971,7 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
         })
         .await;
         // 現在の壁紙を記録しておき、再起動後も同じ画像を「現在」として扱えるようにする
-        ctx.state_writer.persist(ctx.scheduler.is_paused(), Some(path)).await;
+        ctx.state_writer.persist(ctx.scheduler.paused, Some(path)).await;
         start_prefetch(ctx.prefetcher, ctx.scheduler, ctx.screens, ctx.config, ctx.cache);
         // 画面構成の再検出を要求（ウォッチャー側で 60s スロットル）
         if let Some(tx) = ctx.screen_check_tx {

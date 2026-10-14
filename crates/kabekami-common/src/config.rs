@@ -377,32 +377,24 @@ pub struct OnlineSourceConfig {
     pub enabled: bool,
     /// ダウンロード先ディレクトリ。
     /// `None` の場合は `~/.local/share/kabekami/<provider>` を使用。
-    #[serde(default)]
     pub download_dir: Option<PathBuf>,
     /// API キー（Unsplash: 必須、Wallhaven: NSFW 閲覧時のみ必要）。
-    #[serde(default)]
     pub api_key: Option<String>,
     /// 検索クエリ（Unsplash / Wallhaven / Reddit subreddit 以外で使用）。
-    #[serde(default)]
     pub query: Option<String>,
     /// 保持する画像枚数（デフォルト: 10）。
     #[serde(default = "default_online_count")]
     pub count: u32,
     /// Reddit プロバイダーで使用するサブレディット名（例: `"wallpapers"`）。
-    #[serde(default)]
     pub subreddit: Option<String>,
     /// 再取得間隔の上書き（時間）。`None` の場合はプロバイダーのデフォルトを使用。
-    #[serde(default)]
     pub interval_hours: Option<u64>,
     /// ロケール（Bing で使用。例: `"ja-JP"`, `"en-US"`）。デフォルト: `"en-US"`。
-    #[serde(default)]
     pub locale: Option<String>,
     /// 画像品質（Unsplash で使用: `"regular"` または `"full"`）。デフォルト: `"regular"`。
-    #[serde(default)]
     pub quality: Option<String>,
     /// 取得する内容の上限（Wallhaven で使用）。`"sfw"`・`"sketchy"`（SFW と Sketchy）・
     /// `"nsfw"`（すべて。`api_key` が必要）。デフォルト: `"sfw"`。
-    #[serde(default)]
     pub purity: Option<String>,
 }
 

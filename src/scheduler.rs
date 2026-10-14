@@ -33,8 +33,8 @@ pub struct Scheduler {
     history: VecDeque<usize>,
     /// 現在表示中の画像インデックス。起動直後は `None`。
     current: Option<usize>,
-    /// `true` ならタイマー割り込みでの自動切り替えを停止する。
-    paused: bool,
+    /// `true` ならタイマー割り込みでの自動切り替えを停止する（`auto_next` が見る）。
+    pub paused: bool,
 }
 
 impl Scheduler {
@@ -87,7 +87,7 @@ impl Scheduler {
     /// タイマー・起動時・オンライン初回取得など「自動での」切り替えに使う。
     ///
     /// 一時停止中は `None` を返して切り替えを行わない。自動切り替えの経路が
-    /// 増えても `is_paused()` のチェックを書き忘れないよう、一時停止の判定を
+    /// 増えても `paused` のチェックを書き忘れないよう、一時停止の判定を
     /// 呼び出し側の規約ではなく `Scheduler` 側の性質にしている。
     /// ユーザーが明示的に操作する Next / Prev は一時停止中でも動くべきなので、
     /// そちらは `next()` / `prev()` を直接使う。
@@ -185,21 +185,6 @@ impl Scheduler {
     /// パスから画像インデックスを引く。
     fn find_index(&self, path: &Path) -> Option<usize> {
         self.images.iter().position(|p| p == path)
-    }
-
-    /// タイマー自動切り替えを一時停止する。
-    pub fn pause(&mut self) {
-        self.paused = true;
-    }
-
-    /// タイマー自動切り替えを再開する。
-    pub fn resume(&mut self) {
-        self.paused = false;
-    }
-
-    /// 一時停止中かどうかを返す。
-    pub fn is_paused(&self) -> bool {
-        self.paused
     }
 
     pub fn image_count(&self) -> usize {
@@ -382,19 +367,9 @@ mod tests {
     }
 
     #[test]
-    fn pause_and_resume() {
-        let mut s = Scheduler::new(paths(3), Order::Sequential);
-        assert!(!s.is_paused());
-        s.pause();
-        assert!(s.is_paused());
-        s.resume();
-        assert!(!s.is_paused());
-    }
-
-    #[test]
     fn auto_next_respects_pause_but_next_does_not() {
         let mut s = Scheduler::new(paths(3), Order::Sequential);
-        s.pause();
+        s.paused = true;
 
         // 自動切り替えは一時停止中は進まない
         assert_eq!(s.auto_next(), None);
@@ -403,7 +378,7 @@ mod tests {
         // ユーザーの明示操作（Next）は一時停止中でも進む
         assert!(s.next().is_some());
 
-        s.resume();
+        s.paused = false;
         assert!(s.auto_next().is_some());
     }
 
@@ -447,12 +422,12 @@ mod tests {
         let keep = all[2].clone();
         let mut s = Scheduler::new(all.clone(), Order::Sequential);
         s.restore_current(&keep);
-        s.pause();
+        s.paused = true;
 
         // 同じ画像を含む新しいリストへ差し替え
         s.rebuild(all, Order::Sequential);
 
-        assert!(s.is_paused(), "paused state should survive rebuild");
+        assert!(s.paused, "paused state should survive rebuild");
         assert_eq!(s.current(), Some(&keep), "current should survive rebuild");
     }
 
@@ -511,14 +486,14 @@ mod tests {
         let keep = all[2].clone();
         let mut s = Scheduler::new(all.clone(), Order::Sequential);
         s.restore_current(&keep);
-        s.pause();
+        s.paused = true;
 
         s.set_order(Order::Random);
 
         assert_eq!(s.order, Order::Random, "order should be updated");
         assert_eq!(s.image_count(), all.len(), "image list should be untouched");
         assert_eq!(s.current(), Some(&keep), "current should survive set_order");
-        assert!(s.is_paused(), "paused state should survive set_order");
+        assert!(s.paused, "paused state should survive set_order");
         let cur = s.current.expect("current should be set");
         assert!(
             !s.queue.contains(&cur),
