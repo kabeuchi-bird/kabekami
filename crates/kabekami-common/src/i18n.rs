@@ -37,19 +37,6 @@ use serde::Deserialize;
 /// そして重ね合わせ／マージ処理。UI 文字列を追加するときはこの一覧に 1 行
 /// 足すだけでよく、英語の文言を書き忘れればコンパイルエラーになる。
 macro_rules! string_table {
-    // リスト型のフィールドを持たないテーブル用。
-    (
-        $(#[$smeta:meta])*
-        $name:ident / $raw:ident / $en:ident {
-            $( $(#[$fmeta:meta])* $field:ident = $fdefault:expr ),* $(,)?
-        }
-    ) => {
-        string_table! {
-            $(#[$smeta])*
-            $name / $raw / $en { $( $(#[$fmeta])* $field = $fdefault ),* }
-            lists { }
-        }
-    };
     (
         $(#[$smeta:meta])*
         $name:ident / $raw:ident / $en:ident {
@@ -262,6 +249,7 @@ string_table! {
         notify_fetch = "Notify when online sources finish fetching",
         enable_blacklist = "Enable \"Never Show Again\" blacklist",
     }
+    lists { }
 }
 
 /// 読み込んだ文字列を `'static` に昇格させる。

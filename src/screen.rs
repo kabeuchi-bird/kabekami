@@ -57,43 +57,38 @@ pub async fn detect_all_offloaded() -> Vec<Monitor> {
 
 // ── JSON パース ──────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 struct KScreenJson {
-    #[serde(default)]
     outputs: Vec<JsonOutput>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 struct JsonOutput {
-    #[serde(default)]
     name: String,
-    #[serde(default)]
     enabled: bool,
     /// 画面の優先度（1 がプライマリ）。Plasma 5.27 以降、Plasma の画面番号
     /// （スクリプトの `desktop.screen`）はこの順に振られる。
     priority: Option<u32>,
     /// 優先度が無い古い kscreen の場合のプライマリ指定。
-    #[serde(default)]
     primary: bool,
     #[serde(rename = "currentModeId")]
     current_mode_id: Option<String>,
-    #[serde(default)]
     modes: Vec<JsonMode>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
+#[serde(default)]
 struct JsonMode {
-    #[serde(default)]
     id: String,
-    #[serde(default)]
     size: JsonSize,
 }
 
 #[derive(Default, Deserialize)]
+#[serde(default)]
 struct JsonSize {
-    #[serde(default)]
     width: u32,
-    #[serde(default)]
     height: u32,
 }
 

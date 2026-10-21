@@ -142,7 +142,7 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                 config,
                 scanned_dirs,
                 *scanned_recursive,
-                watcher_handle.as_ref().is_some_and(|w| w.is_complete()),
+                watcher_handle.as_ref().is_some_and(|w| w.complete),
             ) =>
         {
             tracing::debug!("config unchanged, skipping reload");
@@ -160,7 +160,7 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
             // 再スキャン契機になる。一部失敗も同じ扱い（そのディレクトリの
             // イベントは届かないので、再スキャンと登録再試行の両方が要る）。
             let watching_everything =
-                watcher_handle.as_ref().is_some_and(|w| w.is_complete());
+                watcher_handle.as_ref().is_some_and(|w| w.complete);
             let needs_rescan = sources_changed || !watching_everything;
 
             // 走行中の先読みが温めているキー一式（設定を差し替える前の値で求める）

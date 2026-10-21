@@ -505,12 +505,8 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
         return true;
     }
     let s = ip.segments();
-    // ULA fc00::/7
-    if (s[0] & 0xfe00) == 0xfc00 {
-        return true;
-    }
-    // Link-local fe80::/10 と、廃止済みの site-local fec0::/10
-    if (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xffc0) == 0xfec0 {
+    // ULA fc00::/7、link-local fe80::/10、廃止済みの site-local fec0::/10
+    if ip.is_unique_local() || ip.is_unicast_link_local() || (s[0] & 0xffc0) == 0xfec0 {
         return true;
     }
     // IPv4 を埋め込む形式は、中の IPv4 で判定する

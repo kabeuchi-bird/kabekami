@@ -46,17 +46,10 @@ pub struct DirWatcher {
     /// `DirWatcher` がドロップされるまで監視が続く。
     _inner: notify::RecommendedWatcher,
     /// 対象ディレクトリすべての登録に成功したか。
-    complete: bool,
-}
-
-impl DirWatcher {
-    /// 対象ディレクトリすべてを監視できているか。
     ///
     /// `false` なら一部の登録に失敗しており、そこでの追加・削除は届かない。
     /// 呼び出し側が再スキャンと登録の再試行を判断するために使う。
-    pub fn is_complete(&self) -> bool {
-        self.complete
-    }
+    pub complete: bool,
 }
 
 /// ディレクトリ監視を開始する。
