@@ -207,6 +207,13 @@ async fn main() -> Result<()> {
 
     let mut fetch_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    // 監視を張れなかったディレクトリ（遅れてマウントされるネットワークドライブ等）が
+    // 現れたかを確かめる間隔。設定の保存を待つと、それまで画像も変更も拾えない。
+    // ponytail: 監視自体を作れない環境（inotify 上限など）では 5 分ごとに再走査が続く。
+    //           気になるなら失敗理由で再試行を打ち切る。
+    let mut watch_retry = interval_at(Instant::now() + Duration::from_secs(300), Duration::from_secs(300));
+    watch_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
     // トレイに初期画像枚数と復元した現在画像名を反映
     sync_tray_current(&tray_handle, &scheduler).await;
     if no_images {
@@ -550,15 +557,37 @@ async fn main() -> Result<()> {
             // 監視がイベントを落とした（キューの溢れ等）。差分が分からないので
             // 最後に走査した対象を丸ごと走査し直す（#61）。空・失敗のときは
             // リロードと同じく一覧を据え置く。
+            _ = watch_retry.tick() => {
+                let appeared = match &watcher_handle {
+                    Some(w) => w.missing.iter().any(|d| d.is_dir()),
+                    None => scanned_dirs.iter().any(|d| d.is_dir()),
+                };
+                if appeared {
+                    tracing::info!("unwatched source directory is now available");
+                    rescan.notify_one();
+                }
+            }
+
             _ = rescan.notified() => {
-                tracing::info!("file watcher lost events; rescanning sources");
+                tracing::info!("rescanning sources");
                 match scan_images(&scanned_dirs, scanned_recursive, &blacklist).await {
                     Ok(images) if !images.is_empty() => {
+                        let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
                         // 作り直すと次の画像が変わりうるので、温めている先読みは捨てて掛け直す
                         prefetcher.abort();
                         scheduler.rebuild(images, config.rotation.order);
-                        start_prefetch(&mut prefetcher, &scheduler, &screens, &config, &cache);
+                        // 張れていなかった監視も張り直す（張れていれば触らない）
+                        if !watcher_handle.as_ref().is_some_and(|w| w.missing.is_empty()) {
+                            (watch_rx, watcher_handle) = spawn_dir_watcher_offloaded(
+                                &scanned_dirs, scanned_recursive, rescan.clone(),
+                            ).await;
+                        }
                         sync_tray_current(&tray_handle, &scheduler).await;
+                        // 空だった（起動時に対象が無かった等）なら、タイマーを待たずに貼る
+                        match was_empty.then(|| scheduler.auto_next()).flatten() {
+                            Some(path) => apply_and_notify(apply_ctx!(), &path, "apply after rescan failed").await,
+                            None => start_prefetch(&mut prefetcher, &scheduler, &screens, &config, &cache),
+                        }
                     }
                     Ok(_) => tracing::warn!("rescan: no images found, keeping current list"),
                     Err(e) => tracing::warn!("rescan failed, keeping current list: {:#}", e),
