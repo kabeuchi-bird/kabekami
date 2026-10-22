@@ -371,6 +371,10 @@ pub fn make_no_redirect_client() -> Result<reqwest::Client> {
 }
 
 /// 両クライアントに共通の設定（UA・タイムアウト・SSRF 対策の resolver）。
+///
+/// `timeout` は本文の受信完了までを含む合計時間なので、30 秒にすると 10MB 超の
+/// 原寸画像が遅い回線で毎回時間切れになる。止まった接続は `read_timeout`
+/// （無通信の時間）で切り、合計は `MAX_BYTES` を遅い回線でも受け切れる長さにする。
 fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(concat!(
@@ -378,7 +382,9 @@ fn client_builder() -> reqwest::ClientBuilder {
             env!("CARGO_PKG_VERSION"),
             " (Linux wallpaper tool)"
         ))
-        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(600))
         .dns_resolver(std::sync::Arc::new(KabekamiResolver))
 }
 
