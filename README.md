@@ -225,6 +225,8 @@ Note: avif, bmp, tiff, and gif are not supported (the `image` crate features are
 
 **Online sources download 0 images** — Check API key, network, and `RUST_LOG=kabekami=debug` output.
 
+**Online sources fail with `resolves to private …`** — To keep provider responses from pointing it at your LAN, kabekami refuses to connect to hosts that resolve to private or reserved addresses (loopback, RFC 1918, link-local, CGNAT `100.64.0.0/10`, benchmarking `198.18.0.0/15`, and so on). Proxies that answer DNS with fake IPs from those ranges (e.g. Clash / mihomo in fake-ip mode, which uses `198.18.0.0/16`) therefore break every download. Switch the proxy to redir-host mode, or exclude `www.bing.com`, `api.unsplash.com`, `images.unsplash.com`, `wallhaven.cc` and `w.wallhaven.cc` from fake-ip (`fake-ip-filter`).
+
 **Settings not applied after saving** — The daemon reloads `config.toml` via inotify automatically; restart if needed.
 
 ## License

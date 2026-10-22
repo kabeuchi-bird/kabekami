@@ -224,6 +224,8 @@ EXIF Orientation タグは自動的に読み取り・適用されるため、縦
 
 **オンラインソースが 0 枚しかダウンロードされない** — API キー・ネットワーク・`RUST_LOG=kabekami=debug` の出力を確認してください。
 
+**オンラインソースが `resolves to private …` で失敗する** — プロバイダーの応答で LAN 内へ誘導されないよう、kabekami は内部・予約済みアドレス（ループバック、RFC 1918、リンクローカル、CGNAT の `100.64.0.0/10`、ベンチマーク用の `198.18.0.0/15` など）に解決されるホストへは接続しません。そのため、DNS にこれらの範囲の偽 IP を返すプロキシ（例: fake-ip モードの Clash / mihomo。`198.18.0.0/16` を使う）ではすべてのダウンロードが失敗します。プロキシを redir-host モードにするか、`www.bing.com`・`api.unsplash.com`・`images.unsplash.com`・`wallhaven.cc`・`w.wallhaven.cc` を fake-ip の対象から外してください（`fake-ip-filter`）。
+
 **kabekami-config で保存しても反映されない** — デーモンは inotify で `config.toml` の変更を自動検知します。反映されない場合は再起動してください。
 
 ## ライセンス
