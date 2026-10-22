@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 /// 画像として扱う拡張子（大文字小文字を無視して比較する）。
-/// `image` クレートで有効化している feature と揃える（jpeg/png/webp/avif）。
-pub(crate) const IMAGE_EXTENSIONS: &[&str] = &[
-    "jpg", "jpeg", "png", "webp", "avif",
-];
+/// `image` クレートで有効化している feature と揃える（jpeg/png/webp）。
+/// AVIF は外している。`image` の `avif` feature はエンコーダだけで、読み込みには
+/// システムの dav1d に依存する `avif-native` が要る。
+pub(crate) const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
 
 /// 指定されたディレクトリを走査して画像ファイルのパス一覧を返す。
 ///

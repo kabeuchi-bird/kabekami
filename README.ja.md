@@ -204,11 +204,11 @@ quit = "おわり"
 
 ### 対応画像形式
 
-kabekami は以下の画像形式に対応しています: **jpg, jpeg, png, webp, avif**
+kabekami は以下の画像形式に対応しています: **jpg, jpeg, png, webp**
 
 EXIF Orientation タグは自動的に読み取り・適用されるため、縦撮り写真や回転情報を持つ画像も正しい向きで表示されます。
 
-注意: bmp, tiff, gif には対応していません（バイナリサイズ削減のため `image` クレートの feature を jpeg/png/webp/avif に限定しています）。
+注意: avif, bmp, tiff, gif には対応していません（バイナリサイズ削減のため `image` クレートの feature を jpeg/png/webp に限定しています。AVIF の読み込みにはシステムの dav1d ライブラリも必要になります）。
 
 ## トラブルシューティング
 

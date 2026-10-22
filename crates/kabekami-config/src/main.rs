@@ -111,7 +111,7 @@ fn folder_dialog(s: &'static ConfigStrings, start: PathBuf) -> Vec<OsString> {
 
 /// kdialog `--getopenfilename`（画像ファイル選択）の引数。
 fn image_dialog(s: &'static ConfigStrings, start: PathBuf) -> Vec<OsString> {
-    let image_filter = format!("{} (*.jpg *.jpeg *.png *.webp *.avif)", s.image_filter_label);
+    let image_filter = format!("{} (*.jpg *.jpeg *.png *.webp)", s.image_filter_label);
     vec![
         "--title".into(),
         s.dialog_select_image.into(),

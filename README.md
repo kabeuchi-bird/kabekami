@@ -205,11 +205,11 @@ English and Japanese are built into the binary, so they work even with no files 
 
 ### Supported Image Formats
 
-kabekami supports the following image formats: **jpg, jpeg, png, webp, avif**
+kabekami supports the following image formats: **jpg, jpeg, png, webp**
 
 EXIF Orientation tags are read and applied automatically, so portrait photos and rotated camera shots are displayed in the correct orientation.
 
-Note: bmp, tiff, and gif are not supported (the `image` crate features are limited to jpeg/png/webp/avif to reduce binary size).
+Note: avif, bmp, tiff, and gif are not supported (the `image` crate features are limited to jpeg/png/webp to reduce binary size; AVIF decoding would also need the system dav1d library).
 
 ## Troubleshooting
 
