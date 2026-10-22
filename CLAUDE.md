@@ -16,7 +16,7 @@ cargo test <name>                     # single test by name filter
 RUST_LOG=kabekami=debug cargo run     # run daemon with debug logs
 ```
 
-Tests are inline `#[cfg(test)]` modules (no `tests/` dir); `tempfile` is the only dev-dependency. There is no lint config beyond default `cargo clippy`/`cargo fmt`.
+Tests are inline `#[cfg(test)]` modules (no `tests/` dir); `tempfile` is the only dev-dependency. There is no lint config beyond default `cargo clippy`. CI (`.github/workflows/ci.yml`) runs `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`. `cargo fmt` is deliberately not enforced: the code uses hand-aligned layouts (e.g. the match arms in `parse_cli`) that rustfmt would undo.
 
 Runtime env overrides: `KABEKAMI_SCREEN=WxH`, `KABEKAMI_LANG=en|ja`, `KABEKAMI_I18N_DIR`.
 
