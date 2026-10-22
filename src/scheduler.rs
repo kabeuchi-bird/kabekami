@@ -42,7 +42,7 @@ impl Scheduler {
     ///
     /// `order` が `Random` の場合はキューを Fisher-Yates シャッフルする。
     pub fn new(images: Vec<PathBuf>, order: Order) -> Self {
-        let queue = Self::build_queue(images.len(), order, None);
+        let queue = Self::build_queue(&images, order, None);
         let image_set = images.iter().cloned().collect();
         Self {
             images,
@@ -178,7 +178,7 @@ impl Scheduler {
         }
         self.order = order;
         let mut pending: Vec<usize> = self.queue.drain(..).collect();
-        order_indices(&mut pending, order);
+        order_indices(&mut pending, order, &self.images);
         self.queue = pending.into();
     }
 
@@ -208,74 +208,62 @@ impl Scheduler {
 
     /// 画像を動的に削除する（ディレクトリ監視で使用）。
     ///
-    /// リスト・キュー・現在画像から除去する。
+    /// リスト・キュー・履歴・現在画像から除去する。
     /// 現在表示中の画像が削除された場合は `current` を `None` にし、
     /// 次の `next()` 呼び出しでキューから新しい画像を選択する。
-    ///
-    /// 内部では `swap_remove` で削除位置に末尾要素を埋めるため、
-    /// 末尾要素のインデックスを参照しているキュー・履歴・現在画像を再マップする。
     pub fn remove_image(&mut self, path: &Path) {
-        let Some(idx) = self.find_index(path) else {
-            return;
-        };
-        self.image_set.remove(path);
-
-        let last = self.images.len() - 1;
-        self.images.swap_remove(idx);
-
-        // 削除されたインデックス（idx）を参照していたエントリを除去
-        self.queue.retain(|&i| i != idx);
-        self.history.retain(|&i| i != idx);
-        if self.current == Some(idx) {
-            self.current = None;
-        }
-
-        // swap_remove により末尾要素 (last) が idx に移動したので再マップ
-        if idx != last {
-            for q in self.queue.iter_mut() {
-                if *q == last {
-                    *q = idx;
-                }
-            }
-            for h in self.history.iter_mut() {
-                if *h == last {
-                    *h = idx;
-                }
-            }
-            if self.current == Some(last) {
-                self.current = Some(idx);
-            }
+        if self.image_set.contains(path) {
+            self.remove_matching(|p| p == path);
         }
     }
 
     /// `path` 自身と、その配下の画像をすべて外し、外した枚数を返す。
     /// ディレクトリごとの移動・削除では中の画像のイベントが来ないため（#61）。
     pub fn remove_under(&mut self, path: &Path) -> usize {
-        let gone: Vec<PathBuf> =
-            self.images.iter().filter(|p| p.starts_with(path)).cloned().collect();
-        for p in &gone {
-            self.remove_image(p);
+        self.remove_matching(|p| p.starts_with(path))
+    }
+
+    /// `gone` が真の画像をまとめて外し、外した枚数を返す。
+    ///
+    /// 1 回の走査で残す画像を詰め直し、キュー・履歴・現在画像の添字を新しい位置へ
+    /// 付け替える。1 枚ずつ外すと「外す枚数 × 全枚数」になり、大きなフォルダの
+    /// 削除で単一ワーカーが秒単位で止まる。
+    fn remove_matching(&mut self, gone: impl Fn(&Path) -> bool) -> usize {
+        let mut remap = vec![None; self.images.len()];
+        let mut kept = Vec::with_capacity(self.images.len());
+        for (i, p) in std::mem::take(&mut self.images).into_iter().enumerate() {
+            if gone(&p) {
+                self.image_set.remove(&p);
+            } else {
+                remap[i] = Some(kept.len());
+                kept.push(p);
+            }
         }
-        gone.len()
+        let removed = remap.len() - kept.len();
+        self.images = kept;
+        self.queue = self.queue.iter().filter_map(|&i| remap[i]).collect();
+        self.history = self.history.iter().filter_map(|&i| remap[i]).collect();
+        self.current = self.current.and_then(|i| remap[i]);
+        removed
     }
 
     // ---- private --------------------------------------------------------
 
     /// キューを補充する。
-    /// - Sequential: ソース順に再追加
+    /// - Sequential: パス順に再追加
     /// - Random: Fisher-Yates でシャッフルして追加（直前の current と先頭が重ならないよう配慮）
     fn refill(&mut self) {
         let avoid_first = self.current;
-        self.queue = Self::build_queue(self.images.len(), self.order, avoid_first);
+        self.queue = Self::build_queue(&self.images, self.order, avoid_first);
     }
 
     fn build_queue(
-        image_count: usize,
+        images: &[PathBuf],
         order: Order,
         avoid_first: Option<usize>,
     ) -> VecDeque<usize> {
-        let mut v: Vec<usize> = (0..image_count).collect();
-        order_indices(&mut v, order);
+        let mut v: Vec<usize> = (0..images.len()).collect();
+        order_indices(&mut v, order, images);
         // シャッフルで直前の画像が先頭に来たら 1 つずらす（`Sequential` は触らない）
         if order == Order::Random && v.len() > 1 {
             if let Some(avoid) = avoid_first {
@@ -290,9 +278,12 @@ impl Scheduler {
 
 /// インデックス列を並べ替える。並び順の定義を 1 箇所に置き、
 /// `build_queue` と `set_order` で共有する。
-fn order_indices(indices: &mut [usize], order: Order) {
+///
+/// Sequential は添字ではなくパスで並べる。`images` は監視で追加された画像を
+/// 末尾に足すので、添字順はファイル名順と一致しない。
+fn order_indices(indices: &mut [usize], order: Order, images: &[PathBuf]) {
     match order {
-        Order::Sequential => indices.sort_unstable(),
+        Order::Sequential => indices.sort_unstable_by(|&a, &b| images[a].cmp(&images[b])),
         // Fisher-Yates シャッフル（設計書 §5a "全画像一巡"）
         Order::Random => fastrand::shuffle(indices),
     }
@@ -306,6 +297,36 @@ mod tests {
         (0..n)
             .map(|i| PathBuf::from(format!("/tmp/img{:03}.jpg", i)))
             .collect()
+    }
+
+    /// 削除や追加のあとも、Sequential の次の一巡はパス順になる。
+    #[test]
+    fn sequential_stays_in_path_order_after_remove_and_add() {
+        let all = paths(5);
+        let mut s = Scheduler::new(all[1..].to_vec(), Order::Sequential);
+        s.remove_image(&all[2]);
+        s.add_image(all[0].clone()); // 名前順では先頭だが末尾に足される
+        s.queue.clear(); // 一巡を終えたことにする
+        let cycle: Vec<PathBuf> = (0..4).filter_map(|_| s.next()).collect();
+        assert_eq!(cycle, vec![all[0].clone(), all[1].clone(), all[3].clone(), all[4].clone()]);
+    }
+
+    /// まとめて外しても、残った画像の現在・履歴・キューは同じ画像を指したまま。
+    #[test]
+    fn remove_under_keeps_remaining_indices_pointing_at_the_same_images() {
+        let all: Vec<PathBuf> = ["/a/1.jpg", "/b/1.jpg", "/a/2.jpg", "/b/2.jpg", "/b/3.jpg"]
+            .map(PathBuf::from)
+            .to_vec();
+        let mut s = Scheduler::new(all.clone(), Order::Sequential);
+        s.next(); // /a/1
+        s.next(); // /a/2
+        s.next(); // /b/1（現在）。履歴は /a/1, /a/2
+        assert_eq!(s.remove_under(Path::new("/a")), 2);
+        assert_eq!(s.current(), Some(&all[1]));
+        assert_eq!(s.peek_next(), Some(&all[3]));
+        assert!(s.prev().is_none(), "履歴の /a は消える");
+        assert_eq!(s.image_count(), 3);
+        assert!(s.add_image(all[0].clone()), "image_set からも外れている");
     }
 
     #[test]
