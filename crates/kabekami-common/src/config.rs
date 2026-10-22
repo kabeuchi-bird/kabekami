@@ -296,10 +296,31 @@ impl Config {
             self.sources.favorites_dir = Some(expand_tilde(dir));
         }
         self.cache.directory = expand_tilde(&self.cache.directory);
+        // 同じプロバイダーの複数件が保存先を共有すると、取得記録 `.last_fetch` と古い画像の
+        // 削除（`<provider>_` で始まるファイル）が干渉し、互いの画像を消し合う。既定の
+        // 保存先を使う 2 件目以降には `<provider>-2` のように別の保存先を割り当てる。
+        // 位置で決めるので有効／無効を切り替えても変わらない。
+        let mut taken: Vec<(ProviderKind, PathBuf)> = Vec::new();
         for oc in &mut self.online_sources {
             if let Some(dir) = &oc.download_dir {
                 oc.download_dir = Some(expand_tilde(dir));
             }
+            let dir = oc.resolved_download_dir();
+            if taken.contains(&(oc.provider, dir.clone())) {
+                if oc.download_dir.is_some() {
+                    tracing::warn!(
+                        "online sources: several {} sources use {}; they will delete each other's images",
+                        oc.provider,
+                        dir.display()
+                    );
+                } else {
+                    let free = (2..)
+                        .map(|n| dir.with_file_name(format!("{}-{n}", oc.provider)))
+                        .find(|d| !taken.contains(&(oc.provider, d.clone())));
+                    oc.download_dir = free;
+                }
+            }
+            taken.push((oc.provider, oc.resolved_download_dir()));
         }
     }
 }
@@ -854,6 +875,32 @@ max_size_mb = 123
         let dump = format!("{cfg:?}");
         assert!(!dump.contains("secret-key-123"), "{dump}");
         assert!(dump.contains("api_key: Some(\"***\")"), "{dump}");
+    }
+
+    /// 同じプロバイダーが既定の保存先を共有しないよう、2 件目以降を別の場所へ振り分ける。
+    /// 明示した保存先はそのまま。
+    #[test]
+    fn duplicate_providers_get_separate_default_dirs() {
+        let _env = EnvGuard::set("XDG_DATA_HOME", "/data");
+        let mut cfg: Config = toml::from_str(
+            "[[online_sources]]\nprovider = \"bing\"\n\
+             [[online_sources]]\nprovider = \"unsplash\"\n\
+             [[online_sources]]\nprovider = \"bing\"\nlocale = \"ja-JP\"\n\
+             [[online_sources]]\nprovider = \"bing\"\ndownload_dir = \"/pics/bing\"\n",
+        )
+        .unwrap();
+        cfg.normalize();
+        let dirs: Vec<PathBuf> =
+            cfg.online_sources.iter().map(|o| o.resolved_download_dir()).collect();
+        assert_eq!(dirs[0], PathBuf::from("/data/kabekami/bing"));
+        assert_eq!(dirs[2], PathBuf::from("/data/kabekami/bing-2"));
+        assert_eq!(dirs[3], PathBuf::from("/pics/bing"));
+        assert_eq!(cfg.online_sources[0].download_dir, None, "1 件目は既定のまま");
+
+        // 正規化をやり直しても（GUI 保存後の再読み込みなど）変わらない
+        let before = cfg.clone();
+        cfg.normalize();
+        assert_eq!(cfg, before);
     }
 
     /// 廃止した reddit の項目は読み飛ばし、残りは読む。未知のプロバイダーは従来どおりエラー。
