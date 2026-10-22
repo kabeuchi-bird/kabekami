@@ -101,9 +101,9 @@ async fn main() -> Result<()> {
         scheduler.paused = true;
         tracing::info!("restored paused state from previous session");
     }
-    // 前回の壁紙を復元する。デスクトップには Plasma 側の設定で既に表示されているため
-    // 再適用はせず、内部ポインタ（トレイのツールチップ・ゴミ箱/お気に入り操作の対象）
-    // だけを合わせる。画像が削除済みの場合は復元をスキップする。
+    // 前回の壁紙を復元する。ここでは内部ポインタ（トレイのツールチップ・ゴミ箱/お気に入り
+    // 操作の対象）を合わせるだけで、貼り直しはメインループの手前で行う。
+    // 画像が削除済みの場合は復元をスキップする。
     if let Some(ref cur) = daemon_state.current {
         if scheduler.restore_current(cur) {
             tracing::info!("restored current wallpaper: {}", cur.display());
@@ -233,9 +233,21 @@ async fn main() -> Result<()> {
     // 起動時の即時切り替え。
     // 一時停止状態は再起動をまたいで復元されるため、停止中なら切り替えない
     // （停止したまま再起動したのに壁紙が変わる、という挙動を避ける）。
-    if config.rotation.change_on_start {
-        if let Some(path) = scheduler.auto_next() {
-            apply_and_notify(apply_ctx!(), &path, "initial apply failed").await;
+    let switched = config.rotation.change_on_start
+        && match scheduler.auto_next() {
+            Some(path) => {
+                apply_and_notify(apply_ctx!(), &path, "initial apply failed").await;
+                true
+            }
+            None => false,
+        };
+    // 切り替えないときも前回の壁紙を貼り直す。Plasma が指しているのはキャッシュの
+    // 加工済みファイルで、LRU 退避や GUI のキャッシュ消去で消えていると、ログイン後の
+    // デスクトップが空になる（解像度が変わっていた場合も作り直しが要る）。キャッシュが
+    // 残っていれば加工は省かれ、同じパスを送り直すだけで済む。
+    if !switched {
+        if let Some(cur) = scheduler.current().cloned() {
+            apply_and_notify(apply_ctx!(), &cur, "restoring wallpaper failed").await;
         }
     }
 
