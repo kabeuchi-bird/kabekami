@@ -121,10 +121,22 @@ async fn fetch_one(
     }
 }
 
-/// `.last_fetch` タイムスタンプを確認して再取得が必要かどうかを返す。
+/// 取得内容を決める設定値。`.last_fetch` に書いておき、変わっていたら間隔を待たずに
+/// 取り直す（クエリや枚数を変えても、既定 24 時間は前の内容のままになるため）。
+fn fetch_fingerprint(cfg: &OnlineSourceConfig) -> String {
+    format!(
+        "{:?}",
+        (cfg.provider, &cfg.query, cfg.count, &cfg.locale, &cfg.quality, &cfg.purity)
+    )
+}
+
+/// `.last_fetch` を確認して再取得が必要かどうかを返す。
 async fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
     let stamp = cfg.resolved_download_dir().join(".last_fetch");
-    // 無い（初回）・読めない・mtime が取れないときは取得する
+    // 無い（初回）・読めない・設定が変わった・mtime が取れないときは取得する
+    if tokio::fs::read_to_string(&stamp).await.ok() != Some(fetch_fingerprint(cfg)) {
+        return true;
+    }
     let Ok(modified) = tokio::fs::metadata(&stamp).await.and_then(|m| m.modified()) else {
         return true;
     };
@@ -163,7 +175,7 @@ async fn prune_dir(dir: &Path, keep: &[PathBuf], provider: &str) {
 /// `.last_fetch` タイムスタンプを更新する（画像を 1 枚以上取得できたときのみ呼ぶこと）。
 async fn mark_fetch_done(cfg: &OnlineSourceConfig) {
     let stamp = cfg.resolved_download_dir().join(".last_fetch");
-    if let Err(e) = tokio::fs::write(&stamp, b"").await {
+    if let Err(e) = tokio::fs::write(&stamp, fetch_fingerprint(cfg)).await {
         tracing::warn!("provider {}: failed to write last_fetch stamp: {}", cfg.provider, e);
     }
 }
@@ -706,6 +718,29 @@ mod download_tests {
         for name in ["bing_new.jpg", "bing_new.tmp", "holiday.jpg", "reddit_x.jpg", ".last_fetch"] {
             assert!(d.join(name).exists(), "{name} は残すべき");
         }
+    }
+
+    /// 取得直後は期限前。取得内容を決める設定を変えたら、間隔を待たずに期限になる。
+    #[tokio::test]
+    async fn fetch_is_due_again_when_settings_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: kabekami_common::config::Config = toml::from_str(&format!(
+            "[[online_sources]]\nprovider = \"wallhaven\"\nquery = \"sea\"\ndownload_dir = {:?}\n",
+            dir.path()
+        ))
+        .unwrap();
+        let cfg = &mut cfg.online_sources[0];
+
+        assert!(super::is_fetch_due(cfg).await, "初回");
+        super::mark_fetch_done(cfg).await;
+        assert!(!super::is_fetch_due(cfg).await, "取得直後");
+
+        cfg.enabled = false;
+        cfg.interval_hours = Some(48);
+        assert!(!super::is_fetch_due(cfg).await, "取得内容に関係しない設定");
+
+        cfg.query = Some("mountain".into());
+        assert!(super::is_fetch_due(cfg).await, "クエリを変えた");
     }
 
     /// 空集合は素通り（呼び出し元の lookup_host が空を返すことは通常ないが、安全側）。

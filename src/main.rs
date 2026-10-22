@@ -505,6 +505,7 @@ async fn main() -> Result<()> {
                 tracing::info!("config file changed; waiting 100ms to coalesce events");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 while config_change_rx.try_recv().is_ok() {}
+                let online_before = config.online_sources.clone();
                 reload::reload_config(reload::ReloadCtx {
                     config: &mut config,
                     scheduler: &mut scheduler,
@@ -526,6 +527,13 @@ async fn main() -> Result<()> {
                     rescan: &rescan,
                 })
                 .await;
+                // 追加・有効化・クエリ変更などは 30 分ごとの確認を待たずに取りに行く
+                // （期限の判定は `.last_fetch` の設定値の比較が行う）。
+                if config.online_sources != online_before {
+                    if let Some(ref client) = online_client {
+                        spawn_fetch(&mut fetch_task, client, &config.online_sources, &online_tx, &screens);
+                    }
+                }
             }
 
             // 監視がイベントを落とした（キューの溢れ等）。差分が分からないので
