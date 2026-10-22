@@ -34,7 +34,7 @@ User/system commands funnel into one `mpsc` channel of `TrayCmd` consumed by the
 
 Wallpaper pipeline: `scheduler.rs` picks the next image (index-based queue + 50-entry history, shuffle-per-cycle for random) → `prefetch.rs` processes ahead of time → `cache.rs` stores processed WebP files keyed by a `DefaultHasher` hash of (path, screen size, mode, blur params) (`Cache::store` runs mtime-based LRU eviction inline, so call it from `spawn_blocking`) → `plasma.rs` applies via one D-Bus `evaluateScript` covering all monitors (a single entry means "every screen"), falling back to `plasma-apply-wallpaperimage`. `screen.rs` resolves per-monitor resolution (`kscreen-doctor --json`, with fallback 1920x1080).
 
-Online sources live in `src/provider/` (bing, unsplash, wallhaven, reddit) sharing a client and `FetchResult` channel from `provider/mod.rs`; downloads land in a local dir and are picked up by the directory watcher.
+Online sources live in `src/provider/` (bing, unsplash, wallhaven) sharing a client and `FetchResult` channel from `provider/mod.rs`; downloads land in a local dir and are picked up by the directory watcher.
 
 Persistence under `~/.config/kabekami/`: `config.toml` (user settings), `state.toml` (pause + current wallpaper, read once at startup, managed by `state.rs`), `blacklist.txt` (`blacklist.rs`). Processed images cache in `~/.cache/kabekami/`.
 

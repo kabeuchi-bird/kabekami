@@ -18,6 +18,7 @@ pub struct Config {
     pub cache: Cache,
     pub ui: Ui,
     /// オンライン壁紙プロバイダー設定（`[[online_sources]]` 配列）。
+    #[serde(deserialize_with = "skip_removed_providers")]
     pub online_sources: Vec<OnlineSourceConfig>,
 }
 
@@ -336,7 +337,6 @@ pub enum ProviderKind {
     Bing,
     Unsplash,
     Wallhaven,
-    Reddit,
 }
 
 impl ProviderKind {
@@ -346,17 +346,34 @@ impl ProviderKind {
             Self::Bing => "bing",
             Self::Unsplash => "unsplash",
             Self::Wallhaven => "wallhaven",
-            Self::Reddit => "reddit",
         }
     }
+}
 
-    /// デフォルトの再取得間隔（時間）。
-    pub fn default_interval_hours(self) -> u64 {
-        match self {
-            Self::Reddit => 1,
-            _ => 24,
-        }
-    }
+/// 再取得間隔の既定値（時間）。
+pub const DEFAULT_FETCH_INTERVAL_HOURS: u64 = 24;
+
+/// 廃止したプロバイダー。設定に残っていても読み込みを失敗させず、警告して読み飛ばす。
+/// Reddit は認証なしの JSON API が 403 を返すようになり、取得できなくなった。
+const REMOVED_PROVIDERS: &[&str] = &["reddit"];
+
+/// `[[online_sources]]` から廃止したプロバイダーの項目を除いて読み込む。
+/// それ以外の項目の誤りは従来どおりエラーにする（壊れた設定を黙って捨てない）。
+fn skip_removed_providers<'de, D>(d: D) -> Result<Vec<OnlineSourceConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<toml::Table>::deserialize(d)?;
+    raw.into_iter()
+        .filter(|t| match t.get("provider").and_then(|v| v.as_str()) {
+            Some(p) if REMOVED_PROVIDERS.contains(&p) => {
+                tracing::warn!("online source provider {p:?} is no longer supported, ignoring it");
+                false
+            }
+            _ => true,
+        })
+        .map(|t| toml::Value::Table(t).try_into().map_err(serde::de::Error::custom))
+        .collect()
 }
 
 impl std::fmt::Display for ProviderKind {
@@ -380,13 +397,11 @@ pub struct OnlineSourceConfig {
     pub download_dir: Option<PathBuf>,
     /// API キー（Unsplash: 必須、Wallhaven: NSFW 閲覧時のみ必要）。
     pub api_key: Option<String>,
-    /// 検索クエリ（Unsplash / Wallhaven / Reddit subreddit 以外で使用）。
+    /// 検索クエリ（Unsplash / Wallhaven で使用）。
     pub query: Option<String>,
     /// 保持する画像枚数（デフォルト: 10）。
     #[serde(default = "default_online_count")]
     pub count: u32,
-    /// Reddit プロバイダーで使用するサブレディット名（例: `"wallpapers"`）。
-    pub subreddit: Option<String>,
     /// 再取得間隔の上書き（時間）。`None` の場合はプロバイダーのデフォルトを使用。
     pub interval_hours: Option<u64>,
     /// ロケール（Bing で使用。例: `"ja-JP"`, `"en-US"`）。デフォルト: `"en-US"`。
@@ -411,7 +426,6 @@ impl std::fmt::Debug for OnlineSourceConfig {
             api_key,
             query,
             count,
-            subreddit,
             interval_hours,
             locale,
             quality,
@@ -424,7 +438,6 @@ impl std::fmt::Debug for OnlineSourceConfig {
             .field("api_key", &api_key.as_ref().map(|_| "***"))
             .field("query", query)
             .field("count", count)
-            .field("subreddit", subreddit)
             .field("interval_hours", interval_hours)
             .field("locale", locale)
             .field("quality", quality)
@@ -448,7 +461,7 @@ impl OnlineSourceConfig {
     /// 実効的な再取得間隔（時間）。
     pub fn effective_interval_hours(&self) -> u64 {
         self.interval_hours
-            .unwrap_or_else(|| self.provider.default_interval_hours())
+            .unwrap_or(DEFAULT_FETCH_INTERVAL_HOURS)
     }
 }
 
@@ -841,6 +854,20 @@ max_size_mb = 123
         let dump = format!("{cfg:?}");
         assert!(!dump.contains("secret-key-123"), "{dump}");
         assert!(dump.contains("api_key: Some(\"***\")"), "{dump}");
+    }
+
+    /// 廃止した reddit の項目は読み飛ばし、残りは読む。未知のプロバイダーは従来どおりエラー。
+    #[test]
+    fn removed_provider_is_skipped_but_unknown_is_an_error() {
+        let cfg: Config = toml::from_str(
+            "[[online_sources]]\nprovider = \"reddit\"\nsubreddit = \"wallpapers\"\n\
+             [[online_sources]]\nprovider = \"bing\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.online_sources.len(), 1);
+        assert_eq!(cfg.online_sources[0].provider, ProviderKind::Bing);
+
+        assert!(toml::from_str::<Config>("[[online_sources]]\nprovider = \"bign\"\n").is_err());
     }
 
     #[test]

@@ -6,10 +6,8 @@
 //! | Bing Daily | 不要 | 毎日更新の Bing 壁紙（最大 8 枚） |
 //! | Unsplash   | 必須 | 高品質フリー写真（クエリ指定可） |
 //! | Wallhaven  | 任意 | アニメ・自然・都市など豊富なカテゴリ |
-//! | Reddit     | 不要 | 指定サブレディットの上位投稿画像 |
 
 pub mod bing;
-pub mod reddit;
 pub mod unsplash;
 pub mod wallhaven;
 
@@ -120,7 +118,6 @@ async fn fetch_one(
         ProviderKind::Bing => bing::fetch(cfg, dir, client, ctx).await,
         ProviderKind::Unsplash => unsplash::fetch(cfg, dir, client).await,
         ProviderKind::Wallhaven => wallhaven::fetch(cfg, dir, client).await,
-        ProviderKind::Reddit => reddit::fetch(cfg, dir, client).await,
     }
 }
 

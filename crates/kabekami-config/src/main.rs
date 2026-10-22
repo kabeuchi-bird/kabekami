@@ -13,6 +13,7 @@ use std::sync::mpsc;
 use eframe::egui;
 use kabekami_common::config::{
     is_cache_file_name, Config, DisplayMode, OnlineSourceConfig, Order, ProviderKind,
+    DEFAULT_FETCH_INTERVAL_HOURS,
 };
 use kabekami_common::i18n::{self, ConfigStrings, Lang};
 
@@ -833,9 +834,6 @@ impl KabekamiApp {
                         opt_text_field(ui, s.api_key, "", 300.0, true, &mut oc.api_key);
                         opt_text_field(ui, s.query, "nature", 200.0, false, &mut oc.query);
                     }
-                    if oc.provider == ProviderKind::Reddit {
-                        opt_text_field(ui, s.subreddit, "wallpapers", 200.0, false, &mut oc.subreddit);
-                    }
                     // Bing: ロケール
                     if oc.provider == ProviderKind::Bing {
                         let locale_hint = format!("en-US {}", s.default_option);
@@ -859,7 +857,7 @@ impl KabekamiApp {
                         let resp = ui.add(egui::DragValue::new(&mut hours).range(0..=8760));
                         ui.label(
                             s.interval_default_hint
-                                .replace("{}", &oc.provider.default_interval_hours().to_string()),
+                                .replace("{}", &DEFAULT_FETCH_INTERVAL_HOURS.to_string()),
                         );
                         if resp.changed() {
                             oc.interval_hours = if hours == 0 { None } else { Some(hours) };
@@ -898,7 +896,6 @@ impl KabekamiApp {
                         ProviderKind::Bing,
                         ProviderKind::Unsplash,
                         ProviderKind::Wallhaven,
-                        ProviderKind::Reddit,
                     ] {
                         ui.selectable_value(&mut self.new_online_provider, p, p.to_string());
                     }
@@ -911,7 +908,6 @@ impl KabekamiApp {
                     api_key: None,
                     query: None,
                     count: 10,
-                    subreddit: None,
                     interval_hours: None,
                     locale: None,
                     quality: None,

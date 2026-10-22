@@ -228,7 +228,6 @@ string_table! {
         download_dir_hint = "💡 Download dir: ~/.local/share/kabekami/<provider>/",
         api_key = "API Key:",
         query = "Query:",
-        subreddit = "Subreddit:",
         locale = "Locale:",
         quality = "Quality:",
         /// Wallhaven の表示範囲。選択肢の "sfw" / "sketchy" / "nsfw" は API の値なので訳さない

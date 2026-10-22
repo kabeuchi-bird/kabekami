@@ -7,7 +7,7 @@ KDE Plasma 向け壁紙ローテーションデーモン。Rust 製。
 - ローカル画像をタイマーで順次／ランダム切り替え（システムトレイから操作）
 - **BlurPad** モード: ぼかした背景の中央に元画像をオーバーレイ（[Variety](https://github.com/varietywalls/variety) の blur-pad 相当）
 - **マルチモニター**: `kscreen-doctor` で各画面の解像度に最適化した画像を個別適用
-- **オンラインソース**: Bing Daily・Unsplash・Wallhaven・Reddit をスケジュール自動取得
+- **オンラインソース**: Bing Daily・Unsplash・Wallhaven をスケジュール自動取得
 - **GUI 設定ツール**（`kabekami-config`）: BlurPad リアルタイムプレビュー付き
 - **再起動しても状態を維持**: 一時停止・現在の壁紙・表示モード・切り替え間隔
 
