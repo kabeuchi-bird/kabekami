@@ -77,15 +77,16 @@ async fn main() -> Result<()> {
     );
     let images = images.context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
-    if images.is_empty() {
-        if has_online {
-            tracing::info!("no local images yet; waiting for online sources to fetch");
-        } else {
-            anyhow::bail!(
-                "no images found. Configure [sources] directories in {}",
-                Config::config_path()?.display()
-            );
-        }
+    // 画像が無くても終了しない。終了するとトレイが出ず、自動起動の利用者は設定を
+    // 開く手段が無い。設定の保存（リロード）か監視で画像が入れば、そこから回り出す。
+    let no_images = images.is_empty() && !has_online;
+    if no_images {
+        tracing::warn!(
+            "no images found. Configure [sources] directories in {}",
+            Config::config_path()?.display()
+        );
+    } else if images.is_empty() {
+        tracing::info!("no local images yet; waiting for online sources to fetch");
     } else {
         tracing::info!("discovered {} image(s)", images.len());
     }
@@ -208,6 +209,9 @@ async fn main() -> Result<()> {
 
     // トレイに初期画像枚数と復元した現在画像名を反映
     sync_tray_current(&tray_handle, &scheduler).await;
+    if no_images {
+        notifier.warn(i18n::strings(lang).notify_no_images).await;
+    }
 
     // `apply_and_notify` に渡す `ApplyCtx` を組み立てる。参照するローカル変数が多く
     // 呼び出しが 9 箇所あるため、借用リストの重複をここ 1 箇所に閉じ込める。
@@ -486,6 +490,7 @@ async fn main() -> Result<()> {
                 // `remove_image` が画像数に比例するため（残りは次のループで拾う）。
                 const MAX_DRAIN_PER_PASS: usize = 32;
                 let count_before = scheduler.image_count();
+                let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
                 apply_watch_event(ev, &mut scheduler, &blacklist);
                 for _ in 1..MAX_DRAIN_PER_PASS {
                     let Ok(ev) = watch_rx.try_recv() else { break };
@@ -494,6 +499,12 @@ async fn main() -> Result<()> {
                 // 枚数が動いていなければ往復も要らない
                 if scheduler.image_count() != count_before {
                     sync_tray_current(&tray_handle, &scheduler).await;
+                }
+                // 空のフォルダに画像が入った（初回起動など）。タイマーを待たずに貼る
+                if was_empty {
+                    if let Some(path) = scheduler.auto_next() {
+                        apply_and_notify(apply_ctx!(), &path, "apply after new images failed").await;
+                    }
                 }
             }
 

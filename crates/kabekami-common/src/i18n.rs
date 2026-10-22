@@ -135,6 +135,8 @@ string_table! {
         notify_fetch_title = "Online sources",
         /// 置換トークン: `{provider}` = プロバイダー名, `{count}` = 取得枚数
         notify_fetch_body = "Downloaded {count} image(s) from {provider}",
+        /// 起動時に画像が 1 枚も無く、オンラインソースも無いときの通知
+        notify_no_images = "No wallpapers found. Add an image folder via \"Open Settings\" in the tray menu.",
     }
     lists {
         /// `tray::INTERVAL_PRESETS` と同じ順序・件数（6 件）であること
