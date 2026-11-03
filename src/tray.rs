@@ -14,6 +14,8 @@
 //! 自分の状態を先に変えない（コマンドが連打抑止で捨てられると、表示だけが
 //! 切り替わって実際の状態とずれるため）。
 
+use std::sync::LazyLock;
+
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::DisplayMode;
@@ -78,6 +80,19 @@ pub struct KabekamiTray {
     pub blacklist_enabled: bool,
 }
 
+/// 埋め込み PNG を SNI の ARGB32（ネットワークバイトオーダー）に変換する。
+fn embedded_icon() -> ksni::Icon {
+    let img = image::load_from_memory(include_bytes!("../assets/kabekami.png"))
+        .expect("embedded icon is a valid PNG")
+        .into_rgba8();
+    let (width, height) = img.dimensions();
+    let mut data = img.into_raw();
+    for px in data.chunks_exact_mut(4) {
+        px.rotate_right(1); // RGBA -> ARGB
+    }
+    ksni::Icon { width: width as i32, height: height as i32, data }
+}
+
 impl KabekamiTray {
     fn tray_item(label: &str, icon: &str, enabled: bool, cmd: TrayCmd) -> ksni::MenuItem<Self> {
         use ksni::menu::StandardItem;
@@ -107,8 +122,15 @@ impl ksni::Tray for KabekamiTray {
         if self.last_error.is_some() {
             "dialog-error".into()
         } else {
-            "preferences-desktop-wallpaper".into()
+            "kabekami-symbolic".into()
         }
+    }
+
+    /// アイコン名がテーマから引けないとき（アイコン未インストールのソースビルド）の
+    /// フォールバック。SNI 仕様では名前が優先される。
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        static PIXMAP: LazyLock<Vec<ksni::Icon>> = LazyLock::new(|| vec![embedded_icon()]);
+        PIXMAP.clone()
     }
 
     fn title(&self) -> String {
@@ -289,5 +311,20 @@ pub async fn spawn_tray(
             tracing::warn!("tray unavailable ({}), running without tray", e);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_icon_is_argb() {
+        let icon = embedded_icon();
+        assert_eq!(icon.data.len(), (icon.width * icon.height * 4) as usize);
+        // 四隅は透明（A=0）、中央は不透明。RGBA のままなら先頭が A にならず落ちる。
+        assert_eq!(icon.data[0], 0);
+        let center = ((icon.height / 2 * icon.width + icon.width / 2) * 4) as usize;
+        assert_eq!(icon.data[center], 255);
     }
 }

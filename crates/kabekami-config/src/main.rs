@@ -22,6 +22,13 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Kabekami Configuration")
+            // Wayland はこの app_id と同名の .desktop からアイコンを引く。
+            .with_app_id("kabekami-config")
+            // X11 用。未指定だと eframe 既定のアイコンになる。
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/kabekami.png"))
+                    .expect("embedded icon is a valid PNG"),
+            )
             .with_inner_size([720.0, 580.0])
             .with_resizable(true),
         ..Default::default()

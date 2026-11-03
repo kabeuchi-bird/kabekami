@@ -84,7 +84,7 @@ impl Notifier {
         // `replaces_id = 0` で常に新規通知。ID は捨てる（連続通知を集約しないため）。
         let hints: HashMap<String, OwnedValue> = HashMap::new();
         if let Err(e) = self
-            .send_dbus("preferences-desktop-wallpaper", summary, body, 5000, 0, hints)
+            .send_dbus("kabekami", summary, body, 5000, 0, hints)
             .await
         {
             tracing::debug!("desktop notification unavailable: {}", e);
