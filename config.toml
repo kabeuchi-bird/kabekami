@@ -104,7 +104,6 @@ enable_blacklist = true
 #   ~/.local/share/kabekami/bing/
 #   ~/.local/share/kabekami/unsplash/
 #   ~/.local/share/kabekami/wallhaven/
-#   ~/.local/share/kabekami/reddit/
 
 # Bing Daily — no API key required
 # Downloads Bing's daily wallpaper for the given locale.
@@ -139,12 +138,3 @@ count    = 10            # images to keep; max 24 per fetch
 # purity = "sfw"         # "sfw" (default), "sketchy" (SFW + Sketchy) or "nsfw" (all; needs api_key)
 # download_dir = "~/Pictures/Wallhaven"
 # interval_hours = 24
-
-# Reddit — no API key required
-[[online_sources]]
-provider   = "reddit"
-enabled    = false
-subreddit  = "wallpapers"   # subreddit name without the r/ prefix
-count      = 10             # images to keep; max 100 per fetch
-# download_dir = "~/Pictures/Reddit"
-# interval_hours = 1        # default for Reddit is 1 h (posts change quickly)

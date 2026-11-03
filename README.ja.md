@@ -9,7 +9,7 @@ KDE Plasma 向け壁紙ローテーションデーモン。Rust 製。
 - ローカル画像をタイマーで順次／ランダム切り替え（システムトレイから操作）
 - **BlurPad** モード: ぼかした背景の中央に元画像をオーバーレイ（[Variety](https://github.com/varietywalls/variety) の blur-pad 相当）
 - **マルチモニター**: `kscreen-doctor` で各画面の解像度に最適化した画像を個別適用
-- **オンラインソース**: Bing Daily・Unsplash・Wallhaven・Reddit をスケジュール自動取得
+- **オンラインソース**: Bing Daily・Unsplash・Wallhaven をスケジュール自動取得
 - **GUI 設定ツール**（`kabekami-config`）: BlurPad リアルタイムプレビュー付き
 - **再起動しても状態を維持**: 一時停止・現在の壁紙・表示モード・切り替え間隔
 
@@ -210,11 +210,11 @@ quit = "おわり"
 
 ### 対応画像形式
 
-kabekami は以下の画像形式に対応しています: **jpg, jpeg, png, webp, avif**
+kabekami は以下の画像形式に対応しています: **jpg, jpeg, png, webp**
 
 EXIF Orientation タグは自動的に読み取り・適用されるため、縦撮り写真や回転情報を持つ画像も正しい向きで表示されます。
 
-注意: bmp, tiff, gif には対応していません（バイナリサイズ削減のため `image` クレートの feature を jpeg/png/webp/avif に限定しています）。
+注意: avif, bmp, tiff, gif には対応していません（バイナリサイズ削減のため `image` クレートの feature を jpeg/png/webp に限定しています。AVIF の読み込みにはシステムの dav1d ライブラリも必要になります）。
 
 ## トラブルシューティング
 
@@ -229,6 +229,8 @@ EXIF Orientation タグは自動的に読み取り・適用されるため、縦
 **壁紙がぼやける／ネイティブ解像度で表示されない** — kabekami は `kscreen-doctor --json` で画面を検出します。失敗した場合は 1920×1080 にフォールバックし、その後の壁紙更新を契機に再検出します（最低 60 秒間隔でスロットル）。起動時に KScreen デーモンが間に合わなかった場合でも、次回の壁紙更新で正しい解像度に切り替わります。原因切り分けには `RUST_LOG=kabekami=debug kabekami` を実行して `monitor detected` 行を確認してください。即時の回避策は `KABEKAMI_SCREEN=2560x1440`（実際の解像度）の指定です。
 
 **オンラインソースが 0 枚しかダウンロードされない** — API キー・ネットワーク・`RUST_LOG=kabekami=debug` の出力を確認してください。
+
+**オンラインソースが `resolves to private …` で失敗する** — プロバイダーの応答で LAN 内へ誘導されないよう、kabekami は内部・予約済みアドレス（ループバック、RFC 1918、リンクローカル、CGNAT の `100.64.0.0/10`、ベンチマーク用の `198.18.0.0/15` など）に解決されるホストへは接続しません。そのため、DNS にこれらの範囲の偽 IP を返すプロキシ（例: fake-ip モードの Clash / mihomo。`198.18.0.0/16` を使う）ではすべてのダウンロードが失敗します。プロキシを redir-host モードにするか、`www.bing.com`・`api.unsplash.com`・`images.unsplash.com`・`wallhaven.cc`・`w.wallhaven.cc` を fake-ip の対象から外してください（`fake-ip-filter`）。
 
 **kabekami-config で保存しても反映されない** — デーモンは inotify で `config.toml` の変更を自動検知します。反映されない場合は再起動してください。
 

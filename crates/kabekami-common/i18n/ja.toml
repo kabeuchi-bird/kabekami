@@ -40,6 +40,7 @@ notify_warning    = "kabekami 警告"
 notify_fetch_title = "オンラインソース"
 # {provider} = プロバイダー名, {count} = 取得枚数
 notify_fetch_body = "{provider} から {count} 枚の画像をダウンロードしました"
+notify_no_images  = "壁紙が見つかりません。トレイメニューの「設定を開く」から画像フォルダを追加してください。"
 
 # 切り替え間隔メニューのラベル。tray::INTERVAL_PRESETS と同じ順序・件数（6 件）にすること
 interval_labels   = ["10秒", "30秒", "5分", "30分", "1時間", "3時間"]
@@ -126,7 +127,6 @@ add_provider_button = "＋ 追加"
 download_dir_hint   = "💡 ダウンロード先: ~/.local/share/kabekami/<provider>/"
 api_key             = "API キー"
 query               = "検索クエリ"
-subreddit           = "サブレディット"
 locale              = "ロケール"
 quality             = "画質"
 purity              = "表示範囲"

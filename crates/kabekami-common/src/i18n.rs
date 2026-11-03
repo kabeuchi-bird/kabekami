@@ -37,19 +37,6 @@ use serde::Deserialize;
 /// そして重ね合わせ／マージ処理。UI 文字列を追加するときはこの一覧に 1 行
 /// 足すだけでよく、英語の文言を書き忘れればコンパイルエラーになる。
 macro_rules! string_table {
-    // リスト型のフィールドを持たないテーブル用。
-    (
-        $(#[$smeta:meta])*
-        $name:ident / $raw:ident / $en:ident {
-            $( $(#[$fmeta:meta])* $field:ident = $fdefault:expr ),* $(,)?
-        }
-    ) => {
-        string_table! {
-            $(#[$smeta])*
-            $name / $raw / $en { $( $(#[$fmeta])* $field = $fdefault ),* }
-            lists { }
-        }
-    };
     (
         $(#[$smeta:meta])*
         $name:ident / $raw:ident / $en:ident {
@@ -75,8 +62,8 @@ macro_rules! string_table {
         /// 省略されたキーは英語へフォールバックするため全て `Option`。
         #[derive(Default, Deserialize)]
         struct $raw {
-            $( #[serde(default)] $field: Option<String>, )*
-            $( #[serde(default)] $lfield: Option<Vec<String>>, )*
+            $( $field: Option<String>, )*
+            $( $lfield: Option<Vec<String>>, )*
         }
 
         impl $raw {
@@ -148,6 +135,8 @@ string_table! {
         notify_fetch_title = "Online sources",
         /// 置換トークン: `{provider}` = プロバイダー名, `{count}` = 取得枚数
         notify_fetch_body = "Downloaded {count} image(s) from {provider}",
+        /// 起動時に画像が 1 枚も無く、オンラインソースも無いときの通知
+        notify_no_images = "No wallpapers found. Add an image folder via \"Open Settings\" in the tray menu.",
     }
     lists {
         /// `tray::INTERVAL_PRESETS` と同じ順序・件数（6 件）であること
@@ -241,7 +230,6 @@ string_table! {
         download_dir_hint = "💡 Download dir: ~/.local/share/kabekami/<provider>/",
         api_key = "API Key:",
         query = "Query:",
-        subreddit = "Subreddit:",
         locale = "Locale:",
         quality = "Quality:",
         /// Wallhaven の表示範囲。選択肢の "sfw" / "sketchy" / "nsfw" は API の値なので訳さない
@@ -262,6 +250,7 @@ string_table! {
         notify_fetch = "Notify when online sources finish fetching",
         enable_blacklist = "Enable \"Never Show Again\" blacklist",
     }
+    lists { }
 }
 
 /// 読み込んだ文字列を `'static` に昇格させる。
@@ -395,7 +384,6 @@ pub fn config_strings(lang: Lang) -> &'static ConfigStrings {
 /// 重ね合わせと、英語へのフォールバックが同じ仕組みで扱える。
 #[derive(Default, Deserialize)]
 struct LangFile {
-    #[serde(default)]
     display_name: Option<String>,
     #[serde(default)]
     tray: RawUiStrings,

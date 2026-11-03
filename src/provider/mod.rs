@@ -6,10 +6,8 @@
 //! | Bing Daily | 不要 | 毎日更新の Bing 壁紙（最大 8 枚） |
 //! | Unsplash   | 必須 | 高品質フリー写真（クエリ指定可） |
 //! | Wallhaven  | 任意 | アニメ・自然・都市など豊富なカテゴリ |
-//! | Reddit     | 不要 | 指定サブレディットの上位投稿画像 |
 
 pub mod bing;
-pub mod reddit;
 pub mod unsplash;
 pub mod wallhaven;
 
@@ -120,22 +118,29 @@ async fn fetch_one(
         ProviderKind::Bing => bing::fetch(cfg, dir, client, ctx).await,
         ProviderKind::Unsplash => unsplash::fetch(cfg, dir, client).await,
         ProviderKind::Wallhaven => wallhaven::fetch(cfg, dir, client).await,
-        ProviderKind::Reddit => reddit::fetch(cfg, dir, client).await,
     }
 }
 
-/// `.last_fetch` タイムスタンプを確認して再取得が必要かどうかを返す。
+/// 取得内容を決める設定値。`.last_fetch` に書いておき、変わっていたら間隔を待たずに
+/// 取り直す（クエリや枚数を変えても、既定 24 時間は前の内容のままになるため）。
+fn fetch_fingerprint(cfg: &OnlineSourceConfig) -> String {
+    format!(
+        "{:?}",
+        (cfg.provider, &cfg.query, cfg.count, &cfg.locale, &cfg.quality, &cfg.purity)
+    )
+}
+
+/// `.last_fetch` を確認して再取得が必要かどうかを返す。
 async fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
     let stamp = cfg.resolved_download_dir().join(".last_fetch");
-    if !tokio::fs::try_exists(&stamp).await.unwrap_or(false) {
+    // 無い（初回）・読めない・設定が変わった・mtime が取れないときは取得する
+    if tokio::fs::read_to_string(&stamp).await.ok() != Some(fetch_fingerprint(cfg)) {
         return true;
     }
+    let Ok(modified) = tokio::fs::metadata(&stamp).await.and_then(|m| m.modified()) else {
+        return true;
+    };
     let interval_secs = cfg.effective_interval_hours() * 3600;
-    let modified = tokio::fs::metadata(&stamp)
-        .await
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .unwrap_or(SystemTime::UNIX_EPOCH);
     let elapsed = SystemTime::now().duration_since(modified).unwrap_or_default();
     elapsed.as_secs() >= interval_secs
 }
@@ -170,7 +175,7 @@ async fn prune_dir(dir: &Path, keep: &[PathBuf], provider: &str) {
 /// `.last_fetch` タイムスタンプを更新する（画像を 1 枚以上取得できたときのみ呼ぶこと）。
 async fn mark_fetch_done(cfg: &OnlineSourceConfig) {
     let stamp = cfg.resolved_download_dir().join(".last_fetch");
-    if let Err(e) = tokio::fs::write(&stamp, b"").await {
+    if let Err(e) = tokio::fs::write(&stamp, fetch_fingerprint(cfg)).await {
         tracing::warn!("provider {}: failed to write last_fetch stamp: {}", cfg.provider, e);
     }
 }
@@ -378,6 +383,10 @@ pub fn make_no_redirect_client() -> Result<reqwest::Client> {
 }
 
 /// 両クライアントに共通の設定（UA・タイムアウト・SSRF 対策の resolver）。
+///
+/// `timeout` は本文の受信完了までを含む合計時間なので、30 秒にすると 10MB 超の
+/// 原寸画像が遅い回線で毎回時間切れになる。止まった接続は `read_timeout`
+/// （無通信の時間）で切り、合計は `MAX_BYTES` を遅い回線でも受け切れる長さにする。
 fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(concat!(
@@ -385,7 +394,9 @@ fn client_builder() -> reqwest::ClientBuilder {
             env!("CARGO_PKG_VERSION"),
             " (Linux wallpaper tool)"
         ))
-        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(600))
         .dns_resolver(std::sync::Arc::new(KabekamiResolver))
 }
 
@@ -509,12 +520,8 @@ fn is_private_ipv6(ip: &Ipv6Addr) -> bool {
         return true;
     }
     let s = ip.segments();
-    // ULA fc00::/7
-    if (s[0] & 0xfe00) == 0xfc00 {
-        return true;
-    }
-    // Link-local fe80::/10 と、廃止済みの site-local fec0::/10
-    if (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xffc0) == 0xfec0 {
+    // ULA fc00::/7、link-local fe80::/10、廃止済みの site-local fec0::/10
+    if ip.is_unique_local() || ip.is_unicast_link_local() || (s[0] & 0xffc0) == 0xfec0 {
         return true;
     }
     // IPv4 を埋め込む形式は、中の IPv4 で判定する
@@ -711,6 +718,29 @@ mod download_tests {
         for name in ["bing_new.jpg", "bing_new.tmp", "holiday.jpg", "reddit_x.jpg", ".last_fetch"] {
             assert!(d.join(name).exists(), "{name} は残すべき");
         }
+    }
+
+    /// 取得直後は期限前。取得内容を決める設定を変えたら、間隔を待たずに期限になる。
+    #[tokio::test]
+    async fn fetch_is_due_again_when_settings_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg: kabekami_common::config::Config = toml::from_str(&format!(
+            "[[online_sources]]\nprovider = \"wallhaven\"\nquery = \"sea\"\ndownload_dir = {:?}\n",
+            dir.path()
+        ))
+        .unwrap();
+        let cfg = &mut cfg.online_sources[0];
+
+        assert!(super::is_fetch_due(cfg).await, "初回");
+        super::mark_fetch_done(cfg).await;
+        assert!(!super::is_fetch_due(cfg).await, "取得直後");
+
+        cfg.enabled = false;
+        cfg.interval_hours = Some(48);
+        assert!(!super::is_fetch_due(cfg).await, "取得内容に関係しない設定");
+
+        cfg.query = Some("mountain".into());
+        assert!(super::is_fetch_due(cfg).await, "クエリを変えた");
     }
 
     /// 空集合は素通り（呼び出し元の lookup_host が空を返すことは通常ないが、安全側）。

@@ -7,7 +7,7 @@ resolver = "2"
 # クレート間で feature 集合がズレてビルドが分裂するのを防ぐ。
 [workspace.dependencies]
 anyhow = "1"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "avif"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 

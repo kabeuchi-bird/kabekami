@@ -16,7 +16,7 @@ cargo test <name>                     # single test by name filter
 RUST_LOG=kabekami=debug cargo run     # run daemon with debug logs
 ```
 
-Tests are inline `#[cfg(test)]` modules (no `tests/` dir); `tempfile` is the only dev-dependency. There is no lint config beyond default `cargo clippy`/`cargo fmt`.
+Tests are inline `#[cfg(test)]` modules (no `tests/` dir); `tempfile` is the only dev-dependency. There is no lint config beyond default `cargo clippy`. CI (`.github/workflows/ci.yml`) runs `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`. `cargo fmt` is deliberately not enforced: the code uses hand-aligned layouts (e.g. the match arms in `parse_cli`) that rustfmt would undo.
 
 Runtime env overrides: `KABEKAMI_SCREEN=WxH`, `KABEKAMI_LANG=en|ja`, `KABEKAMI_I18N_DIR`.
 
@@ -34,7 +34,7 @@ User/system commands funnel into one `mpsc` channel of `TrayCmd` consumed by the
 
 Wallpaper pipeline: `scheduler.rs` picks the next image (index-based queue + 50-entry history, shuffle-per-cycle for random) → `prefetch.rs` processes ahead of time → `cache.rs` stores processed WebP files keyed by a `DefaultHasher` hash of (path, screen size, mode, blur params) (`Cache::store` runs mtime-based LRU eviction inline, so call it from `spawn_blocking`) → `plasma.rs` applies via one D-Bus `evaluateScript` covering all monitors (a single entry means "every screen"), falling back to `plasma-apply-wallpaperimage`. `screen.rs` resolves per-monitor resolution (`kscreen-doctor --json`, with fallback 1920x1080).
 
-Online sources live in `src/provider/` (bing, unsplash, wallhaven, reddit) sharing a client and `FetchResult` channel from `provider/mod.rs`; downloads land in a local dir and are picked up by the directory watcher.
+Online sources live in `src/provider/` (bing, unsplash, wallhaven) sharing a client and `FetchResult` channel from `provider/mod.rs`; downloads land in a local dir and are picked up by the directory watcher.
 
 Persistence under `~/.config/kabekami/`: `config.toml` (user settings), `state.toml` (pause + current wallpaper, read once at startup, managed by `state.rs`), `blacklist.txt` (`blacklist.rs`). Processed images cache in `~/.cache/kabekami/`.
 
@@ -54,4 +54,4 @@ UI strings are TOML files (`crates/kabekami-common/i18n/ja.toml`), layered at ru
 
 ## Watch list
 
-- **`kscreen-doctor` → `kscreenctl` rename (unconfirmed rumor, noted 2026-10-03).** A future Plasma release may rename the screen-query CLI. Before touching screen detection, check whether it has actually happened. The only place the binary is executed is `screen::detect_all` (`src/screen.rs`); if the rename lands, try the new name first and keep `kscreen-doctor` as a fallback. Also verify that the `--json` output schema (`outputs[].enabled/currentModeId/modes[].size`) is still the same, and update the name in README.md / README.ja.md, the AUR `optdepends` (`packaging/aur/kabekami-git/PKGBUILD` + `.SRCINFO`), and the comments in `screen_watcher.rs` / `main.rs`.
+- **`kscreenctl` added alongside `kscreen-doctor` (confirmed on Plasma 6.8.0, 2026-10-20).** Not a rename: `kscreenctl` ships in the `kscreen` package while `kscreen-doctor` remains in `libkscreen`, still works, and emits no deprecation warning. No code change is needed for now. The only place the binary is executed is `screen::detect_all` (`src/screen.rs`); if `kscreen-doctor` gets deprecated or removed, try `kscreenctl` first and keep `kscreen-doctor` as a fallback. The JSON schemas differ, so the existing serde structs can't be reused: `kscreen-doctor --json` returns `{"outputs": [...]}` with `currentModeId` + `modes[].size.{width,height}`, whereas `kscreenctl list-outputs --json` (filterable with `--enabled`) returns a bare array where the current mode is the `mode` object (also `modes[].current: true`) and dimensions are in `resolution.{width,height}`; `priority` exists in both. On migration, also update the name in README.md / README.ja.md, the AUR `optdepends` (`packaging/aur/kabekami-git/PKGBUILD` + `.SRCINFO`), and the comments in `screen_watcher.rs` / `main.rs`.

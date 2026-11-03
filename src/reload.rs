@@ -142,7 +142,7 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                 config,
                 scanned_dirs,
                 *scanned_recursive,
-                watcher_handle.as_ref().is_some_and(|w| w.is_complete()),
+                watcher_handle.as_ref().is_some_and(|w| w.missing.is_empty()),
             ) =>
         {
             tracing::debug!("config unchanged, skipping reload");
@@ -160,7 +160,7 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
             // 再スキャン契機になる。一部失敗も同じ扱い（そのディレクトリの
             // イベントは届かないので、再スキャンと登録再試行の両方が要る）。
             let watching_everything =
-                watcher_handle.as_ref().is_some_and(|w| w.is_complete());
+                watcher_handle.as_ref().is_some_and(|w| w.missing.is_empty());
             let needs_rescan = sources_changed || !watching_everything;
 
             // 走行中の先読みが温めているキー一式（設定を差し替える前の値で求める）
@@ -257,11 +257,15 @@ pub async fn reload_config(ctx: ReloadCtx<'_>) {
                     apply_and_notify(&mut apply_ctx!(), &cur, "reload: reapply failed").await;
                 }
                 Some(_) => {}
-                // current が落ちた場合は apply_and_notify を通らないので、
-                // state に残る旧画像を明示的に消す。
-                None => {
-                    state_writer.persist(scheduler.is_paused(), None).await;
-                }
+                // 表示中の画像が無い（起動時に空だった・一覧から消えた）。画像があれば
+                // タイマーを待たずに回し始める。回せなければ state に残る旧画像を消す
+                // （apply_and_notify を通らないので明示的に）。
+                None => match scheduler.auto_next() {
+                    Some(next) => {
+                        apply_and_notify(&mut apply_ctx!(), &next, "reload: apply failed").await;
+                    }
+                    None => state_writer.persist(scheduler.paused, None).await,
+                },
             }
             // 貼り直した場合は `apply_and_notify` が先読みを掛け直す
             if !reapply && prefetch_stale {

@@ -18,6 +18,7 @@ pub struct Config {
     pub cache: Cache,
     pub ui: Ui,
     /// オンライン壁紙プロバイダー設定（`[[online_sources]]` 配列）。
+    #[serde(deserialize_with = "skip_removed_providers")]
     pub online_sources: Vec<OnlineSourceConfig>,
 }
 
@@ -295,10 +296,31 @@ impl Config {
             self.sources.favorites_dir = Some(expand_tilde(dir));
         }
         self.cache.directory = expand_tilde(&self.cache.directory);
+        // 同じプロバイダーの複数件が保存先を共有すると、取得記録 `.last_fetch` と古い画像の
+        // 削除（`<provider>_` で始まるファイル）が干渉し、互いの画像を消し合う。既定の
+        // 保存先を使う 2 件目以降には `<provider>-2` のように別の保存先を割り当てる。
+        // 位置で決めるので有効／無効を切り替えても変わらない。
+        let mut taken: Vec<(ProviderKind, PathBuf)> = Vec::new();
         for oc in &mut self.online_sources {
             if let Some(dir) = &oc.download_dir {
                 oc.download_dir = Some(expand_tilde(dir));
             }
+            let dir = oc.resolved_download_dir();
+            if taken.contains(&(oc.provider, dir.clone())) {
+                if oc.download_dir.is_some() {
+                    tracing::warn!(
+                        "online sources: several {} sources use {}; they will delete each other's images",
+                        oc.provider,
+                        dir.display()
+                    );
+                } else {
+                    let free = (2..)
+                        .map(|n| dir.with_file_name(format!("{}-{n}", oc.provider)))
+                        .find(|d| !taken.contains(&(oc.provider, d.clone())));
+                    oc.download_dir = free;
+                }
+            }
+            taken.push((oc.provider, oc.resolved_download_dir()));
         }
     }
 }
@@ -336,7 +358,6 @@ pub enum ProviderKind {
     Bing,
     Unsplash,
     Wallhaven,
-    Reddit,
 }
 
 impl ProviderKind {
@@ -346,17 +367,34 @@ impl ProviderKind {
             Self::Bing => "bing",
             Self::Unsplash => "unsplash",
             Self::Wallhaven => "wallhaven",
-            Self::Reddit => "reddit",
         }
     }
+}
 
-    /// デフォルトの再取得間隔（時間）。
-    pub fn default_interval_hours(self) -> u64 {
-        match self {
-            Self::Reddit => 1,
-            _ => 24,
-        }
-    }
+/// 再取得間隔の既定値（時間）。
+pub const DEFAULT_FETCH_INTERVAL_HOURS: u64 = 24;
+
+/// 廃止したプロバイダー。設定に残っていても読み込みを失敗させず、警告して読み飛ばす。
+/// Reddit は認証なしの JSON API が 403 を返すようになり、取得できなくなった。
+const REMOVED_PROVIDERS: &[&str] = &["reddit"];
+
+/// `[[online_sources]]` から廃止したプロバイダーの項目を除いて読み込む。
+/// それ以外の項目の誤りは従来どおりエラーにする（壊れた設定を黙って捨てない）。
+fn skip_removed_providers<'de, D>(d: D) -> Result<Vec<OnlineSourceConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<toml::Table>::deserialize(d)?;
+    raw.into_iter()
+        .filter(|t| match t.get("provider").and_then(|v| v.as_str()) {
+            Some(p) if REMOVED_PROVIDERS.contains(&p) => {
+                tracing::warn!("online source provider {p:?} is no longer supported, ignoring it");
+                false
+            }
+            _ => true,
+        })
+        .map(|t| toml::Value::Table(t).try_into().map_err(serde::de::Error::custom))
+        .collect()
 }
 
 impl std::fmt::Display for ProviderKind {
@@ -377,32 +415,22 @@ pub struct OnlineSourceConfig {
     pub enabled: bool,
     /// ダウンロード先ディレクトリ。
     /// `None` の場合は `~/.local/share/kabekami/<provider>` を使用。
-    #[serde(default)]
     pub download_dir: Option<PathBuf>,
     /// API キー（Unsplash: 必須、Wallhaven: NSFW 閲覧時のみ必要）。
-    #[serde(default)]
     pub api_key: Option<String>,
-    /// 検索クエリ（Unsplash / Wallhaven / Reddit subreddit 以外で使用）。
-    #[serde(default)]
+    /// 検索クエリ（Unsplash / Wallhaven で使用）。
     pub query: Option<String>,
     /// 保持する画像枚数（デフォルト: 10）。
     #[serde(default = "default_online_count")]
     pub count: u32,
-    /// Reddit プロバイダーで使用するサブレディット名（例: `"wallpapers"`）。
-    #[serde(default)]
-    pub subreddit: Option<String>,
     /// 再取得間隔の上書き（時間）。`None` の場合はプロバイダーのデフォルトを使用。
-    #[serde(default)]
     pub interval_hours: Option<u64>,
     /// ロケール（Bing で使用。例: `"ja-JP"`, `"en-US"`）。デフォルト: `"en-US"`。
-    #[serde(default)]
     pub locale: Option<String>,
     /// 画像品質（Unsplash で使用: `"regular"` または `"full"`）。デフォルト: `"regular"`。
-    #[serde(default)]
     pub quality: Option<String>,
     /// 取得する内容の上限（Wallhaven で使用）。`"sfw"`・`"sketchy"`（SFW と Sketchy）・
     /// `"nsfw"`（すべて。`api_key` が必要）。デフォルト: `"sfw"`。
-    #[serde(default)]
     pub purity: Option<String>,
 }
 
@@ -419,7 +447,6 @@ impl std::fmt::Debug for OnlineSourceConfig {
             api_key,
             query,
             count,
-            subreddit,
             interval_hours,
             locale,
             quality,
@@ -432,7 +459,6 @@ impl std::fmt::Debug for OnlineSourceConfig {
             .field("api_key", &api_key.as_ref().map(|_| "***"))
             .field("query", query)
             .field("count", count)
-            .field("subreddit", subreddit)
             .field("interval_hours", interval_hours)
             .field("locale", locale)
             .field("quality", quality)
@@ -456,7 +482,7 @@ impl OnlineSourceConfig {
     /// 実効的な再取得間隔（時間）。
     pub fn effective_interval_hours(&self) -> u64 {
         self.interval_hours
-            .unwrap_or_else(|| self.provider.default_interval_hours())
+            .unwrap_or(DEFAULT_FETCH_INTERVAL_HOURS)
     }
 }
 
@@ -849,6 +875,46 @@ max_size_mb = 123
         let dump = format!("{cfg:?}");
         assert!(!dump.contains("secret-key-123"), "{dump}");
         assert!(dump.contains("api_key: Some(\"***\")"), "{dump}");
+    }
+
+    /// 同じプロバイダーが既定の保存先を共有しないよう、2 件目以降を別の場所へ振り分ける。
+    /// 明示した保存先はそのまま。
+    #[test]
+    fn duplicate_providers_get_separate_default_dirs() {
+        let _env = EnvGuard::set("XDG_DATA_HOME", "/data");
+        let mut cfg: Config = toml::from_str(
+            "[[online_sources]]\nprovider = \"bing\"\n\
+             [[online_sources]]\nprovider = \"unsplash\"\n\
+             [[online_sources]]\nprovider = \"bing\"\nlocale = \"ja-JP\"\n\
+             [[online_sources]]\nprovider = \"bing\"\ndownload_dir = \"/pics/bing\"\n",
+        )
+        .unwrap();
+        cfg.normalize();
+        let dirs: Vec<PathBuf> =
+            cfg.online_sources.iter().map(|o| o.resolved_download_dir()).collect();
+        assert_eq!(dirs[0], PathBuf::from("/data/kabekami/bing"));
+        assert_eq!(dirs[2], PathBuf::from("/data/kabekami/bing-2"));
+        assert_eq!(dirs[3], PathBuf::from("/pics/bing"));
+        assert_eq!(cfg.online_sources[0].download_dir, None, "1 件目は既定のまま");
+
+        // 正規化をやり直しても（GUI 保存後の再読み込みなど）変わらない
+        let before = cfg.clone();
+        cfg.normalize();
+        assert_eq!(cfg, before);
+    }
+
+    /// 廃止した reddit の項目は読み飛ばし、残りは読む。未知のプロバイダーは従来どおりエラー。
+    #[test]
+    fn removed_provider_is_skipped_but_unknown_is_an_error() {
+        let cfg: Config = toml::from_str(
+            "[[online_sources]]\nprovider = \"reddit\"\nsubreddit = \"wallpapers\"\n\
+             [[online_sources]]\nprovider = \"bing\"\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.online_sources.len(), 1);
+        assert_eq!(cfg.online_sources[0].provider, ProviderKind::Bing);
+
+        assert!(toml::from_str::<Config>("[[online_sources]]\nprovider = \"bign\"\n").is_err());
     }
 
     #[test]

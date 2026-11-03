@@ -77,15 +77,16 @@ async fn main() -> Result<()> {
     );
     let images = images.context("failed to scan source directories")?;
     let has_online = config.online_sources.iter().any(|s| s.enabled);
-    if images.is_empty() {
-        if has_online {
-            tracing::info!("no local images yet; waiting for online sources to fetch");
-        } else {
-            anyhow::bail!(
-                "no images found. Configure [sources] directories in {}",
-                Config::config_path()?.display()
-            );
-        }
+    // 画像が無くても終了しない。終了するとトレイが出ず、自動起動の利用者は設定を
+    // 開く手段が無い。設定の保存（リロード）か監視で画像が入れば、そこから回り出す。
+    let no_images = images.is_empty() && !has_online;
+    if no_images {
+        tracing::warn!(
+            "no images found. Configure [sources] directories in {}",
+            Config::config_path()?.display()
+        );
+    } else if images.is_empty() {
+        tracing::info!("no local images yet; waiting for online sources to fetch");
     } else {
         tracing::info!("discovered {} image(s)", images.len());
     }
@@ -98,12 +99,12 @@ async fn main() -> Result<()> {
     let mut scheduler = Scheduler::new(images, config.rotation.order);
     let daemon_state = state::DaemonState::load(&kabekami_config_dir);
     if daemon_state.paused {
-        scheduler.pause();
+        scheduler.paused = true;
         tracing::info!("restored paused state from previous session");
     }
-    // 前回の壁紙を復元する。デスクトップには Plasma 側の設定で既に表示されているため
-    // 再適用はせず、内部ポインタ（トレイのツールチップ・ゴミ箱/お気に入り操作の対象）
-    // だけを合わせる。画像が削除済みの場合は復元をスキップする。
+    // 前回の壁紙を復元する。ここでは内部ポインタ（トレイのツールチップ・ゴミ箱/お気に入り
+    // 操作の対象）を合わせるだけで、貼り直しはメインループの手前で行う。
+    // 画像が削除済みの場合は復元をスキップする。
     if let Some(ref cur) = daemon_state.current {
         if scheduler.restore_current(cur) {
             tracing::info!("restored current wallpaper: {}", cur.display());
@@ -143,7 +144,7 @@ async fn main() -> Result<()> {
         lang,
         config.sources.favorites_dir.is_some(),
         config.ui.enable_blacklist,
-        scheduler.is_paused(),
+        scheduler.paused,
     )
     .await;
 
@@ -206,8 +207,18 @@ async fn main() -> Result<()> {
 
     let mut fetch_task: Option<tokio::task::JoinHandle<()>> = None;
 
+    // 監視を張れなかったディレクトリ（遅れてマウントされるネットワークドライブ等）が
+    // 現れたかを確かめる間隔。設定の保存を待つと、それまで画像も変更も拾えない。
+    // ponytail: 監視自体を作れない環境（inotify 上限など）では 5 分ごとに再走査が続く。
+    //           気になるなら失敗理由で再試行を打ち切る。
+    let mut watch_retry = interval_at(Instant::now() + Duration::from_secs(300), Duration::from_secs(300));
+    watch_retry.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
     // トレイに初期画像枚数と復元した現在画像名を反映
     sync_tray_current(&tray_handle, &scheduler).await;
+    if no_images {
+        notifier.warn(i18n::strings(lang).notify_no_images).await;
+    }
 
     // `apply_and_notify` に渡す `ApplyCtx` を組み立てる。参照するローカル変数が多く
     // 呼び出しが 9 箇所あるため、借用リストの重複をここ 1 箇所に閉じ込める。
@@ -233,9 +244,21 @@ async fn main() -> Result<()> {
     // 起動時の即時切り替え。
     // 一時停止状態は再起動をまたいで復元されるため、停止中なら切り替えない
     // （停止したまま再起動したのに壁紙が変わる、という挙動を避ける）。
-    if config.rotation.change_on_start {
-        if let Some(path) = scheduler.auto_next() {
-            apply_and_notify(apply_ctx!(), &path, "initial apply failed").await;
+    let switched = config.rotation.change_on_start
+        && match scheduler.auto_next() {
+            Some(path) => {
+                apply_and_notify(apply_ctx!(), &path, "initial apply failed").await;
+                true
+            }
+            None => false,
+        };
+    // 切り替えないときも前回の壁紙を貼り直す。Plasma が指しているのはキャッシュの
+    // 加工済みファイルで、LRU 退避や GUI のキャッシュ消去で消えていると、ログイン後の
+    // デスクトップが空になる（解像度が変わっていた場合も作り直しが要る）。キャッシュが
+    // 残っていれば加工は省かれ、同じパスを送り直すだけで済む。
+    if !switched {
+        if let Some(cur) = scheduler.current().cloned() {
+            apply_and_notify(apply_ctx!(), &cur, "restoring wallpaper failed").await;
         }
     }
 
@@ -258,7 +281,7 @@ async fn main() -> Result<()> {
                     // 再起動後に画面に出ていない画像を指し続ける（`remove_image` が
                     // `current` を落としているので名前は空になる）
                     sync_tray_current(&tray_handle, &scheduler).await;
-                    state_writer.persist(scheduler.is_paused(), None).await;
+                    state_writer.persist(scheduler.paused, None).await;
                 }
             }
             ticker = make_ticker(config.rotation.interval_secs);
@@ -335,14 +358,9 @@ async fn main() -> Result<()> {
                     }
 
                     TrayCmd::TogglePause => {
-                        if scheduler.is_paused() {
-                            scheduler.resume();
-                            tracing::info!("resumed");
-                        } else {
-                            scheduler.pause();
-                            tracing::info!("paused");
-                        }
-                        let paused = scheduler.is_paused();
+                        scheduler.paused = !scheduler.paused;
+                        let paused = scheduler.paused;
+                        tracing::info!("{}", if paused { "paused" } else { "resumed" });
                         state_writer.persist(paused, scheduler.current().map(|p| p.as_path())).await;
                         update_tray(&tray_handle, move |t| t.paused = paused).await;
                     }
@@ -479,6 +497,7 @@ async fn main() -> Result<()> {
                 // `remove_image` が画像数に比例するため（残りは次のループで拾う）。
                 const MAX_DRAIN_PER_PASS: usize = 32;
                 let count_before = scheduler.image_count();
+                let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
                 apply_watch_event(ev, &mut scheduler, &blacklist);
                 for _ in 1..MAX_DRAIN_PER_PASS {
                     let Ok(ev) = watch_rx.try_recv() else { break };
@@ -487,6 +506,12 @@ async fn main() -> Result<()> {
                 // 枚数が動いていなければ往復も要らない
                 if scheduler.image_count() != count_before {
                     sync_tray_current(&tray_handle, &scheduler).await;
+                }
+                // 空のフォルダに画像が入った（初回起動など）。タイマーを待たずに貼る
+                if was_empty {
+                    if let Some(path) = scheduler.auto_next() {
+                        apply_and_notify(apply_ctx!(), &path, "apply after new images failed").await;
+                    }
                 }
             }
 
@@ -498,6 +523,7 @@ async fn main() -> Result<()> {
                 tracing::info!("config file changed; waiting 100ms to coalesce events");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 while config_change_rx.try_recv().is_ok() {}
+                let online_before = config.online_sources.clone();
                 reload::reload_config(reload::ReloadCtx {
                     config: &mut config,
                     scheduler: &mut scheduler,
@@ -519,20 +545,49 @@ async fn main() -> Result<()> {
                     rescan: &rescan,
                 })
                 .await;
+                // 追加・有効化・クエリ変更などは 30 分ごとの確認を待たずに取りに行く
+                // （期限の判定は `.last_fetch` の設定値の比較が行う）。
+                if config.online_sources != online_before {
+                    if let Some(ref client) = online_client {
+                        spawn_fetch(&mut fetch_task, client, &config.online_sources, &online_tx, &screens);
+                    }
+                }
             }
 
             // 監視がイベントを落とした（キューの溢れ等）。差分が分からないので
             // 最後に走査した対象を丸ごと走査し直す（#61）。空・失敗のときは
             // リロードと同じく一覧を据え置く。
+            _ = watch_retry.tick() => {
+                let appeared = match &watcher_handle {
+                    Some(w) => w.missing.iter().any(|d| d.is_dir()),
+                    None => scanned_dirs.iter().any(|d| d.is_dir()),
+                };
+                if appeared {
+                    tracing::info!("unwatched source directory is now available");
+                    rescan.notify_one();
+                }
+            }
+
             _ = rescan.notified() => {
-                tracing::info!("file watcher lost events; rescanning sources");
+                tracing::info!("rescanning sources");
                 match scan_images(&scanned_dirs, scanned_recursive, &blacklist).await {
                     Ok(images) if !images.is_empty() => {
+                        let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
                         // 作り直すと次の画像が変わりうるので、温めている先読みは捨てて掛け直す
                         prefetcher.abort();
                         scheduler.rebuild(images, config.rotation.order);
-                        start_prefetch(&mut prefetcher, &scheduler, &screens, &config, &cache);
+                        // 張れていなかった監視も張り直す（張れていれば触らない）
+                        if !watcher_handle.as_ref().is_some_and(|w| w.missing.is_empty()) {
+                            (watch_rx, watcher_handle) = spawn_dir_watcher_offloaded(
+                                &scanned_dirs, scanned_recursive, rescan.clone(),
+                            ).await;
+                        }
                         sync_tray_current(&tray_handle, &scheduler).await;
+                        // 空だった（起動時に対象が無かった等）なら、タイマーを待たずに貼る
+                        match was_empty.then(|| scheduler.auto_next()).flatten() {
+                            Some(path) => apply_and_notify(apply_ctx!(), &path, "apply after rescan failed").await,
+                            None => start_prefetch(&mut prefetcher, &scheduler, &screens, &config, &cache),
+                        }
                     }
                     Ok(_) => tracing::warn!("rescan: no images found, keeping current list"),
                     Err(e) => tracing::warn!("rescan failed, keeping current list: {:#}", e),
@@ -976,7 +1031,7 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
         })
         .await;
         // 現在の壁紙を記録しておき、再起動後も同じ画像を「現在」として扱えるようにする
-        ctx.state_writer.persist(ctx.scheduler.is_paused(), Some(path)).await;
+        ctx.state_writer.persist(ctx.scheduler.paused, Some(path)).await;
         start_prefetch(ctx.prefetcher, ctx.scheduler, ctx.screens, ctx.config, ctx.cache);
         // 画面構成の再検出を要求（ウォッチャー側で 60s スロットル）
         if let Some(tx) = ctx.screen_check_tx {

@@ -9,7 +9,7 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 - Rotates local images on a timer (sequential or random) with a system tray menu
 - **BlurPad** mode: image centred on a blurred background (like [Variety](https://github.com/varietywalls/variety)'s blur-pad)
 - **Multi-monitor**: per-screen resolution-optimised images via `kscreen-doctor`
-- **Online sources**: Bing Daily, Unsplash, Wallhaven, Reddit — auto-downloaded on a schedule
+- **Online sources**: Bing Daily, Unsplash, Wallhaven — auto-downloaded on a schedule
 - **GUI settings tool** (`kabekami-config`) with real-time BlurPad preview
 - **State is remembered across restarts**: pause state, current wallpaper, display mode, and interval
 
@@ -211,11 +211,11 @@ English and Japanese are built into the binary, so they work even with no files 
 
 ### Supported Image Formats
 
-kabekami supports the following image formats: **jpg, jpeg, png, webp, avif**
+kabekami supports the following image formats: **jpg, jpeg, png, webp**
 
 EXIF Orientation tags are read and applied automatically, so portrait photos and rotated camera shots are displayed in the correct orientation.
 
-Note: bmp, tiff, and gif are not supported (the `image` crate features are limited to jpeg/png/webp/avif to reduce binary size).
+Note: avif, bmp, tiff, and gif are not supported (the `image` crate features are limited to jpeg/png/webp to reduce binary size; AVIF decoding would also need the system dav1d library).
 
 ## Troubleshooting
 
@@ -230,6 +230,8 @@ Note: bmp, tiff, and gif are not supported (the `image` crate features are limit
 **Wallpaper looks blurry / not at native resolution** — kabekami detects screens with `kscreen-doctor --json`. If that fails (KScreen daemon unavailable at startup, etc.), it uses 1920×1080 until the next wallpaper-update triggers a re-detection (throttled to a 60s minimum). To diagnose, run `RUST_LOG=kabekami=debug kabekami` and check the `monitor detected` log lines. As a workaround, override the resolution explicitly with `KABEKAMI_SCREEN=2560x1440` (your actual resolution).
 
 **Online sources download 0 images** — Check API key, network, and `RUST_LOG=kabekami=debug` output.
+
+**Online sources fail with `resolves to private …`** — To keep provider responses from pointing it at your LAN, kabekami refuses to connect to hosts that resolve to private or reserved addresses (loopback, RFC 1918, link-local, CGNAT `100.64.0.0/10`, benchmarking `198.18.0.0/15`, and so on). Proxies that answer DNS with fake IPs from those ranges (e.g. Clash / mihomo in fake-ip mode, which uses `198.18.0.0/16`) therefore break every download. Switch the proxy to redir-host mode, or exclude `www.bing.com`, `api.unsplash.com`, `images.unsplash.com`, `wallhaven.cc` and `w.wallhaven.cc` from fake-ip (`fake-ip-filter`).
 
 **Settings not applied after saving** — The daemon reloads `config.toml` via inotify automatically; restart if needed.
 

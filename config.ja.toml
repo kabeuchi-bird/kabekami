@@ -102,7 +102,6 @@ enable_blacklist = true
 #   ~/.local/share/kabekami/bing/
 #   ~/.local/share/kabekami/unsplash/
 #   ~/.local/share/kabekami/wallhaven/
-#   ~/.local/share/kabekami/reddit/
 
 # Bing Daily — API キー不要
 # Bing の「今日の壁紙」をダウンロードします。
@@ -137,12 +136,3 @@ count    = 10            # 保持する枚数。1 回の取得上限は 24 枚
 # purity = "sfw"         # "sfw"（デフォルト）、"sketchy"（SFW＋Sketchy）、"nsfw"（すべて。api_key が必要）
 # download_dir = "~/Pictures/Wallhaven"
 # interval_hours = 24
-
-# Reddit — API キー不要
-[[online_sources]]
-provider   = "reddit"
-enabled    = false
-subreddit  = "wallpapers"   # サブレディット名（r/ は不要）
-count      = 10             # 保持する枚数。1 回の取得上限は 100 枚
-# download_dir = "~/Pictures/Reddit"
-# interval_hours = 1        # Reddit のデフォルトは 1 時間（投稿の更新が早いため）

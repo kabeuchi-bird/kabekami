@@ -45,18 +45,11 @@ pub struct DirWatcher {
     /// 内部の `notify` ウォッチャー。フィールドとして保持することで
     /// `DirWatcher` がドロップされるまで監視が続く。
     _inner: notify::RecommendedWatcher,
-    /// 対象ディレクトリすべての登録に成功したか。
-    complete: bool,
-}
-
-impl DirWatcher {
-    /// 対象ディレクトリすべてを監視できているか。
+    /// 登録に失敗したディレクトリ。空なら対象すべてを監視できている。
     ///
-    /// `false` なら一部の登録に失敗しており、そこでの追加・削除は届かない。
-    /// 呼び出し側が再スキャンと登録の再試行を判断するために使う。
-    pub fn is_complete(&self) -> bool {
-        self.complete
-    }
+    /// ここに入ったディレクトリの追加・削除は届かない。呼び出し側が再スキャンと
+    /// 登録の再試行を判断するために使う（後から現れたかどうかもこれで見る）。
+    pub missing: Vec<PathBuf>,
 }
 
 /// ディレクトリ監視を開始する。
@@ -109,35 +102,32 @@ pub fn spawn(
         RecursiveMode::NonRecursive
     };
 
-    let mut ok_count = 0usize;
+    let mut missing = Vec::new();
     for dir in dirs {
         match watcher.watch(dir, mode) {
-            Ok(()) => {
-                tracing::info!("watching {} for changes", dir.display());
-                ok_count += 1;
-            }
+            Ok(()) => tracing::info!("watching {} for changes", dir.display()),
             Err(e) => {
                 tracing::warn!("failed to watch {}: {}", dir.display(), e);
+                missing.push(dir.clone());
             }
         }
     }
 
-    if ok_count == 0 {
+    if missing.len() == dirs.len() {
         tracing::warn!("no directories could be watched; running without file watcher");
         return (rx, None);
     }
 
     // 一部でも失敗していれば「監視できている」と言ってはいけない
     // （そのディレクトリの追加・削除は届かず、呼び出し側が再スキャンで補う）
-    let complete = ok_count == dirs.len();
-    if !complete {
+    if !missing.is_empty() {
         tracing::warn!(
             "watching {} of {} directories; the rest rely on rescans",
-            ok_count, dirs.len(),
+            dirs.len() - missing.len(), dirs.len(),
         );
     }
 
-    (rx, Some(DirWatcher { _inner: watcher, complete }))
+    (rx, Some(DirWatcher { _inner: watcher, missing }))
 }
 
 /// `notify` のイベント 1 件（パス 1 つ分）を `WatchEvent` に変換する。
