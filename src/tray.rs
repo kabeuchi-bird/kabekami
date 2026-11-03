@@ -87,7 +87,7 @@ fn embedded_icon() -> ksni::Icon {
         .into_rgba8();
     let (width, height) = img.dimensions();
     let mut data = img.into_raw();
-    for px in data.chunks_exact_mut(4) {
+    for px in data.as_chunks_mut::<4>().0 {
         px.rotate_right(1); // RGBA -> ARGB
     }
     ksni::Icon { width: width as i32, height: height as i32, data }
