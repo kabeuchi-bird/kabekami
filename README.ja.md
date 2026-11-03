@@ -1,5 +1,7 @@
 > [English README is here / 英語版はこちら](README.md)
 
+<img src="assets/kabekami.svg" alt="" width="96" align="right">
+
 # kabekami（壁紙）
 
 KDE Plasma 向け壁紙ローテーションデーモン。Rust 製。
@@ -33,6 +35,10 @@ cd kabekami
 cargo build --release
 sudo install -m755 target/release/kabekami        /usr/local/bin/
 sudo install -m755 target/release/kabekami-config /usr/local/bin/
+# ランチャー項目とアイコン
+sudo install -Dm644 packaging/aur/kabekami-git/kabekami-config.desktop /usr/local/share/applications/kabekami-config.desktop
+sudo install -Dm644 assets/kabekami.svg /usr/local/share/icons/hicolor/scalable/apps/kabekami.svg
+sudo install -Dm644 assets/kabekami-symbolic.svg /usr/local/share/icons/hicolor/symbolic/apps/kabekami-symbolic.svg
 ```
 
 ### AUR（Arch Linux）

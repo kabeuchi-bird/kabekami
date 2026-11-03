@@ -38,6 +38,10 @@ Online sources live in `src/provider/` (bing, unsplash, wallhaven, reddit) shari
 
 Persistence under `~/.config/kabekami/`: `config.toml` (user settings), `state.toml` (pause + current wallpaper, read once at startup, managed by `state.rs`), `blacklist.txt` (`blacklist.rs`). Processed images cache in `~/.cache/kabekami/`.
 
+### Icons
+
+`assets/kabekami.svg` is the app icon (launcher, notifications, window) and `assets/kabekami-symbolic.svg` is the tray icon, which follows the Plasma theme colour through `ColorScheme-Text`. `assets/kabekami.png` is embedded in both binaries (X11 window icon, tray fallback when the icon isn't installed); regenerate it after editing the SVG: `rsvg-convert -w 256 -h 256 assets/kabekami.svg -o assets/kabekami.png`.
+
 ### i18n
 
 UI strings are TOML files (`crates/kabekami-common/i18n/ja.toml`), layered at runtime: `/usr/share/kabekami/i18n/` < `~/.config/kabekami/i18n/` < `$KABEKAMI_I18N_DIR`, so new languages need no rebuild. Any new UI string must be added through this system, not hardcoded.
