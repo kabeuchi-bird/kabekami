@@ -73,6 +73,8 @@ struct JsonOutput {
     priority: Option<u32>,
     /// 優先度が無い古い kscreen の場合のプライマリ指定。
     primary: bool,
+    /// KScreen の `Output::Rotation`（1 = なし, 2 = 左, 4 = 上下反転, 8 = 右）。
+    rotation: u32,
     #[serde(rename = "currentModeId")]
     current_mode_id: Option<String>,
     modes: Vec<JsonMode>,
@@ -125,11 +127,14 @@ fn parse_json_monitors(cfg: &KScreenJson) -> Vec<Monitor> {
                 );
                 return None;
             }
-            Some(Monitor {
-                name: o.name.clone(),
-                width: mode.size.width,
-                height: mode.size.height,
-            })
+            // モードの大きさは回転前のもの。90° 回した（縦置きの）モニターは
+            // 縦横を入れ替えないと、横長の壁紙を作ってしまう。
+            let (width, height) = if matches!(o.rotation, 2 | 8) {
+                (mode.size.height, mode.size.width)
+            } else {
+                (mode.size.width, mode.size.height)
+            };
+            Some(Monitor { name: o.name.clone(), width, height })
         })
         .collect()
 }
@@ -165,6 +170,19 @@ mod tests {
             }]
         }"#;
         assert_eq!(json_first(text), Some((2560, 1440)));
+    }
+
+    /// 縦置き（左右 90° 回転）は縦横を入れ替える。上下反転と回転なしはそのまま。
+    #[test]
+    fn json_swaps_size_for_rotated_outputs() {
+        for (rotation, expected) in [(1, (2560, 1440)), (2, (1440, 2560)), (4, (2560, 1440)), (8, (1440, 2560))] {
+            let text = format!(
+                r#"{{"outputs": [{{"name": "DP-1", "enabled": true, "rotation": {rotation},
+                    "currentModeId": "m",
+                    "modes": [{{"id": "m", "size": {{"width": 2560, "height": 1440}}}}]}}]}}"#
+            );
+            assert_eq!(json_first(&text), Some(expected), "rotation {rotation}");
+        }
     }
 
     #[test]

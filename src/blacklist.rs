@@ -54,10 +54,22 @@ impl Blacklist {
         if !self.paths.insert(path_buf.clone()) {
             return true;
         }
-        let content = self.serialize();
+        let line = format!("{}\n", path.display());
         let file_path = self.file_path.clone();
         let saved = crate::state::save_offloaded(
             move || {
+                // メモリ上の集合を書き出すのではなく、ファイルを読み直して 1 行足す。
+                // 動作中に手で編集（解除）された内容を、起動時の内容で潰さないため。
+                // 手での編集がデーモンに反映されるのは次の起動から。
+                let mut content = match std::fs::read_to_string(&file_path) {
+                    Ok(s) => s,
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
+                    Err(e) => return Err(e.into()),
+                };
+                if !content.is_empty() && !content.ends_with('\n') {
+                    content.push('\n');
+                }
+                content.push_str(&line);
                 kabekami_common::atomic_write::atomic_write(&file_path, content.as_bytes())?;
                 Ok(())
             },
@@ -68,14 +80,6 @@ impl Blacklist {
             self.paths.remove(&path_buf);
         }
         saved
-    }
-
-    /// ファイルに書き出す内容（1 行 1 パス）。
-    fn serialize(&self) -> String {
-        self.paths
-            .iter()
-            .map(|p| format!("{}\n", p.display()))
-            .collect()
     }
 }
 
@@ -95,6 +99,23 @@ mod tests {
 
         let reloaded = Blacklist::load(dir.path()).unwrap();
         assert!(reloaded.contains(path), "読み直しても除外され続ける");
+    }
+
+    /// 動作中に手で消した行を、次の追加で書き戻さない。
+    #[tokio::test]
+    async fn add_keeps_manual_edits_to_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bl = Blacklist::load(dir.path()).unwrap();
+        assert!(bl.add(Path::new("/pics/a.jpg")).await);
+
+        // 手で a を解除し、c を足した（末尾の改行なし）
+        std::fs::write(dir.path().join("blacklist.txt"), "/pics/c.jpg").unwrap();
+        assert!(bl.add(Path::new("/pics/b.jpg")).await);
+
+        let reloaded = Blacklist::load(dir.path()).unwrap();
+        assert!(!reloaded.contains(Path::new("/pics/a.jpg")), "解除した行が戻っている");
+        assert!(reloaded.contains(Path::new("/pics/b.jpg")));
+        assert!(reloaded.contains(Path::new("/pics/c.jpg")));
     }
 
     /// 登録済みのパスは書き込みを起こさない（連打で fsync を繰り返さない）。

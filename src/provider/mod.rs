@@ -33,6 +33,20 @@ pub struct FetchContext {
 pub struct FetchResult {
     pub provider: String,
     pub new_paths: Vec<PathBuf>,
+    /// `new_paths` のうち今回ダウンロードした枚数（取得通知に出す数）。
+    /// 呼び出し側で「一覧に増えた数」を数えると、監視イベントが先に追加して
+    /// いるので常に 0 になる。
+    pub downloaded: usize,
+}
+
+/// `dir` 直下のパス一覧（取得前からあったファイルを見分けるため）。読めなければ空。
+async fn list_files(dir: &Path) -> std::collections::HashSet<PathBuf> {
+    let mut files = std::collections::HashSet::new();
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return files };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        files.insert(entry.path());
+    }
+    files
 }
 
 /// 各プロバイダーを並列確認し、再取得が必要なものだけフェッチして結果を返す。
@@ -86,12 +100,17 @@ async fn fetch_if_due(
     let provider_name = cfg.provider.to_string();
     tracing::info!("provider {}: fetching…", provider_name);
 
+    let existing = list_files(&dir).await;
     match fetch_one(cfg, &dir, client, ctx).await {
         Ok(paths) if !paths.is_empty() => {
+            let downloaded = paths.iter().filter(|p| !existing.contains(*p)).count();
             prune_dir(&dir, &paths, cfg.provider.name()).await;
             mark_fetch_done(cfg).await;
-            tracing::info!("provider {}: {} image(s) available", provider_name, paths.len());
-            Some(FetchResult { provider: provider_name, new_paths: paths })
+            tracing::info!(
+                "provider {}: {} image(s) available ({} new)",
+                provider_name, paths.len(), downloaded
+            );
+            Some(FetchResult { provider: provider_name, new_paths: paths, downloaded })
         }
         Ok(_) => {
             tracing::warn!(
@@ -130,9 +149,16 @@ fn fetch_fingerprint(cfg: &OnlineSourceConfig) -> String {
     )
 }
 
-/// `.last_fetch` を確認して再取得が必要かどうかを返す。
+/// 取得記録のパス。プロバイダーごとに分ける。1 つの `.last_fetch` を共有すると、
+/// 別のプロバイダーと同じ `download_dir` を使ったとき互いの記録を「設定が
+/// 変わった」と読んで、確認のたびに取り直し続ける。
+fn stamp_path(cfg: &OnlineSourceConfig) -> PathBuf {
+    cfg.resolved_download_dir().join(format!(".last_fetch_{}", cfg.provider))
+}
+
+/// 取得記録を確認して再取得が必要かどうかを返す。
 async fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
-    let stamp = cfg.resolved_download_dir().join(".last_fetch");
+    let stamp = stamp_path(cfg);
     // 無い（初回）・読めない・設定が変わった・mtime が取れないときは取得する
     if tokio::fs::read_to_string(&stamp).await.ok() != Some(fetch_fingerprint(cfg)) {
         return true;
@@ -140,7 +166,7 @@ async fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
     let Ok(modified) = tokio::fs::metadata(&stamp).await.and_then(|m| m.modified()) else {
         return true;
     };
-    let interval_secs = cfg.effective_interval_hours() * 3600;
+    let interval_secs = cfg.effective_interval_hours().saturating_mul(3600);
     let elapsed = SystemTime::now().duration_since(modified).unwrap_or_default();
     elapsed.as_secs() >= interval_secs
 }
@@ -150,7 +176,8 @@ async fn is_fetch_due(cfg: &OnlineSourceConfig) -> bool {
 ///
 /// 名前で絞るのは、`download_dir` がユーザーの画像フォルダや他のプロバイダーと
 /// 重なっていても、自分が落としたファイル以外を消さないため（ゴミ箱を経由しない
-/// 完全削除なので、ここを広げると取り返しがつかない）。`.tmp` 一時ファイルは残す。
+/// 完全削除なので、ここを広げると取り返しがつかない）。途中で落ちて残った `.tmp`
+/// 一時ファイルも消す（取得が終わってから呼ぶので、書いている最中のものは無い）。
 /// フェッチ成功後に呼び出すことで、`count` を超えた古い画像を自動的に除去する。
 async fn prune_dir(dir: &Path, keep: &[PathBuf], provider: &str) {
     let prefix = format!("{provider}_");
@@ -159,7 +186,7 @@ async fn prune_dir(dir: &Path, keep: &[PathBuf], provider: &str) {
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !name.starts_with(&prefix) || name.ends_with(".tmp") {
+        if !name.starts_with(&prefix) {
             continue;
         }
         if !keep_set.contains(&path) {
@@ -174,7 +201,7 @@ async fn prune_dir(dir: &Path, keep: &[PathBuf], provider: &str) {
 
 /// `.last_fetch` タイムスタンプを更新する（画像を 1 枚以上取得できたときのみ呼ぶこと）。
 async fn mark_fetch_done(cfg: &OnlineSourceConfig) {
-    let stamp = cfg.resolved_download_dir().join(".last_fetch");
+    let stamp = stamp_path(cfg);
     if let Err(e) = tokio::fs::write(&stamp, fetch_fingerprint(cfg)).await {
         tracing::warn!("provider {}: failed to write last_fetch stamp: {}", cfg.provider, e);
     }
@@ -715,7 +742,8 @@ mod download_tests {
         super::prune_dir(d, &[d.join("bing_new.jpg")], "bing").await;
 
         assert!(!d.join("bing_old.jpg").exists(), "自分の古い画像は消す");
-        for name in ["bing_new.jpg", "bing_new.tmp", "holiday.jpg", "reddit_x.jpg", ".last_fetch"] {
+        assert!(!d.join("bing_new.tmp").exists(), "残った一時ファイルも消す");
+        for name in ["bing_new.jpg", "holiday.jpg", "reddit_x.jpg", ".last_fetch"] {
             assert!(d.join(name).exists(), "{name} は残すべき");
         }
     }

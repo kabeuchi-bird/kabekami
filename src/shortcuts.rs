@@ -29,7 +29,17 @@ trait KGlobalAccel {
     /// `UnknownMethod` エラーになる）。
     #[zbus(name = "doRegister")]
     fn do_register(&self, action_id: Vec<String>) -> zbus::Result<()>;
+
+    /// アクションのキーを設定し、現在のキーを返す。`flags` は KGlobalAccel の
+    /// `SetShortcutFlag`（`SET_PRESENT` を参照）。
+    #[zbus(name = "setShortcut")]
+    fn set_shortcut(&self, action_id: Vec<String>, keys: Vec<i32>, flags: u32) -> zbus::Result<Vec<i32>>;
 }
+
+/// `SetShortcutFlag::SetPresent`。アクションを「提供中」にしてキーを grab させる。
+/// `NoAutoloading` を付けないので、ユーザーが割り当て済みのキーはそのまま使われ、
+/// 渡した空のキーは未割り当ての初回だけ効く（= デフォルトキーなし）。
+const SET_PRESENT: u32 = 2;
 
 #[zbus::proxy(
     interface = "org.kde.kglobalaccel.Component",
@@ -85,7 +95,13 @@ pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>, lang: Lang) {
             COMPONENT.to_string(),
             display_name.to_string(),
         ];
-        if let Err(e) = accel.do_register(id).await {
+        // `doRegister` だけではアクションが present にならず、キーを割り当てても
+        // grab されない（設定にも保存されない）。`setShortcut` まで呼んで有効にする。
+        let registered = async {
+            accel.do_register(id.clone()).await?;
+            accel.set_shortcut(id, Vec::new(), SET_PRESENT).await
+        };
+        if let Err(e) = registered.await {
             tracing::warn!("shortcuts: failed to register {}: {}", action_id, e);
         }
     }

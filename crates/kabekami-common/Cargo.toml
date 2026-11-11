@@ -2,6 +2,7 @@
 name = "kabekami-common"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 description = "Shared types and image processing for kabekami"
 license = "MIT"
 

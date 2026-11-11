@@ -100,6 +100,15 @@ impl PlasmaShell {
     }
 }
 
+/// パスを `file://` URL にする。`#` `?` `%` や空白を含むパスでも URL として
+/// 正しく読まれるようパーセントエンコードする。絶対パスでなければ（呼び出し側は
+/// 絶対パスしか渡さない）そのまま繋ぐ。
+pub fn file_url(path: &Path) -> String {
+    reqwest::Url::from_file_path(path)
+        .map(String::from)
+        .unwrap_or_else(|()| format!("file://{}", path.display()))
+}
+
 /// パスを JS 文字列リテラル内で安全に使えるようエスケープする。
 fn escape_js_string(s: &str) -> String {
     s.replace('\\', "\\\\")
@@ -116,9 +125,9 @@ async fn set_wallpaper_dbus(entries: &[(usize, PathBuf)], conn: &zbus::Connectio
     let map_entries: String = entries
         .iter()
         .map(|(idx, path)| {
-            let escaped = escape_js_string(&path.to_string_lossy());
+            let escaped = escape_js_string(&file_url(path));
             let key = if single { "*".to_string() } else { idx.to_string() };
-            format!("\"{key}\": \"file://{escaped}\"")
+            format!("\"{key}\": \"{escaped}\"")
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -169,4 +178,16 @@ fn set_wallpaper_cli(path: &Path) -> Result<()> {
 
     tracing::info!("wallpaper applied via CLI: {}", path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// URL で意味を持つ文字を含むパスも、そのファイルを指す URL になる。
+    #[test]
+    fn file_url_percent_encodes_special_characters() {
+        assert_eq!(file_url(Path::new("/c/ab.webp")), "file:///c/ab.webp");
+        assert_eq!(file_url(Path::new("/c/a #1?/50%.webp")), "file:///c/a%20%231%3F/50%25.webp");
+    }
 }

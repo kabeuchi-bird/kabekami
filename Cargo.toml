@@ -15,6 +15,7 @@ tracing = "0.1"
 name = "kabekami"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.89"
 description = "KDE Plasma wallpaper rotation tool with Variety-inspired BlurPad display mode"
 license = "MIT"
 

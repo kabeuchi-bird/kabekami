@@ -55,14 +55,28 @@ fn setup_fonts(ctx: &egui::Context) {
         "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
     ];
 
-    let Some(data) = FONT_PATHS.iter().find_map(|p| std::fs::read(p).ok()) else {
+    // 上の場所に無ければ（他のディストリビューション・別のフォント）fontconfig に
+    // 日本語を表示できるフォントを尋ねる。`.ttc` は中の何番目かも要る。
+    let found = FONT_PATHS
+        .iter()
+        .find_map(|p| Some((std::fs::read(p).ok()?, 0)))
+        .or_else(|| {
+            let out = std::process::Command::new("fc-match")
+                .args(["-f", "%{file}\n%{index}", "sans:lang=ja:scalable=true"])
+                .output()
+                .ok()?;
+            let text = String::from_utf8(out.stdout).ok()?;
+            let (file, index) = text.split_once('\n')?;
+            Some((std::fs::read(file).ok()?, index.trim().parse().ok()?))
+        });
+    let Some((data, index)) = found else {
         return;
     };
 
     let mut fonts = egui::FontDefinitions::default();
-    fonts
-        .font_data
-        .insert("NotoSansCJK".to_owned(), egui::FontData::from_owned(data));
+    let mut font = egui::FontData::from_owned(data);
+    font.index = index;
+    fonts.font_data.insert("NotoSansCJK".to_owned(), font);
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
         fonts
             .families
@@ -855,7 +869,7 @@ impl KabekamiApp {
                     // 保持枚数
                     ui.horizontal(|ui| {
                         ui.label(s.count);
-                        ui.add(egui::DragValue::new(&mut oc.count).range(1..=100));
+                        ui.add(egui::DragValue::new(&mut oc.count).range(1..=oc.provider.max_count()));
                     });
                     // 再取得間隔
                     ui.horizontal(|ui| {

@@ -44,7 +44,10 @@ async fn main() -> Result<()> {
         return send_to_daemon(method).await;
     }
 
-    let mut config = Config::load().context("failed to load config")?;
+    let mut config = match Config::load().context("failed to load config") {
+        Ok(c) => c,
+        Err(e) => return Err(notify_fatal(e).await),
+    };
 
     // tracing subscriber を初期化。WARN は常に warn_rx へ流れ、通知するかは
     // ループ側で `config.ui.warn_notify` を見て決める（再起動なしで ON/OFF できる）
@@ -63,8 +66,12 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let mut blacklist = blacklist::Blacklist::load(&kabekami_config_dir)
-        .context("failed to load blacklist")?;
+    let mut blacklist = match blacklist::Blacklist::load(&kabekami_config_dir)
+        .context("failed to load blacklist")
+    {
+        Ok(b) => b,
+        Err(e) => return Err(notify_fatal(e).await),
+    };
 
     // スキャン対象と監視対象は同一。1 つの一覧を両方で使う。
     // 走査とモニター検出（kscreen-doctor の再試行で数秒かかりうる）は独立なので並行に。
@@ -288,6 +295,9 @@ async fn main() -> Result<()> {
         }};
     }
 
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .context("failed to install SIGTERM handler")?;
+
     tracing::info!("entering main loop (interval={}s)", config.rotation.interval_secs);
 
     loop {
@@ -299,27 +309,23 @@ async fn main() -> Result<()> {
             }
 
             Some(result) = online_rx.recv() => {
-                let provider::FetchResult { provider, new_paths } = result;
+                let provider::FetchResult { provider, new_paths, downloaded } = result;
                 if !new_paths.is_empty() {
                     let was_empty = scheduler.current().is_none() && scheduler.peek_next().is_none();
-                    // 取得済みの画像も `new_paths` に入るので、実際に増えた分だけ数える
-                    let mut added = 0;
+                    // ダウンロード先は監視対象なので、新しい画像はたいてい監視イベントが
+                    // 先に追加している。ここで足すのは監視を張れていない場合の分。
+                    // 通知の枚数はここで増えた数ではなく `downloaded` を使う。
                     for path in new_paths {
-                        if !blacklist.contains(&path) && scheduler.add_image(path) {
-                            added += 1;
+                        if !blacklist.contains(&path) {
+                            scheduler.add_image(path);
                         }
                     }
-                    tracing::info!(
-                        "provider {}: {} new image(s) added to rotation",
-                        provider,
-                        added
-                    );
                     sync_tray_current(&tray_handle, &scheduler).await;
-                    if added > 0 && config.ui.notify_fetch {
+                    if downloaded > 0 && config.ui.notify_fetch {
                         let strings = i18n::strings(lang);
                         let body = strings.notify_fetch_body
                             .replace("{provider}", &provider)
-                            .replace("{count}", &added.to_string());
+                            .replace("{count}", &downloaded.to_string());
                         notifier.info(strings.notify_fetch_title, &body).await;
                     }
                     if was_empty {
@@ -361,7 +367,7 @@ async fn main() -> Result<()> {
                         scheduler.paused = !scheduler.paused;
                         let paused = scheduler.paused;
                         tracing::info!("{}", if paused { "paused" } else { "resumed" });
-                        state_writer.persist(paused, scheduler.current().map(|p| p.as_path())).await;
+                        state_writer.set_paused(paused).await;
                         update_tray(&tray_handle, move |t| t.paused = paused).await;
                     }
 
@@ -457,7 +463,15 @@ async fn main() -> Result<()> {
                         // 単一ワーカーの外へ出す。
                         tokio::task::spawn_blocking(|| {
                             match std::process::Command::new("kabekami-config").spawn() {
-                                Ok(_) => tracing::info!("launched kabekami-config"),
+                                Ok(mut child) => {
+                                    tracing::info!("launched kabekami-config");
+                                    // 終了を回収しないとゾンビが残る。ブロッキングプールで
+                                    // 待つと、GUI を開いたままの終了がランタイムの停止待ちで
+                                    // 止まるので、切り離したスレッドで待つ。
+                                    std::thread::spawn(move || {
+                                        let _ = child.wait();
+                                    });
+                                }
                                 Err(e) => tracing::warn!("failed to launch kabekami-config: {}", e),
                             }
                         });
@@ -554,9 +568,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // 監視がイベントを落とした（キューの溢れ等）。差分が分からないので
-            // 最後に走査した対象を丸ごと走査し直す（#61）。空・失敗のときは
-            // リロードと同じく一覧を据え置く。
+            // 監視を張れなかったディレクトリが現れていたら再走査を要求する。
             _ = watch_retry.tick() => {
                 let appeared = match &watcher_handle {
                     Some(w) => w.missing.iter().any(|d| d.is_dir()),
@@ -568,6 +580,9 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // 監視がイベントを落とした（キューの溢れ等）か、上の定期確認からの要求。
+            // 差分が分からないので最後に走査した対象を丸ごと走査し直す（#61）。
+            // 空・失敗のときはリロードと同じく一覧を据え置く。
             _ = rescan.notified() => {
                 tracing::info!("rescanning sources");
                 match scan_images(&scanned_dirs, scanned_recursive, &blacklist).await {
@@ -602,6 +617,12 @@ async fn main() -> Result<()> {
 
             _ = signal::ctrl_c() => {
                 tracing::info!("received Ctrl-C, shutting down");
+                break;
+            }
+
+            // ログアウトや `systemctl --user stop` は SIGTERM で来る
+            _ = sigterm.recv() => {
+                tracing::info!("received SIGTERM, shutting down");
                 break;
             }
         }
@@ -651,6 +672,19 @@ async fn spawn_dir_watcher_offloaded(
             (tokio::sync::mpsc::channel(1).1, None)
         }
     }
+}
+
+/// 起動を続けられないエラーをデスクトップ通知に出してから返す。
+///
+/// 自動起動では標準エラーが目に入らず、トレイも出る前なので、通知しないと
+/// 「壊れた config.toml のせいで起動していない」ことに気づけない。設定を読めて
+/// いない段階なので、言語は環境変数か既定（英語）。通知できなくても諦める。
+async fn notify_fatal(e: anyhow::Error) -> anyhow::Error {
+    let lang = std::env::var("KABEKAMI_LANG")
+        .map(|v| i18n::Lang::from_code(v.trim()))
+        .unwrap_or_default();
+    notify::Notifier::new(lang).await.error(&format!("{e:#}"), None).await;
+    e
 }
 
 /// tracing subscriber を初期化する。`WarnNotifyLayer` は常時インストールする。
@@ -990,21 +1024,17 @@ struct ApplyCtx<'a> {
 
 /// apply + 通知 + tray 更新 + prefetch 開始 + 画面構成再検出トリガーをまとめて行う。
 ///
-/// 元画像が消えていたら（監視が拾えなかった移動・削除）一覧から外して次へ進む。
-/// 外さないと、順番が回ってくるたびに同じエラー通知が出続ける（#61）。
+/// 元画像を読めなければ（監視が拾えなかった移動・削除、壊れたファイル）一覧から
+/// 外して次へ進む。外さないと、順番が回ってくるたびに同じエラー通知が出続け
+/// （#61）、画面に出ていない画像が「現在」としてゴミ箱などの操作対象になる。
+/// 外すのはこのデーモンの動作中だけで、再走査や書き直し（監視）で戻る。
 /// 1 回ごとに 1 枚減るので、このループは必ず終わる。
 async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
     let mut path = path.to_path_buf();
     let result = loop {
         match apply(&path, ctx.screens, ctx.config, ctx.cache, ctx.plasma).await {
-            Err(e) if is_not_found(&e) => {
-                // NotFound はキャッシュの書き込み（置き場所の削除と競合した場合など）
-                // からも来る。元画像が残っているなら一覧から外さない
-                // （確かめられないときも外さない）。
-                if tokio::fs::try_exists(&path).await.unwrap_or(true) {
-                    break Err(e);
-                }
-                tracing::warn!("source image is gone, dropping it: {}", path.display());
+            Err(e) if e.downcast_ref::<prefetch::SourceUnreadable>().is_some() => {
+                tracing::warn!("dropping unreadable image {}: {:#}", path.display(), e);
                 ctx.scheduler.remove_image(&path);
                 match ctx.scheduler.next() {
                     Some(next) => path = next,
@@ -1038,14 +1068,6 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
             let _ = tx.send(());
         }
     }
-}
-
-/// エラーの原因が「ファイルが無い」か。
-fn is_not_found(e: &anyhow::Error) -> bool {
-    e.chain().any(|c| {
-        c.downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-    })
 }
 
 /// トレイがあれば状態を書き換える。トレイが無い環境では何もしない。
@@ -1342,16 +1364,6 @@ mod tests {
                 "{cmd:?} はスロットリングの対象外であるべき"
             );
         }
-    }
-
-    /// 元画像が消えたことを、読み込みエラーの chain から判別できる（#61）。
-    /// 判別できないと、消えた画像を一覧から外せずエラー通知が出続ける。
-    #[test]
-    fn missing_source_is_detected_as_not_found() {
-        let e = kabekami_common::display_mode::load_oriented(Path::new("/nonexistent/gone.jpg"))
-            .unwrap_err();
-        assert!(is_not_found(&e), "{e:#}");
-        assert!(!is_not_found(&anyhow::anyhow!("decode failed")));
     }
 
     /// Next → 400ms → SetMode → 200ms → Next の最後の Next が通ること。

@@ -91,6 +91,19 @@ pub async fn process_single_flight(key: &CacheKey, cache: &Arc<Cache>) -> anyhow
     }
 }
 
+/// 元画像を読めなかった（無い・壊れている・画像でない）ことを示すエラーの目印。
+///
+/// 適用側はこれを見て、その画像を一覧から外して次へ進む。キャッシュの書き込みや
+/// Plasma への反映の失敗には付かないので、画像のせいでない失敗では外さない。
+#[derive(Debug)]
+pub struct SourceUnreadable;
+
+impl std::fmt::Display for SourceUnreadable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cannot read source image")
+    }
+}
+
 /// `CacheKey` で指定された画像を読み込み・加工してキャッシュに保存する（ブロッキング処理）。
 ///
 /// この関数は `spawn_blocking` から呼ばれることを想定している。
@@ -108,7 +121,7 @@ pub fn process_for_cache(key: &CacheKey, cache: &Cache) -> anyhow::Result<PathBu
 
     tracing::debug!("prefetch: processing {}", src.display());
 
-    let img = crate::display_mode::load_oriented(src)?;
+    let img = anyhow::Context::context(crate::display_mode::load_oriented(src), SourceUnreadable)?;
 
     let processed = crate::display_mode::process(
         &img,
@@ -181,6 +194,21 @@ mod tests {
             handle.await.unwrap();
         }
         assert!(stored.exists(), "加工結果はそのまま");
+    }
+
+    /// 元画像が無い・壊れている失敗には目印が付く（適用側が一覧から外す判断に使う）。
+    /// 付かないと、壊れた画像が順番のたびにエラー通知を出し続ける。
+    #[test]
+    fn unreadable_sources_are_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::new(dir.path().join("cache"), 0);
+        let broken = dir.path().join("broken.jpg");
+        std::fs::write(&broken, b"not an image").unwrap();
+
+        for src in [broken.to_str().unwrap(), "/nonexistent/gone.jpg"] {
+            let e = process_for_cache(&key(src), &cache).unwrap_err();
+            assert!(e.downcast_ref::<SourceUnreadable>().is_some(), "{e:#}");
+        }
     }
 
     /// 同じ出力パスの加工権は 1 つだけ。2 人目以降は待ち側になる。

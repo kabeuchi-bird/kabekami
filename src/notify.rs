@@ -48,7 +48,7 @@ impl Notifier {
     /// `resident = true` により通知は自動消去されない。
     /// 前回の通知を `replaces_id` で置き換えるため、連続エラーでも通知は 1 件に留まる。
     pub async fn error(&mut self, body: &str, origin_path: Option<&Path>) {
-        let url = origin_path.map(|p| format!("file://{}", p.display()));
+        let url = origin_path.map(crate::plasma::file_url);
         let mut hints: HashMap<String, OwnedValue> = HashMap::new();
         insert_hint(&mut hints, "resident", Value::Bool(true));
         insert_hint(&mut hints, "category", Value::Str("device.error".into()));

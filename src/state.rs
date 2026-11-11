@@ -83,6 +83,14 @@ impl StateWriter {
         Self { dir, last: initial }
     }
 
+    /// 一時停止だけを書き換える。現在の壁紙は最後に記録したもののまま
+    /// （適用に失敗した直後は `Scheduler::current` が画面に出ていない画像を
+    /// 指すので、そちらを書くと再起動後に食い違う）。
+    pub async fn set_paused(&mut self, paused: bool) {
+        let current = self.last.current.clone();
+        self.persist(paused, current.as_deref()).await;
+    }
+
     /// 状態が前回と変わっていれば保存する（壁紙適用のたびに呼ばれる）。
     ///
     /// 書き込みは `save_offloaded` 経由で `spawn_blocking` に逃がす。

@@ -21,9 +21,12 @@ post_install() {
     local config_file="$user_home/.config/kabekami/config.toml"
 
     if [ ! -f "$config_file" ]; then
-        install -Dm644 -o "$real_user" \
+        # Run as the user: `install -D` as root would leave ~/.config/kabekami
+        # owned by root (the daemon could not write its state there). 0600 because
+        # the file may later hold API keys.
+        runuser -u "$real_user" -- install -Dm600 \
             /usr/share/doc/kabekami-git/config.toml \
-            "$config_file"
+            "$config_file" || return
         echo "  -> Installed default config for $real_user: $config_file"
         echo "     Japanese reference: /usr/share/doc/kabekami-git/config.ja.toml"
     fi

@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 /// 壁紙切り替え間隔の下限（秒）。
 pub const MIN_INTERVAL_SECS: u64 = 5;
+/// 壁紙切り替え間隔の上限（秒、1 年）。極端な値は `Instant` への加算があふれて
+/// デーモンが panic する。
+pub const MAX_INTERVAL_SECS: u64 = 365 * 24 * 3600;
 
 // 各セクションは `#[serde(default)]` で、欠けたキーを `Default` 実装の値で埋める。
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -269,6 +272,14 @@ impl Config {
             );
             self.rotation.interval_secs = MIN_INTERVAL_SECS;
         }
+        if self.rotation.interval_secs > MAX_INTERVAL_SECS {
+            tracing::warn!(
+                "interval_secs {} is above maximum {}, clamping",
+                self.rotation.interval_secs,
+                MAX_INTERVAL_SECS
+            );
+            self.rotation.interval_secs = MAX_INTERVAL_SECS;
+        }
 
         // f32 フィールドは TOML 直編集で `nan` / `inf` が入りうる。
         // 画像処理側の前提を壊さないよう、非有限値はデフォルトに戻して clamp する。
@@ -367,6 +378,16 @@ impl ProviderKind {
             Self::Bing => "bing",
             Self::Unsplash => "unsplash",
             Self::Wallhaven => "wallhaven",
+        }
+    }
+
+    /// 1 回の取得で扱える枚数の上限（API の制限）。取得側の切り詰めと GUI の
+    /// 入力範囲の両方がこれを使う。
+    pub fn max_count(self) -> u32 {
+        match self {
+            Self::Bing => 8,
+            Self::Unsplash => 30,
+            Self::Wallhaven => 24,
         }
     }
 }
@@ -643,6 +664,10 @@ max_size_mb = 123
         cfg.rotation.interval_secs = 1;
         cfg.normalize();
         assert_eq!(cfg.rotation.interval_secs, MIN_INTERVAL_SECS);
+
+        cfg.rotation.interval_secs = i64::MAX as u64;
+        cfg.normalize();
+        assert_eq!(cfg.rotation.interval_secs, MAX_INTERVAL_SECS);
     }
 
     #[test]

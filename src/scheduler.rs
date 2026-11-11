@@ -146,24 +146,24 @@ impl Scheduler {
         true
     }
 
-    /// 画像リストを丸ごと差し替えつつ、一時停止状態と現在の壁紙を引き継ぐ
-    /// （設定リロードで使う）。
+    /// 画像リストを `images` に合わせる（設定リロード・再走査で使う）。
     ///
-    /// キューと履歴は新しいリストに対して作り直す。現在の壁紙が新リストにも
-    /// 残っていれば `current` として復元する。
-    ///
-    /// 引き継ぐフィールドはここに明示的に列挙している。リロードをまたいで
-    /// 保持すべきフィールドを `Scheduler` に追加した場合は、ここにも追加すること
-    /// （漏らすと設定リロードのたびに既定値へ戻る、気づきにくい不具合になる）。
+    /// 作り直さずに差分だけ反映する。消えた画像を外し、増えた画像を足すので、
+    /// 残った画像の現在・履歴・未表示キュー・一時停止はそのまま。作り直すと、
+    /// 監視を張れない環境の定期再走査のたびに「前へ」の履歴と一巡が消える。
     pub fn rebuild(&mut self, images: Vec<PathBuf>, order: Order) {
-        let prev_current = self.current.map(|idx| self.images[idx].clone());
-        let paused = self.paused;
-
-        *self = Self::new(images, order);
-
-        self.paused = paused;
-        if let Some(ref cur) = prev_current {
-            self.restore_current(cur);
+        {
+            let keep: HashSet<&Path> = images.iter().map(PathBuf::as_path).collect();
+            self.remove_matching(|p| !keep.contains(p));
+        }
+        let mut added = false;
+        for path in images {
+            added |= self.add_image(path);
+        }
+        self.set_order(order);
+        // 足した分は走査順（パス順）で末尾に並んでいるので、Random なら混ぜ直す
+        if added && self.order == Order::Random {
+            fastrand::shuffle(self.queue.make_contiguous());
         }
     }
 
@@ -557,6 +557,25 @@ mod tests {
         assert_eq!(s.current(), Some(&second), "current should not move");
     }
 
+    /// 再走査で一覧が少し変わっても、履歴と一巡の進み具合は残る。
+    #[test]
+    fn rebuild_keeps_history_and_does_not_requeue_shown_images() {
+        let all = paths(5);
+        let mut s = Scheduler::new(all[..4].to_vec(), Order::Sequential);
+        let first = s.next().unwrap();
+        let second = s.next().unwrap();
+
+        // 1 枚減って 1 枚増えた（表示済みの 2 枚は残る）
+        s.rebuild(vec![all[0].clone(), all[1].clone(), all[2].clone(), all[4].clone()], Order::Sequential);
+
+        assert_eq!(s.current(), Some(&second));
+        let rest: Vec<PathBuf> = std::iter::from_fn(|| (!s.queue.is_empty()).then(|| s.next().unwrap())).collect();
+        assert_eq!(rest, vec![all[2].clone(), all[4].clone()], "表示済みは一巡に戻らない");
+        s.prev();
+        s.prev();
+        assert_eq!(s.prev(), Some(first), "履歴が残っている");
+    }
+
     #[test]
     fn rebuild_drops_current_when_image_is_gone() {
         let all = paths(5);
@@ -599,8 +618,8 @@ mod tests {
         assert_eq!(s.remove_under(Path::new("/p/c.jpg")), 1, "ファイル自身も外せる");
     }
 
-    /// 取得通知の件数はこの戻り値で数える。既知の画像を `true` にすると、
-    /// 新しい画像が無くても「N 枚追加」と通知される。
+    /// 既知の画像は足さずに `false` を返す（監視イベントと取得結果の両方から
+    /// 同じ画像が届く）。
     #[test]
     fn add_image_reports_whether_the_image_was_new() {
         let mut s = Scheduler::new(paths(2), Order::Sequential);
