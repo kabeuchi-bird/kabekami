@@ -41,52 +41,42 @@ trait FreedesktopDBus {
 ///   ログアウトでは来ない）
 /// - Plasma 再起動検知 → `TrayCmd::PlasmaRestarted`
 ///
-/// D-Bus が利用できない環境では警告を出してサイレントに無効化される。
+/// 2 つは別のバス（システム／セッション）なので独立に起動する。片方のバスが
+/// 使えなくても、もう片方の検知は動く。使えない側は警告を出して無効になる。
 pub async fn spawn_session_watcher(tx: UnboundedSender<TrayCmd>) {
-    if let Err(e) = try_spawn(tx).await {
-        tracing::warn!("session watcher: unavailable ({})", e);
+    if let Err(e) = spawn_shutdown_watcher(tx.clone()).await {
+        tracing::warn!("session watcher: shutdown detection unavailable ({})", e);
+    }
+    if let Err(e) = spawn_plasma_watcher(tx).await {
+        tracing::warn!("session watcher: Plasma restart detection unavailable ({})", e);
     }
 }
 
-async fn try_spawn(tx: UnboundedSender<TrayCmd>) -> zbus::Result<()> {
+async fn spawn_shutdown_watcher(tx: UnboundedSender<TrayCmd>) -> zbus::Result<()> {
     // login1 はシステムバス上にある
-    let sys_conn = zbus::Connection::system().await?;
-    let session_conn = zbus::Connection::session().await?;
-    let shutdown_stream = Login1ManagerProxy::new(&sys_conn)
-        .await?
-        .receive_prepare_for_shutdown()
-        .await?;
-    let name_changed_stream = FreedesktopDBusProxy::new(&session_conn)
-        .await?
-        .receive_name_owner_changed()
-        .await?;
-
-    tracing::info!("session watcher active (login1 + NameOwnerChanged)");
-
+    let conn = zbus::Connection::system().await?;
+    let mut stream = Login1ManagerProxy::new(&conn).await?.receive_prepare_for_shutdown().await?;
     tokio::spawn(async move {
-        let mut shutdown_stream = shutdown_stream;
-        let mut name_changed_stream = name_changed_stream;
+        while let Some(signal) = stream.next().await {
+            if signal.args().is_ok_and(|args| *args.start()) {
+                tracing::info!("session watcher: PrepareForShutdown(true)");
+                let _ = tx.send(TrayCmd::Quit);
+                break;
+            }
+        }
+    });
+    Ok(())
+}
 
-        loop {
-            tokio::select! {
-                Some(signal) = shutdown_stream.next() => {
-                    if let Ok(args) = signal.args() {
-                        if *args.start() {
-                            tracing::info!("session watcher: PrepareForShutdown(true)");
-                            let _ = tx.send(TrayCmd::Quit);
-                            break;
-                        }
-                    }
-                }
-                Some(signal) = name_changed_stream.next() => {
-                    if let Ok(args) = signal.args() {
-                        if args.name() == "org.kde.plasmashell" && !args.new_owner().is_empty() {
-                            tracing::info!("session watcher: plasmashell restarted");
-                            let _ = tx.send(TrayCmd::PlasmaRestarted);
-                        }
-                    }
-                }
-                else => break,
+async fn spawn_plasma_watcher(tx: UnboundedSender<TrayCmd>) -> zbus::Result<()> {
+    let conn = zbus::Connection::session().await?;
+    let mut stream = FreedesktopDBusProxy::new(&conn).await?.receive_name_owner_changed().await?;
+    tokio::spawn(async move {
+        while let Some(signal) = stream.next().await {
+            let Ok(args) = signal.args() else { continue };
+            if args.name() == "org.kde.plasmashell" && !args.new_owner().is_empty() {
+                tracing::info!("session watcher: plasmashell restarted");
+                let _ = tx.send(TrayCmd::PlasmaRestarted);
             }
         }
     });

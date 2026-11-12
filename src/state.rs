@@ -75,12 +75,24 @@ where
 pub struct StateWriter {
     dir: PathBuf,
     last: DaemonState,
+    /// 最後に `persist` に渡された現在の壁紙。保存に失敗すると `last.current` は
+    /// 古いまま残るので、一時停止の保存ではこちらを使う（でないと 1 つ前の画像に戻る）。
+    applied: Option<PathBuf>,
 }
 
 impl StateWriter {
     /// 起動時に読み込んだ状態を「書き込み済みの内容」として初期化する。
     pub fn new(dir: PathBuf, initial: DaemonState) -> Self {
-        Self { dir, last: initial }
+        let applied = initial.current.clone();
+        Self { dir, last: initial, applied }
+    }
+
+    /// 一時停止だけを書き換える。現在の壁紙は最後に適用したもののまま
+    /// （適用に失敗した直後は `Scheduler::current` が画面に出ていない画像を
+    /// 指すので、そちらを書くと再起動後に食い違う）。
+    pub async fn set_paused(&mut self, paused: bool) {
+        let current = self.applied.clone();
+        self.persist(paused, current.as_deref()).await;
     }
 
     /// 状態が前回と変わっていれば保存する（壁紙適用のたびに呼ばれる）。
@@ -89,9 +101,10 @@ impl StateWriter {
     /// 保存に成功したときだけ「書き込み済みの内容」を更新するため、
     /// 失敗した場合は次回の呼び出しで再試行される。
     pub async fn persist(&mut self, paused: bool, current: Option<&Path>) {
+        self.applied = current.map(|p| p.to_path_buf());
         let next = DaemonState {
             paused,
-            current: current.map(|p| p.to_path_buf()),
+            current: self.applied.clone(),
         };
         if next == self.last {
             return;
@@ -149,6 +162,25 @@ mod tests {
         let loaded = DaemonState::load(dir.path());
         assert!(!loaded.paused);
         assert_eq!(loaded.current, None);
+    }
+
+    /// 適用後の保存に失敗しても、次の一時停止の保存では最後に適用した画像を書く。
+    #[tokio::test]
+    async fn pause_after_failed_save_keeps_last_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = PathBuf::from("/pics/a.jpg");
+        let b = PathBuf::from("/pics/b.jpg");
+        // 保存先をファイルにして書き込みを失敗させる
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"").unwrap();
+        let mut w = StateWriter::new(blocker.clone(), DaemonState { paused: false, current: Some(a) });
+        w.persist(false, Some(&b)).await;
+
+        w.dir = dir.path().to_path_buf();
+        w.set_paused(true).await;
+        let loaded = DaemonState::load(dir.path());
+        assert!(loaded.paused);
+        assert_eq!(loaded.current, Some(b));
     }
 
     #[tokio::test]

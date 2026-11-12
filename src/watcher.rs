@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use notify::{
-    event::{ModifyKind, RenameMode},
+    event::{AccessKind, AccessMode, CreateKind, ModifyKind, RenameMode},
     EventKind, RecursiveMode, Watcher,
 };
 use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver};
@@ -132,25 +132,30 @@ pub fn spawn(
 
 /// `notify` のイベント 1 件（パス 1 つ分）を `WatchEvent` に変換する。
 ///
-/// - 画像の作成・移入は `Added`。
+/// - 画像は書き終わり（close）・移入で `Added`。作成の時点では中身がまだ無く、
+///   そこで拾うとコピー中のファイルを加工しに行ってデコードに失敗する。
+///   シンボリックリンクは作成だけで close が来ないので、作成で拾う。
 /// - ディレクトリの作成・移入は、`recursive` なら配下を走査して画像ごとに `Added`
 ///   （移入したディレクトリは中身のイベントが来ないため。#61）。
 /// - 削除・移出はパスの種類を問わず `Removed`（消えた後なのでディレクトリか
 ///   判別できない。受け取った側が配下ごと外す）。
 fn events_for(kind: EventKind, path: PathBuf, recursive: bool) -> Vec<WatchEvent> {
-    let appeared = matches!(
-        kind,
-        EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(RenameMode::To))
-    );
+    let created = matches!(kind, EventKind::Create(_));
+    let moved_in = matches!(kind, EventKind::Modify(ModifyKind::Name(RenameMode::To)));
     let vanished = matches!(
         kind,
         EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From))
     );
+    // シンボリックリンクとハードリンク（nlink > 1）は作成だけで close が来ないが、
+    // 中身は既に書き終わっているので作成で拾う。新規に書かれるファイルは nlink == 1。
+    let image_ready = moved_in
+        || matches!(kind, EventKind::Access(AccessKind::Close(AccessMode::Write)))
+        || (matches!(kind, EventKind::Create(CreateKind::File)) && is_link(&path));
     if vanished {
         vec![WatchEvent::Removed(path)]
-    } else if appeared && crate::scanner::is_image(&path) {
+    } else if image_ready && crate::scanner::is_image(&path) {
         vec![WatchEvent::Added(path)]
-    } else if appeared && recursive && path.is_dir() {
+    } else if (created || moved_in) && recursive && path.is_dir() {
         crate::scanner::scan(&[path], true)
             .unwrap_or_default()
             .into_iter()
@@ -159,6 +164,13 @@ fn events_for(kind: EventKind, path: PathBuf, recursive: bool) -> Vec<WatchEvent
     } else {
         Vec::new()
     }
+}
+
+/// 作成の時点で中身が揃っているリンク（シンボリックリンク・ハードリンク）か。
+fn is_link(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|m| m.file_type().is_symlink() || m.nlink() > 1)
 }
 
 /// 設定ファイル（`~/.config/kabekami/config.toml`）の変更を監視する。
@@ -242,7 +254,42 @@ pub fn spawn_config(config_path: &Path) -> (UnboundedReceiver<()>, Option<notify
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{CreateKind, RemoveKind};
+    use notify::event::RemoveKind;
+
+    /// 作成の時点ではまだ書きかけ。書き終わり（close）で初めて拾う。
+    #[test]
+    fn images_are_added_when_written_not_when_created() {
+        let img = PathBuf::from("/pics/a.jpg");
+        assert!(events_for(EventKind::Create(CreateKind::File), img.clone(), true).is_empty());
+        let closed = EventKind::Access(AccessKind::Close(AccessMode::Write));
+        assert_eq!(added(events_for(closed, img.clone(), true)), vec![img]);
+    }
+
+    /// シンボリックリンクは close が来ないので、作成で拾う。
+    #[test]
+    fn symlinked_images_are_added_on_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link.jpg");
+        std::os::unix::fs::symlink("/pics/a.jpg", &link).unwrap();
+        assert_eq!(
+            added(events_for(EventKind::Create(CreateKind::File), link.clone(), true)),
+            vec![link]
+        );
+    }
+
+    /// ハードリンクも close が来ないので、作成で拾う。
+    #[test]
+    fn hardlinked_images_are_added_on_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let orig = dir.path().join("a.jpg");
+        std::fs::write(&orig, b"x").unwrap();
+        let link = dir.path().join("b.jpg");
+        std::fs::hard_link(&orig, &link).unwrap();
+        assert_eq!(
+            added(events_for(EventKind::Create(CreateKind::File), link.clone(), true)),
+            vec![link]
+        );
+    }
 
     fn added(events: Vec<WatchEvent>) -> Vec<PathBuf> {
         let mut v: Vec<PathBuf> = events

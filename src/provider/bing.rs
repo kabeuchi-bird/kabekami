@@ -47,7 +47,7 @@ pub async fn fetch(
     ctx: FetchContext,
 ) -> Result<Vec<PathBuf>> {
     let mkt = cfg.locale.as_deref().unwrap_or("en-US");
-    let n = cfg.count.clamp(1, 8); // Bing API は最大 8 枚
+    let n = cfg.count.clamp(1, cfg.provider.max_count());
 
     let api_url = format!(
         "https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n={}&mkt={}",
@@ -61,8 +61,12 @@ pub async fn fetch(
     let mut available = Vec::new();
 
     for img in &resp.images {
-        // startdate はサーバー由来。ファイル名に使える文字だけ `image_path` が残す
-        let Some(dest) = image_path(dir, "bing", &img.startdate, "jpg") else { continue };
+        // ロケールと解像度も名前に入れる。日付だけだと、どちらかを変えても同じ日付の
+        // 画像が「取得済み」になって差し替わらない。startdate はサーバー由来だが、
+        // ファイル名に使える文字だけ `image_path` が残す。
+        let res = res_suffix.trim_start_matches('_').trim_end_matches(".jpg");
+        let id = format!("{}_{mkt}_{res}", img.startdate);
+        let Some(dest) = image_path(dir, "bing", &id, "jpg") else { continue };
 
         // `urlbase + res_suffix` を `base` 相対で resolve し、ホストが Bing 以外なら拒否する。
         // 単純な文字列連結だと `urlbase = "//attacker/foo"` で別ホストへ誘導されうるため。

@@ -67,7 +67,7 @@ pub async fn fetch(
         ("purity", purity.to_string()),
         ("categories", "111".to_string()), // general + anime + people
         ("atleast", "1920x1080".to_string()),
-        ("per_page", cfg.count.clamp(1, 24).to_string()),
+        ("per_page", cfg.count.clamp(1, cfg.provider.max_count()).to_string()),
     ];
     // キーはクエリ (`apikey`) ではなくヘッダで送る。reqwest のエラー表示は URL を
     // 含むため、クエリに載せると通信失敗の warn（と WARN 通知）にキーが出る（#57）。

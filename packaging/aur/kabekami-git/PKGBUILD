@@ -1,7 +1,7 @@
 # Maintainer: kabeuchi-bird <https://github.com/kabeuchi-bird>
 pkgname=kabekami-git
 pkgver=r125.69935d8
-pkgrel=6
+pkgrel=7
 pkgdesc="KDE Plasma wallpaper rotation daemon with multi-monitor support, online sources, and global shortcuts"
 arch=('x86_64' 'aarch64')
 url="https://github.com/kabeuchi-bird/kabekami"
@@ -27,7 +27,7 @@ source=(
 sha256sums=(
     'SKIP'
     '9a58f75de615d561305d497427950ffd9a58a1d25ca82b957d27fb1be0f1b678'
-    'df521c8ef87ca6bac10548d4d9d1867964c03fd096bce6812c3bbaa7bb132c95'
+    '294360c9969cc14df34ead964b889e75b94e49c9d40191d15ca26d2386640153'
 )
 
 pkgver() {
@@ -52,7 +52,7 @@ check() {
     cd "$pkgname"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
-    cargo test --release --locked
+    cargo test --release --locked --workspace
 }
 
 package() {

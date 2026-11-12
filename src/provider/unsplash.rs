@@ -43,8 +43,7 @@ pub async fn fetch(
 
     let query = cfg.query.as_deref().unwrap_or("wallpaper");
 
-    // count は 1〜30 の範囲（API 制限）
-    let count = cfg.count.clamp(1, 30);
+    let count = cfg.count.clamp(1, cfg.provider.max_count());
 
     // API キーは URL クエリ (`client_id`) ではなく Authorization ヘッダで送る。
     // クエリだと `RUST_LOG=reqwest=debug` 等で URL がログ出力された際に

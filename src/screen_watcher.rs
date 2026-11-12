@@ -6,7 +6,8 @@
 //! 差分を検出する。副次効果としてモニターのホットプラグ・解像度変更にも追従できる。
 //!
 //! ## 設計
-//! - **トリガー**: 壁紙更新イベント（`trigger_tx.send(())` 経由）
+//! - **トリガー**: 壁紙更新イベント（`trigger_tx.send(())` 経由）と、5 分ごとの定期確認
+//!   （一時停止中は壁紙更新が来ないので、それだけだと抜き差しに追従できない）
 //! - **スロットル**: 連続呼び出しは最低 60 秒間隔まで間引く。短い rotation
 //!   interval （例: 10 秒）でも kscreen-doctor を叩きすぎないようにする。
 //! - 環境変数 `KABEKAMI_SCREEN` が正しく設定されている場合は無効化（ユーザー上書きを尊重。
@@ -28,6 +29,9 @@ use crate::tray::TrayCmd;
 /// 連続検出の最小間隔。短い rotation interval での kscreen-doctor 連打を防ぐ。
 const MIN_INTERVAL: Duration = Duration::from_secs(60);
 
+/// 壁紙の適用が無くても検出し直す間隔。
+const POLL_INTERVAL: Duration = Duration::from_secs(300);
+
 /// 画面構成検出ウォッチャーをバックグラウンドで起動する。
 ///
 /// - `Some(trigger_tx)` を返した場合、`trigger_tx.send(())` で検出を要求できる。
@@ -48,7 +52,13 @@ pub fn spawn(
         let mut current = initial;
         let mut last_detect: Option<Instant> = None;
 
-        while trigger_rx.recv().await.is_some() {
+        loop {
+            // 壁紙の適用が無い間（一時停止中・長い切り替え間隔）も POLL_INTERVAL ごとに
+            // 確かめる。待つのは適用の合図か時間切れの早い方。
+            // ponytail: ポーリング。即時に追従させるなら KScreen の D-Bus シグナルを購読する。
+            if let Ok(None) = tokio::time::timeout(POLL_INTERVAL, trigger_rx.recv()).await {
+                break; // 送信端が落ちた（メインループ終了）
+            }
             // バックログをドレイン（連続トリガーは 1 回にまとめる）
             while trigger_rx.try_recv().is_ok() {}
 

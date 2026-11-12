@@ -19,7 +19,7 @@ A KDE Plasma wallpaper rotation daemon written in Rust.
 |------|------------|
 | OS | Linux |
 | DE | KDE Plasma 5.7+ or Plasma 6 |
-| Rust | 1.88+ (edition 2021; required by the locked `image` crate) |
+| Rust | 1.89+ (edition 2021; uses `File::lock`) |
 | External | `plasma-apply-wallpaperimage` (bundled with `plasma-workspace`) |
 | D-Bus | Session bus (required for tray icon) |
 | `kscreen-doctor` | Optional — needed for multi-monitor auto-detection (`kscreen` package) |
@@ -77,6 +77,7 @@ paru -S kabekami-git
    [Desktop Entry]
    Name=kabekami
    Exec=kabekami
+   Icon=kabekami
    Type=Application
    X-KDE-autostart-phase=2
    EOF

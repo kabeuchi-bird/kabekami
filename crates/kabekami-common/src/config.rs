@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 
 /// 壁紙切り替え間隔の下限（秒）。
 pub const MIN_INTERVAL_SECS: u64 = 5;
+/// 壁紙切り替え間隔の上限（秒、1 年）。極端な値は `Instant` への加算があふれて
+/// デーモンが panic する。
+pub const MAX_INTERVAL_SECS: u64 = 365 * 24 * 3600;
 
 // 各セクションは `#[serde(default)]` で、欠けたキーを `Default` 実装の値で埋める。
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -171,6 +174,22 @@ fn default_true() -> bool {
     true
 }
 
+/// toml の解析エラーを「行番号 + 説明」だけにする。
+///
+/// `toml::de::Error` の Display はエラー位置の入力行をそのまま含む。
+/// `api_key = "..."` の行で構文エラーになるとキーが起動失敗の通知や
+/// WARN 通知に出てしまうため、入力の抜粋は落とす。
+fn parse_error_summary(text: &str, e: &toml::de::Error) -> String {
+    match e.span() {
+        Some(span) => {
+            let start = span.start.min(text.len());
+            let line = text.as_bytes()[..start].iter().filter(|&&b| b == b'\n').count() + 1;
+            format!("line {line}: {}", e.message())
+        }
+        None => e.message().to_string(),
+    }
+}
+
 impl Config {
     /// `~/.config/kabekami/config.toml` を読み込む。
     /// ファイルが存在しない場合はデフォルト値を返す。
@@ -192,6 +211,7 @@ impl Config {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
         let mut cfg: Self = toml::from_str(&text)
+            .map_err(|e| anyhow::anyhow!(parse_error_summary(&text, &e)))
             .with_context(|| format!("failed to parse config file: {}", path.display()))?;
         cfg.normalize();
         Ok(cfg)
@@ -268,6 +288,14 @@ impl Config {
                 MIN_INTERVAL_SECS
             );
             self.rotation.interval_secs = MIN_INTERVAL_SECS;
+        }
+        if self.rotation.interval_secs > MAX_INTERVAL_SECS {
+            tracing::warn!(
+                "interval_secs {} is above maximum {}, clamping",
+                self.rotation.interval_secs,
+                MAX_INTERVAL_SECS
+            );
+            self.rotation.interval_secs = MAX_INTERVAL_SECS;
         }
 
         // f32 フィールドは TOML 直編集で `nan` / `inf` が入りうる。
@@ -367,6 +395,16 @@ impl ProviderKind {
             Self::Bing => "bing",
             Self::Unsplash => "unsplash",
             Self::Wallhaven => "wallhaven",
+        }
+    }
+
+    /// 1 回の取得で扱える枚数の上限（API の制限）。取得側の切り詰めと GUI の
+    /// 入力範囲の両方がこれを使う。
+    pub fn max_count(self) -> u32 {
+        match self {
+            Self::Bing => 8,
+            Self::Unsplash => 30,
+            Self::Wallhaven => 24,
         }
     }
 }
@@ -572,6 +610,17 @@ mod tests {
     use super::*;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
+    /// 解析エラーに入力行（秘密情報を含みうる）を載せない。
+    #[test]
+    fn parse_error_omits_source_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[general]\n\n[[online.sources]]\napi_key = \"s3cret\" extra\n").unwrap();
+        let msg = format!("{:#}", Config::load_from(&path).unwrap_err());
+        assert!(!msg.contains("s3cret"), "{msg}");
+        assert!(msg.contains("line 4"), "{msg}");
+    }
+
     // Serialises all tests that mutate environment variables.
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -643,6 +692,10 @@ max_size_mb = 123
         cfg.rotation.interval_secs = 1;
         cfg.normalize();
         assert_eq!(cfg.rotation.interval_secs, MIN_INTERVAL_SECS);
+
+        cfg.rotation.interval_secs = i64::MAX as u64;
+        cfg.normalize();
+        assert_eq!(cfg.rotation.interval_secs, MAX_INTERVAL_SECS);
     }
 
     #[test]
