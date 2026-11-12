@@ -146,11 +146,11 @@ fn events_for(kind: EventKind, path: PathBuf, recursive: bool) -> Vec<WatchEvent
         kind,
         EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From))
     );
-    // ponytail: ハードリンクも作成だけで close が来ない。次の再走査まで拾わない。
-    //           要るなら作成時に nlink > 1 を見る。
+    // シンボリックリンクとハードリンク（nlink > 1）は作成だけで close が来ないが、
+    // 中身は既に書き終わっているので作成で拾う。新規に書かれるファイルは nlink == 1。
     let image_ready = moved_in
         || matches!(kind, EventKind::Access(AccessKind::Close(AccessMode::Write)))
-        || (matches!(kind, EventKind::Create(CreateKind::File)) && path.is_symlink());
+        || (matches!(kind, EventKind::Create(CreateKind::File)) && is_link(&path));
     if vanished {
         vec![WatchEvent::Removed(path)]
     } else if image_ready && crate::scanner::is_image(&path) {
@@ -164,6 +164,13 @@ fn events_for(kind: EventKind, path: PathBuf, recursive: bool) -> Vec<WatchEvent
     } else {
         Vec::new()
     }
+}
+
+/// 作成の時点で中身が揃っているリンク（シンボリックリンク・ハードリンク）か。
+fn is_link(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|m| m.file_type().is_symlink() || m.nlink() > 1)
 }
 
 /// 設定ファイル（`~/.config/kabekami/config.toml`）の変更を監視する。
@@ -264,6 +271,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let link = dir.path().join("link.jpg");
         std::os::unix::fs::symlink("/pics/a.jpg", &link).unwrap();
+        assert_eq!(
+            added(events_for(EventKind::Create(CreateKind::File), link.clone(), true)),
+            vec![link]
+        );
+    }
+
+    /// ハードリンクも close が来ないので、作成で拾う。
+    #[test]
+    fn hardlinked_images_are_added_on_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let orig = dir.path().join("a.jpg");
+        std::fs::write(&orig, b"x").unwrap();
+        let link = dir.path().join("b.jpg");
+        std::fs::hard_link(&orig, &link).unwrap();
         assert_eq!(
             added(events_for(EventKind::Create(CreateKind::File), link.clone(), true)),
             vec![link]

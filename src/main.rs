@@ -1049,7 +1049,18 @@ async fn apply_and_notify(ctx: &mut ApplyCtx<'_>, path: &Path, log_ctx: &str) {
         tracing::error!(error = %e, "{}", log_ctx);
         let msg = e.to_string();
         ctx.notifier.error(&msg, Some(path)).await;
-        update_tray(ctx.tray_handle, move |t| t.last_error = Some(msg)).await;
+        // 読めない画像を外した結果、一覧が空になっていることがある。古い枚数・画像名を
+        // 残すと、もう無い画像への操作がトレイに出続ける。空でなければ画像名は
+        // 画面に出ている（最後に適用できた）もののまま。
+        let count = ctx.scheduler.image_count();
+        update_tray(ctx.tray_handle, move |t| {
+            t.last_error = Some(msg);
+            t.image_count = count;
+            if count == 0 {
+                t.current_name.clear();
+            }
+        })
+        .await;
     } else {
         ctx.notifier.clear();
         let name = tray_display_name(Some(path));

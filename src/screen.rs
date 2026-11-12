@@ -129,7 +129,8 @@ fn parse_json_monitors(cfg: &KScreenJson) -> Vec<Monitor> {
             }
             // モードの大きさは回転前のもの。90° 回した（縦置きの）モニターは
             // 縦横を入れ替えないと、横長の壁紙を作ってしまう。
-            let (width, height) = if matches!(o.rotation, 2 | 8) {
+            // KScreen::Output::Rotation: Left=2, Right=8, Flipped90=32, Flipped270=128。
+            let (width, height) = if matches!(o.rotation, 2 | 8 | 32 | 128) {
                 (mode.size.height, mode.size.width)
             } else {
                 (mode.size.width, mode.size.height)
@@ -172,10 +173,13 @@ mod tests {
         assert_eq!(json_first(text), Some((2560, 1440)));
     }
 
-    /// 縦置き（左右 90° 回転）は縦横を入れ替える。上下反転と回転なしはそのまま。
+    /// 縦置き（左右 90° 回転、反転付きも）は縦横を入れ替える。上下反転・反転のみ・回転なしはそのまま。
     #[test]
     fn json_swaps_size_for_rotated_outputs() {
-        for (rotation, expected) in [(1, (2560, 1440)), (2, (1440, 2560)), (4, (2560, 1440)), (8, (1440, 2560))] {
+        for (rotation, expected) in [
+            (1, (2560, 1440)), (2, (1440, 2560)), (4, (2560, 1440)), (8, (1440, 2560)),
+            (16, (2560, 1440)), (32, (1440, 2560)), (64, (2560, 1440)), (128, (1440, 2560)),
+        ] {
             let text = format!(
                 r#"{{"outputs": [{{"name": "DP-1", "enabled": true, "rotation": {rotation},
                     "currentModeId": "m",
