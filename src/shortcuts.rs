@@ -34,6 +34,10 @@ trait KGlobalAccel {
     /// `SetShortcutFlag`（`SET_PRESENT` を参照）。
     #[zbus(name = "setShortcut")]
     fn set_shortcut(&self, action_id: Vec<String>, keys: Vec<i32>, flags: u32) -> zbus::Result<Vec<i32>>;
+
+    /// アクションを「提供中でない」に戻し、キーの grab を外す。
+    #[zbus(name = "setInactive")]
+    fn set_inactive(&self, action_id: Vec<String>) -> zbus::Result<()>;
 }
 
 /// `SetShortcutFlag::SetPresent`。アクションを「提供中」にしてキーを grab させる。
@@ -57,16 +61,37 @@ trait KGlobalAccelComponent {
     ) -> zbus::Result<()>;
 }
 
+/// present にした登録済みのアクション。終了時に `deactivate` で grab を外す。
+///
+/// kglobalaccel はクライアントの切断を見ないので、外さないと kabekami の終了後も
+/// 割り当てたキーが押さえられたままになる（KDE の KGlobalAccel ライブラリも
+/// アクションの破棄時に `setInactive` を呼ぶ）。異常終了時は呼べないが、次の起動で
+/// また present にするので食い違いは残らない。
+pub struct Shortcuts {
+    accel: KGlobalAccelProxy<'static>,
+    action_ids: Vec<Vec<String>>,
+}
+
+impl Shortcuts {
+    pub async fn deactivate(self) {
+        for id in self.action_ids {
+            if let Err(e) = self.accel.set_inactive(id.clone()).await {
+                tracing::warn!("shortcuts: failed to deactivate {}: {}", id[1], e);
+            }
+        }
+    }
+}
+
 /// グローバルショートカット監視をバックグラウンドタスクとして起動する。
 ///
-/// kglobalaccel が利用できない環境では警告を出してサイレントに無効化される。
+/// kglobalaccel が利用できない環境では警告を出してサイレントに無効化され、`None` を返す。
 /// ショートカットが押されると対応する `TrayCmd` を `tx` に送信する。
-pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>, lang: Lang) {
+pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>, lang: Lang) -> Option<Shortcuts> {
     let conn = match zbus::Connection::session().await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("shortcuts: session bus unavailable ({})", e);
-            return;
+            return None;
         }
     };
 
@@ -74,7 +99,7 @@ pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>, lang: Lang) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("shortcuts: kglobalaccel proxy unavailable ({})", e);
-            return;
+            return None;
         }
     };
 
@@ -88,6 +113,7 @@ pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>, lang: Lang) {
         ("trash_current",     s.delete_current),
         ("blacklist_current", s.blacklist_current),
     ];
+    let mut shortcuts = Shortcuts { accel, action_ids: Vec::new() };
     for (action_id, display_name) in actions {
         let id = vec![
             COMPONENT.to_string(),
@@ -97,12 +123,14 @@ pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>, lang: Lang) {
         ];
         // `doRegister` だけではアクションが present にならず、キーを割り当てても
         // grab されない（設定にも保存されない）。`setShortcut` まで呼んで有効にする。
+        let accel = &shortcuts.accel;
         let registered = async {
             accel.do_register(id.clone()).await?;
-            accel.set_shortcut(id, Vec::new(), SET_PRESENT).await
+            accel.set_shortcut(id.clone(), Vec::new(), SET_PRESENT).await
         };
-        if let Err(e) = registered.await {
-            tracing::warn!("shortcuts: failed to register {}: {}", action_id, e);
+        match registered.await {
+            Ok(_) => shortcuts.action_ids.push(id),
+            Err(e) => tracing::warn!("shortcuts: failed to register {}: {}", action_id, e),
         }
     }
 
@@ -110,7 +138,8 @@ pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>, lang: Lang) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("shortcuts: component proxy unavailable ({})", e);
-            return;
+            shortcuts.deactivate().await;
+            return None;
         }
     };
 
@@ -118,7 +147,8 @@ pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>, lang: Lang) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("shortcuts: signal stream unavailable ({})", e);
-            return;
+            shortcuts.deactivate().await;
+            return None;
         }
     };
 
@@ -144,4 +174,5 @@ pub async fn spawn_shortcut_watcher(tx: UnboundedSender<TrayCmd>, lang: Lang) {
             let _ = tx.send(cmd);
         }
     });
+    Some(shortcuts)
 }
